@@ -1,0 +1,23 @@
+{
+  "cli.about": "Spusťte artefakty SoRLa .gtpack jako systémy záznamů Greentic.",
+  "cli.command.aliases.about": "Spravovat aliasy nasazení.",
+  "cli.command.deployments.about": "Spravovat místní nasazení SORX.",
+  "cli.command.doctor.about": "Ověřte SoRLa .gtpack pro použití v runtime SORX.",
+  "cli.command.help.about": "Vypsat tuto zprávu nebo nápovědu k zadaným podřízeným příkazům.",
+  "cli.command.inspect.about": "Zkontrolujte SoRLa .gtpack a vypište stabilní metadata.",
+  "cli.command.mcp-tools.about": "Vypsat nástroje MCP deklarované v .gtpack SoRLa.",
+  "cli.command.mcp.about": "Příkazy běhového prostředí MCP.",
+  "cli.command.routes.about": "Vypište trasy koncových bodů deklarované v SoRLa .gtpack.",
+  "cli.command.run.about": "Alias pro start.",
+  "cli.command.start.about": "Spusťte runtime SORX ze SoRLa .gtpack a odpovědí při spuštění.",
+  "cli.command.validate.about": "Spustit validační sady vložené v balíčku.",
+  "cli.command.validation.about": "Příkazy pro validační zprávy.",
+  "cli.command.webhook.about": "Ověřit nebo znovu přehrát ukázky webhooku publikování GHCR.",
+  "cli.help.template": "{about}\n\nPoužití: {usage}\n\nPříkazy:\n{subcommands}\n\nMožnosti:\n{options}",
+  "cli.option.help.help": "Vypsat nápovědu.",
+  "cli.option.locale.help": "Kód národního prostředí pro lokalizovaný text CLI, například en nebo es.",
+  "cli.option.non_interactive.help": "Spustit bez interaktivních výzev.",
+  "cli.option.registry.help": "Cesta k místnímu souboru JSON registru nasazení.",
+  "cli.option.version.help": "Vypsat verzi.",
+  "cli.output.greeting": "Ahoj, světe!"
+}

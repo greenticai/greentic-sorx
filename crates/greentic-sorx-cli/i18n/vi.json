@@ -1,0 +1,23 @@
+{
+  "cli.about": "Chạy các tạo tác SoRLa .gtpack như các hệ thống ghi nhận chính thức của Greentic.",
+  "cli.command.aliases.about": "Quản lý bí danh triển khai.",
+  "cli.command.deployments.about": "Quản lý các triển khai SORX cục bộ.",
+  "cli.command.doctor.about": "Xác thực một SoRLa .gtpack để sử dụng với runtime SORX.",
+  "cli.command.help.about": "In thông báo này hoặc phần trợ giúp của các lệnh con đã cho.",
+  "cli.command.inspect.about": "Kiểm tra một SoRLa .gtpack và in siêu dữ liệu ổn định.",
+  "cli.command.mcp-tools.about": "Liệt kê các công cụ MCP được khai báo bởi SoRLa .gtpack.",
+  "cli.command.mcp.about": "Các lệnh thời gian chạy MCP.",
+  "cli.command.routes.about": "Liệt kê các tuyến endpoint được khai báo bởi một SoRLa .gtpack.",
+  "cli.command.run.about": "Bí danh cho start.",
+  "cli.command.start.about": "Khởi động một runtime SORX từ một SoRLa .gtpack và các câu trả lời khởi động.",
+  "cli.command.validate.about": "Thực thi các bộ kiểm thử xác thực được nhúng trong pack.",
+  "cli.command.validation.about": "Các lệnh báo cáo xác thực.",
+  "cli.command.webhook.about": "Xác minh hoặc phát lại các fixture webhook phát hành GHCR.",
+  "cli.help.template": "{about}\n\nCách dùng: {usage}\n\nLệnh:\n{subcommands}\n\nTùy chọn:\n{options}",
+  "cli.option.help.help": "In trợ giúp.",
+  "cli.option.locale.help": "Mã locale cho văn bản CLI đã bản địa hóa, chẳng hạn như en hoặc es.",
+  "cli.option.non_interactive.help": "Chạy không có lời nhắc tương tác.",
+  "cli.option.registry.help": "Đường dẫn đến tệp JSON registry triển khai cục bộ.",
+  "cli.option.version.help": "In phiên bản.",
+  "cli.output.greeting": "Xin chào, thế giới!"
+}

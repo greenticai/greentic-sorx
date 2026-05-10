@@ -1,0 +1,170 @@
+{
+  "schema": "greentic.sorla.agent-gateway.v1",
+  "endpoints": [
+    {
+      "endpoint_id": "landlord.create",
+      "operation_id": "landlord.create",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/landlords/create",
+      "entity": "Landlord",
+      "collection": "landlords",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "landlord.get",
+      "operation_id": "landlord.get",
+      "operation": "get",
+      "method": "GET",
+      "path": "/v1/agent/landlords/{id}",
+      "entity": "Landlord",
+      "collection": "landlords",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "property.create",
+      "operation_id": "property.create",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/properties/create",
+      "entity": "Property",
+      "collection": "properties",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "unit.create",
+      "operation_id": "unit.create",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/units/create",
+      "entity": "Unit",
+      "collection": "units",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "tenant.create",
+      "operation_id": "tenant.create",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/tenants/create",
+      "entity": "Tenant",
+      "collection": "tenants",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "tenant.get",
+      "operation_id": "tenant.get",
+      "operation": "get",
+      "method": "GET",
+      "path": "/v1/agent/tenants/{id}",
+      "entity": "Tenant",
+      "collection": "tenants",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "tenant.update",
+      "operation_id": "tenant.update",
+      "operation": "update",
+      "method": "PATCH",
+      "path": "/v1/agent/tenants/{id}",
+      "entity": "Tenant",
+      "collection": "tenants",
+      "provider_binding": "store",
+      "risk": "medium"
+    },
+    {
+      "endpoint_id": "tenant.active_by_landlord",
+      "operation_id": "tenant.active_by_landlord",
+      "operation": "query",
+      "method": "GET",
+      "path": "/v1/agent/landlords/{landlord_id}/active-tenants/{active}",
+      "entity": "Tenant",
+      "collection": "tenants",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "tenancy.assign",
+      "operation_id": "tenancy.assign",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/tenancies/assign",
+      "entity": "Tenancy",
+      "collection": "tenancies",
+      "provider_binding": "store",
+      "risk": "medium"
+    },
+    {
+      "endpoint_id": "tenancy.get",
+      "operation_id": "tenancy.get",
+      "operation": "get",
+      "method": "GET",
+      "path": "/v1/agent/tenancies/{id}",
+      "entity": "Tenancy",
+      "collection": "tenancies",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "payment.record",
+      "operation_id": "payment.record",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/payments/record",
+      "entity": "Payment",
+      "collection": "payments",
+      "provider_binding": "store",
+      "risk": "medium"
+    },
+    {
+      "endpoint_id": "payment.get",
+      "operation_id": "payment.get",
+      "operation": "get",
+      "method": "GET",
+      "path": "/v1/agent/payments/{id}",
+      "entity": "Payment",
+      "collection": "payments",
+      "provider_binding": "store",
+      "risk": "low"
+    },
+    {
+      "endpoint_id": "payment.refund",
+      "operation_id": "payment.refund",
+      "operation": "delete",
+      "method": "POST",
+      "path": "/v1/agent/payments/{id}/refund",
+      "entity": "Payment",
+      "collection": "payments",
+      "provider_binding": "store",
+      "risk": "high"
+    },
+    {
+      "endpoint_id": "maintenance.open",
+      "operation_id": "maintenance.open",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/maintenance/open",
+      "entity": "MaintenanceRequest",
+      "collection": "maintenance_requests",
+      "provider_binding": "store",
+      "risk": "medium"
+    },
+    {
+      "endpoint_id": "maintenance.get",
+      "operation_id": "maintenance.get",
+      "operation": "get",
+      "method": "GET",
+      "path": "/v1/agent/maintenance/{id}",
+      "entity": "MaintenanceRequest",
+      "collection": "maintenance_requests",
+      "provider_binding": "store",
+      "risk": "low"
+    }
+  ]
+}

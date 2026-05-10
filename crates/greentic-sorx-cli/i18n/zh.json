@@ -1,0 +1,23 @@
+{
+  "cli.about": "将 SoRLa .gtpack 工件作为 Greentic 记录系统运行。",
+  "cli.command.aliases.about": "管理部署别名。",
+  "cli.command.deployments.about": "管理本地 SORX 部署。",
+  "cli.command.doctor.about": "验证 SoRLa .gtpack 是否可供 SORX 运行时使用。",
+  "cli.command.help.about": "打印此消息或给定子命令的帮助。",
+  "cli.command.inspect.about": "检查 SoRLa .gtpack 并打印稳定的元数据。",
+  "cli.command.mcp-tools.about": "列出 SoRLa .gtpack 声明的 MCP 工具。",
+  "cli.command.mcp.about": "MCP 运行时命令。",
+  "cli.command.routes.about": "列出 SoRLa .gtpack 声明的端点路由。",
+  "cli.command.run.about": "start 的别名。",
+  "cli.command.start.about": "从 SoRLa .gtpack 和启动答案启动 SORX 运行时。",
+  "cli.command.validate.about": "执行包内嵌的验证套件。",
+  "cli.command.validation.about": "验证报告命令。",
+  "cli.command.webhook.about": "验证或重放 GHCR 发布 webhook 固件。",
+  "cli.help.template": "{about}\n\n用法：{usage}\n\n命令：\n{subcommands}\n\n选项：\n{options}",
+  "cli.option.help.help": "打印帮助。",
+  "cli.option.locale.help": "本地化 CLI 文本的区域设置代码，例如 en 或 es。",
+  "cli.option.non_interactive.help": "在无交互提示的情况下运行。",
+  "cli.option.registry.help": "本地部署注册表 JSON 文件的路径。",
+  "cli.option.version.help": "打印版本。",
+  "cli.output.greeting": "你好，世界！"
+}

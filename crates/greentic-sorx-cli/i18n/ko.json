@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack 아티팩트를 Greentic 기록 시스템으로 실행합니다.",
+  "cli.command.aliases.about": "배포 별칭을 관리합니다.",
+  "cli.command.deployments.about": "로컬 SORX 배포를 관리합니다.",
+  "cli.command.doctor.about": "SORX 런타임 사용을 위해 SoRLa .gtpack을 검증합니다.",
+  "cli.command.help.about": "이 메시지 또는 지정된 하위 명령의 도움말을 출력합니다.",
+  "cli.command.inspect.about": "SoRLa .gtpack을 검사하고 안정적인 메타데이터를 출력합니다.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack에서 선언한 MCP 도구를 나열합니다.",
+  "cli.command.mcp.about": "MCP 런타임 명령입니다.",
+  "cli.command.routes.about": "SoRLa .gtpack에서 선언한 엔드포인트 경로를 나열합니다.",
+  "cli.command.run.about": "start의 별칭입니다.",
+  "cli.command.start.about": "SoRLa .gtpack과 시작 응답으로 SORX 런타임을 시작합니다.",
+  "cli.command.validate.about": "팩에 포함된 검증 모음을 실행합니다.",
+  "cli.command.validation.about": "검증 보고서 명령입니다.",
+  "cli.command.webhook.about": "GHCR 게시 웹훅 픽스처를 확인하거나 재실행합니다.",
+  "cli.help.template": "{about}\n\n사용법: {usage}\n\n명령:\n{subcommands}\n\n옵션:\n{options}",
+  "cli.option.help.help": "도움말을 출력합니다.",
+  "cli.option.locale.help": "en 또는 es와 같은 현지화된 CLI 텍스트용 로캘 코드입니다.",
+  "cli.option.non_interactive.help": "대화형 프롬프트 없이 실행합니다.",
+  "cli.option.registry.help": "로컬 배포 레지스트리 JSON 파일의 경로입니다.",
+  "cli.option.version.help": "버전을 출력합니다.",
+  "cli.output.greeting": "안녕하세요, 세계!"
+}

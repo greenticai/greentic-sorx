@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa-.gtpack-Artefakte als Greentic-Systeme der Aufzeichnung ausführen.",
+  "cli.command.aliases.about": "Bereitstellungs-Aliasse verwalten.",
+  "cli.command.deployments.about": "Lokale SORX-Bereitstellungen verwalten.",
+  "cli.command.doctor.about": "Ein SoRLa-.gtpack für die Verwendung mit der SORX-Laufzeit validieren.",
+  "cli.command.help.about": "Diese Nachricht oder die Hilfe der angegebenen Unterbefehle ausgeben.",
+  "cli.command.inspect.about": "Ein SoRLa-.gtpack inspizieren und stabile Metadaten ausgeben.",
+  "cli.command.mcp-tools.about": "Von einem SoRLa-.gtpack deklarierte MCP-Tools auflisten.",
+  "cli.command.mcp.about": "MCP-Laufzeitbefehle.",
+  "cli.command.routes.about": "Von einem SoRLa-.gtpack deklarierte Endpunkt-Routen auflisten.",
+  "cli.command.run.about": "Alias für start.",
+  "cli.command.start.about": "Eine SORX-Laufzeit aus einem SoRLa-.gtpack und Startantworten starten.",
+  "cli.command.validate.about": "In Packs eingebettete Validierungssuiten ausführen.",
+  "cli.command.validation.about": "Befehle für Validierungsberichte.",
+  "cli.command.webhook.about": "GHCR-Veröffentlichungs-Webhook-Fixtures überprüfen oder erneut abspielen.",
+  "cli.help.template": "{about}\n\nVerwendung: {usage}\n\nBefehle:\n{subcommands}\n\nOptionen:\n{options}",
+  "cli.option.help.help": "Hilfe ausgeben.",
+  "cli.option.locale.help": "Locale-Code für lokalisierten CLI-Text, z. B. en oder es.",
+  "cli.option.non_interactive.help": "Ohne interaktive Eingabeaufforderungen ausführen.",
+  "cli.option.registry.help": "Pfad zur JSON-Datei der lokalen Bereitstellungsregistrierung.",
+  "cli.option.version.help": "Version ausgeben.",
+  "cli.output.greeting": "Hallo, Welt!"
+}

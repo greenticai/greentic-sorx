@@ -1,0 +1,29 @@
+[package]
+name = "greentic-sorx-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "SoRLa .gtpack loader, inspector, and doctor support for greentic-sorx."
+readme = "README.md"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "src/**",
+]
+
+[dependencies]
+ciborium.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

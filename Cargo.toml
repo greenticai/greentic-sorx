@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/greentic-sorx-cli",
+    "crates/greentic-sorx-core",
+    "crates/greentic-sorx-pack",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/greenticai/greentic-sorx"
+homepage = "https://github.com/greenticai/greentic-sorx"
+documentation = "https://docs.rs/greentic-sorx"
+keywords = ["greentic"]
+categories = ["command-line-utilities"]
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+ciborium = "0.2"
+criterion = "0.5"
+greentic-sorx-core = { version = "0.1.0", path = "crates/greentic-sorx-core" }
+greentic-sorx-pack = { version = "0.1.0", path = "crates/greentic-sorx-pack" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3"
+zip = "2"

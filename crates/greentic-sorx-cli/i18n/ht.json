@@ -1,0 +1,23 @@
+{
+  "cli.about": "Kouri atifak SoRLa .gtpack kòm sistèm dosye ofisyèl Greentic.",
+  "cli.command.aliases.about": "Jere alyas deplwaman yo.",
+  "cli.command.deployments.about": "Jere deplwaman SORX lokal yo.",
+  "cli.command.doctor.about": "Valide yon SoRLa .gtpack pou itilizasyon nan runtime SORX.",
+  "cli.command.help.about": "Enprime mesaj sa a oswa èd pou soukòmand yo bay la.",
+  "cli.command.inspect.about": "Enspekte yon SoRLa .gtpack epi enprime metadata ki estab.",
+  "cli.command.mcp-tools.about": "Lis zouti MCP yon .gtpack SoRLa deklare.",
+  "cli.command.mcp.about": "Kòmand egzekisyon MCP.",
+  "cli.command.routes.about": "Lis wout endpoint yon SoRLa .gtpack deklare.",
+  "cli.command.run.about": "Alyas pou start.",
+  "cli.command.start.about": "Kòmanse yon runtime SORX apati yon SoRLa .gtpack ak repons demaraj yo.",
+  "cli.command.validate.about": "Egzekite seri validasyon ki entegre nan pake a.",
+  "cli.command.validation.about": "Kòmand rapò validasyon.",
+  "cli.command.webhook.about": "Verifye oswa rejwe fiksti webhook piblikasyon GHCR yo.",
+  "cli.help.template": "{about}\n\nItilizasyon: {usage}\n\nKòmand:\n{subcommands}\n\nOpsyon:\n{options}",
+  "cli.option.help.help": "Enprime èd.",
+  "cli.option.locale.help": "Kòd lokal pou tèks CLI lokalize, tankou en oswa es.",
+  "cli.option.non_interactive.help": "Kouri san envit entèaktif.",
+  "cli.option.registry.help": "Chemen pou fichye JSON rejis deplwaman lokal la.",
+  "cli.option.version.help": "Enprime vèsyon.",
+  "cli.output.greeting": "Bonjou, lemonn!"
+}

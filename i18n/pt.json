@@ -1,0 +1,23 @@
+{
+  "cli.about": "Execute artefatos .gtpack SoRLa como sistemas de registro Greentic.",
+  "cli.command.aliases.about": "Gerenciar aliases de implantação.",
+  "cli.command.deployments.about": "Gerenciar implantações locais do SORX.",
+  "cli.command.doctor.about": "Valide um .gtpack SoRLa para uso no runtime SORX.",
+  "cli.command.help.about": "Imprimir esta mensagem ou a ajuda do(s) subcomando(s) fornecido(s).",
+  "cli.command.inspect.about": "Inspecione um .gtpack SoRLa e imprima metadados estáveis.",
+  "cli.command.mcp-tools.about": "Listar ferramentas MCP declaradas por um .gtpack SoRLa.",
+  "cli.command.mcp.about": "Comandos de runtime MCP.",
+  "cli.command.routes.about": "Liste as rotas de endpoint declaradas por um .gtpack SoRLa.",
+  "cli.command.run.about": "Alias para start.",
+  "cli.command.start.about": "Inicie um runtime SORX a partir de um .gtpack SoRLa e respostas de inicialização.",
+  "cli.command.validate.about": "Executar suítes de validação incorporadas ao pack.",
+  "cli.command.validation.about": "Comandos de relatório de validação.",
+  "cli.command.webhook.about": "Verificar ou reproduzir fixtures de webhook de publicação GHCR.",
+  "cli.help.template": "{about}\n\nUso: {usage}\n\nComandos:\n{subcommands}\n\nOpções:\n{options}",
+  "cli.option.help.help": "Imprimir ajuda.",
+  "cli.option.locale.help": "Código de localidade para texto localizado da CLI, como en ou es.",
+  "cli.option.non_interactive.help": "Executar sem prompts interativos.",
+  "cli.option.registry.help": "Caminho para o arquivo JSON do registro de implantação local.",
+  "cli.option.version.help": "Imprimir versão.",
+  "cli.output.greeting": "Olá, mundo!"
+}

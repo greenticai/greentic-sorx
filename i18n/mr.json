@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack कलाकृती Greentic सिस्टम्स ऑफ रेकॉर्ड म्हणून चालवा.",
+  "cli.command.aliases.about": "उपयोजन उपनावे व्यवस्थापित करा.",
+  "cli.command.deployments.about": "स्थानिक SORX उपयोजने व्यवस्थापित करा.",
+  "cli.command.doctor.about": "SORX रनटाइम वापरासाठी SoRLa .gtpack सत्यापित करा.",
+  "cli.command.help.about": "हा संदेश किंवा दिलेल्या उपकमांडची/उपकमांड्सची मदत छापा.",
+  "cli.command.inspect.about": "SoRLa .gtpack तपासा आणि स्थिर मेटाडेटा छापा.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack द्वारे घोषित MCP साधनांची यादी करा.",
+  "cli.command.mcp.about": "MCP रनटाइम कमांड्स.",
+  "cli.command.routes.about": "SoRLa .gtpack द्वारे घोषित endpoint routes सूचीबद्ध करा.",
+  "cli.command.run.about": "start साठी उपनाव.",
+  "cli.command.start.about": "SoRLa .gtpack आणि startup उत्तरे वापरून SORX रनटाइम सुरू करा.",
+  "cli.command.validate.about": "पॅकमध्ये अंतर्भूत प्रमाणीकरण संच चालवा.",
+  "cli.command.validation.about": "प्रमाणीकरण अहवाल कमांड्स.",
+  "cli.command.webhook.about": "GHCR प्रकाशन webhook fixtures सत्यापित करा किंवा पुन्हा चालवा.",
+  "cli.help.template": "{about}\n\nवापर: {usage}\n\nकमांड्स:\n{subcommands}\n\nपर्याय:\n{options}",
+  "cli.option.help.help": "मदत छापा.",
+  "cli.option.locale.help": "स्थानिकीकृत CLI मजकुरासाठी लोकेल कोड, जसे en किंवा es.",
+  "cli.option.non_interactive.help": "परस्परसंवादी prompts शिवाय चालवा.",
+  "cli.option.registry.help": "स्थानिक उपयोजन registry JSON फाइलचा पथ.",
+  "cli.option.version.help": "आवृत्ती छापा.",
+  "cli.output.greeting": "नमस्कार, जग!"
+}

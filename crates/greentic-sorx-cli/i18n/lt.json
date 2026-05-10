@@ -1,0 +1,23 @@
+{
+  "cli.about": "Vykdykite SoRLa .gtpack artefaktus kaip Greentic įrašų sistemas.",
+  "cli.command.aliases.about": "Tvarkyti diegimo pseudonimus.",
+  "cli.command.deployments.about": "Tvarkyti vietinius SORX diegimus.",
+  "cli.command.doctor.about": "Patikrinkite SoRLa .gtpack tinkamumą naudoti SORX vykdymo aplinkoje.",
+  "cli.command.help.about": "Išspausdinti šį pranešimą arba nurodytos (-ų) pakomandės (-ių) pagalbą.",
+  "cli.command.inspect.about": "Patikrinkite SoRLa .gtpack ir išveskite stabilius metaduomenis.",
+  "cli.command.mcp-tools.about": "Išvardyti MCP įrankius, deklaruotus SoRLa .gtpack.",
+  "cli.command.mcp.about": "MCP vykdymo aplinkos komandos.",
+  "cli.command.routes.about": "Išvardykite galinių taškų maršrutus, deklaruotus SoRLa .gtpack.",
+  "cli.command.run.about": "Start komandos pseudonimas.",
+  "cli.command.start.about": "Paleiskite SORX vykdymo aplinką iš SoRLa .gtpack ir paleisties atsakymų.",
+  "cli.command.validate.about": "Vykdyti pakete įterptus patikros rinkinius.",
+  "cli.command.validation.about": "Patikros ataskaitų komandos.",
+  "cli.command.webhook.about": "Patikrinti arba pakartoti GHCR publikavimo webhook fikstūras.",
+  "cli.help.template": "{about}\n\nNaudojimas: {usage}\n\nKomandos:\n{subcommands}\n\nParinktys:\n{options}",
+  "cli.option.help.help": "Išspausdinti pagalbą.",
+  "cli.option.locale.help": "Lokalės kodas lokalizuotam CLI tekstui, pvz., en arba es.",
+  "cli.option.non_interactive.help": "Vykdyti be interaktyvių raginimų.",
+  "cli.option.registry.help": "Kelias į vietinio diegimo registro JSON failą.",
+  "cli.option.version.help": "Išspausdinti versiją.",
+  "cli.output.greeting": "Sveikas, pasauli!"
+}

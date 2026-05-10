@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack アーティファクトを Greentic の記録システムとして実行します。",
+  "cli.command.aliases.about": "デプロイメントエイリアスを管理します。",
+  "cli.command.deployments.about": "ローカルの SORX デプロイメントを管理します。",
+  "cli.command.doctor.about": "SORX ランタイムで使用するために SoRLa .gtpack を検証します。",
+  "cli.command.help.about": "このメッセージ、または指定されたサブコマンドのヘルプを表示します。",
+  "cli.command.inspect.about": "SoRLa .gtpack を検査し、安定したメタデータを出力します。",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack で宣言された MCP ツールを一覧表示します。",
+  "cli.command.mcp.about": "MCP ランタイムコマンドです。",
+  "cli.command.routes.about": "SoRLa .gtpack によって宣言されたエンドポイントルートを一覧表示します。",
+  "cli.command.run.about": "start のエイリアスです。",
+  "cli.command.start.about": "SoRLa .gtpack と起動時の回答から SORX ランタイムを開始します。",
+  "cli.command.validate.about": "パックに埋め込まれた検証スイートを実行します。",
+  "cli.command.validation.about": "検証レポートコマンドです。",
+  "cli.command.webhook.about": "GHCR 公開 Webhook フィクスチャを検証または再生します。",
+  "cli.help.template": "{about}\n\n使用法: {usage}\n\nコマンド:\n{subcommands}\n\nオプション:\n{options}",
+  "cli.option.help.help": "ヘルプを表示します。",
+  "cli.option.locale.help": "ローカライズされた CLI テキスト用のロケールコードです。例: en や es。",
+  "cli.option.non_interactive.help": "対話式プロンプトなしで実行します。",
+  "cli.option.registry.help": "ローカルデプロイメントレジストリ JSON ファイルへのパスです。",
+  "cli.option.version.help": "バージョンを表示します。",
+  "cli.output.greeting": "こんにちは、世界！"
+}

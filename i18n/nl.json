@@ -1,0 +1,23 @@
+{
+  "cli.about": "Voer SoRLa .gtpack-artifacten uit als Greentic-systemen van registratie.",
+  "cli.command.aliases.about": "Beheer deployment-aliassen.",
+  "cli.command.deployments.about": "Beheer lokale SORX-deployments.",
+  "cli.command.doctor.about": "Valideer een SoRLa .gtpack voor gebruik met de SORX-runtime.",
+  "cli.command.help.about": "Druk dit bericht af of de help van de opgegeven subopdracht(en).",
+  "cli.command.inspect.about": "Inspecteer een SoRLa .gtpack en druk stabiele metadata af.",
+  "cli.command.mcp-tools.about": "Geef MCP-tools weer die door een SoRLa .gtpack zijn gedeclareerd.",
+  "cli.command.mcp.about": "MCP-runtimeopdrachten.",
+  "cli.command.routes.about": "Geef endpointroutes weer die door een SoRLa .gtpack zijn gedeclareerd.",
+  "cli.command.run.about": "Alias voor start.",
+  "cli.command.start.about": "Start een SORX-runtime vanuit een SoRLa .gtpack en opstartantwoorden.",
+  "cli.command.validate.about": "Voer in packs ingebedde validatiesuites uit.",
+  "cli.command.validation.about": "Validatierapportopdrachten.",
+  "cli.command.webhook.about": "Verifieer of speel GHCR-publicatiewebhookfixtures opnieuw af.",
+  "cli.help.template": "{about}\n\nGebruik: {usage}\n\nOpdrachten:\n{subcommands}\n\nOpties:\n{options}",
+  "cli.option.help.help": "Druk help af.",
+  "cli.option.locale.help": "Localecode voor gelokaliseerde CLI-tekst, zoals en of es.",
+  "cli.option.non_interactive.help": "Uitvoeren zonder interactieve prompts.",
+  "cli.option.registry.help": "Pad naar het lokale deploymentregister-JSON-bestand.",
+  "cli.option.version.help": "Druk versie af.",
+  "cli.output.greeting": "Hallo, wereld!"
+}

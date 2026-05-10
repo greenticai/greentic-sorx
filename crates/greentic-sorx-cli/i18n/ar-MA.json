@@ -1,0 +1,23 @@
+{
+  "cli.about": "شغّل artifacts ديال SoRLa .gtpack كنُظم سجل رسمية ديال Greentic.",
+  "cli.command.aliases.about": "دبّر الأسماء البديلة ديال النشر.",
+  "cli.command.deployments.about": "دبّر نشريات SORX المحلية.",
+  "cli.command.doctor.about": "تحقّق من SoRLa .gtpack باش يتستعمل فـ SORX runtime.",
+  "cli.command.help.about": "طبع هاد الرسالة أو المساعدة ديال الأمر/الأوامر الفرعية المعطاة.",
+  "cli.command.inspect.about": "فحص SoRLa .gtpack وطبع metadata ثابتة.",
+  "cli.command.mcp-tools.about": "عرض أدوات MCP المصرّح بها من طرف .gtpack ديال SoRLa.",
+  "cli.command.mcp.about": "أوامر وقت تشغيل MCP.",
+  "cli.command.routes.about": "عرض لائحة ديال endpoint routes المصرّح بها فـ SoRLa .gtpack.",
+  "cli.command.run.about": "اسم بديل لـ start.",
+  "cli.command.start.about": "بدّا SORX runtime من SoRLa .gtpack وأجوبة startup.",
+  "cli.command.validate.about": "نفّذ مجموعات التحقق المدمجة فالحزمة.",
+  "cli.command.validation.about": "أوامر تقارير التحقق.",
+  "cli.command.webhook.about": "تحقق أو عاود تشغيل عينات webhook ديال نشر GHCR.",
+  "cli.help.template": "{about}\n\nالاستعمال: {usage}\n\nالأوامر:\n{subcommands}\n\nالخيارات:\n{options}",
+  "cli.option.help.help": "طبع المساعدة.",
+  "cli.option.locale.help": "كود اللغة للنص المحلي ديال CLI، بحال en أو es.",
+  "cli.option.non_interactive.help": "شغّل بلا مطالبات تفاعلية.",
+  "cli.option.registry.help": "المسار لملف JSON ديال سجل النشر المحلي.",
+  "cli.option.version.help": "طبع النسخة.",
+  "cli.output.greeting": "مرحبا، العالم!"
+}

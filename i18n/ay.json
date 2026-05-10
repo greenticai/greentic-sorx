@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack luratanaka Greentic sistemas de recordjama apnaqaña.",
+  "cli.command.aliases.about": "Uñt'ayawi sutinak apnaqaña.",
+  "cli.command.deployments.about": "Local SORX uñt'ayawinak apnaqaña.",
+  "cli.command.doctor.about": "SoRLa .gtpack ukaxa SORX runtime apnaqañatakixa chiqapa uñakipaña.",
+  "cli.command.help.about": "Aka yatiyaw qillqaña jan ukax churata subcomando(s) yanapt'awipa.",
+  "cli.command.inspect.about": "SoRLa .gtpack uñakipaña ukatxa estable metadata imprimir luraña.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack ukan yatiyata MCP herramientas ukanak lista luraña.",
+  "cli.command.mcp.about": "MCP runtime comandos.",
+  "cli.command.routes.about": "SoRLa .gtpack ukan yatiyatan endpoint routes lista luraña.",
+  "cli.command.run.about": "Start ukataki alias.",
+  "cli.command.start.about": "SoRLa .gtpack ukata startup respuestas ukanakampi SORX runtime qalltaña.",
+  "cli.command.validate.about": "Pack-embedded validación suites phuqhaña.",
+  "cli.command.validation.about": "Validación informe comandos.",
+  "cli.command.webhook.about": "GHCR publish webhook fixtures chiqanchaña jan ukax mayampi sarayaña.",
+  "cli.help.template": "{about}\n\nApnaqawi: {usage}\n\nComandos:\n{subcommands}\n\nAjllitanaka:\n{options}",
+  "cli.option.help.help": "Yanapt'a qillqaña.",
+  "cli.option.locale.help": "CLI qillqat localizataki locale código, en jan ukax es ukhamjama.",
+  "cli.option.non_interactive.help": "Interactivo jiskt'awinak jan utjkipan sarayaña.",
+  "cli.option.registry.help": "Local deployment registry JSON archivo thakhi.",
+  "cli.option.version.help": "Versión qillqaña.",
+  "cli.output.greeting": "Kamisaraki, akapacha!"
+}

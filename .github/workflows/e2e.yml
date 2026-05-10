@@ -1,0 +1,42 @@
+name: E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "E2E scenario"
+        default: "landlord-tenant"
+        required: true
+      provider:
+        description: "memory | foundationdb"
+        default: "memory"
+        required: true
+
+concurrency:
+  group: e2e-${{ github.ref }}-${{ inputs.scenario }}-${{ inputs.provider }}
+  cancel-in-progress: true
+
+jobs:
+  landlord-tenant:
+    if: ${{ inputs.scenario == 'landlord-tenant' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run landlord/tenant e2e
+        run: bash scripts/e2e/run-landlord-tenant.sh --provider "${{ inputs.provider }}"
+
+  unsupported:
+    if: ${{ inputs.scenario != 'landlord-tenant' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unsupported scenario
+        run: |
+          echo "Unsupported E2E scenario: ${{ inputs.scenario }}" >&2
+          exit 2

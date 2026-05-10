@@ -1,0 +1,23 @@
+{
+  "cli.about": "Pokreni SoRLa .gtpack artefakte kao Greentic sustave zapisa.",
+  "cli.command.aliases.about": "Upravljajte aliasima implementacije.",
+  "cli.command.deployments.about": "Upravljajte lokalnim SORX implementacijama.",
+  "cli.command.doctor.about": "Provjeri valjanost SoRLa .gtpack za upotrebu u SORX runtimeu.",
+  "cli.command.help.about": "Ispiši ovu poruku ili pomoć za zadane podnaredbe.",
+  "cli.command.inspect.about": "Pregledaj SoRLa .gtpack i ispiši stabilne metapodatke.",
+  "cli.command.mcp-tools.about": "Prikaži MCP alate deklarirane u SoRLa .gtpack.",
+  "cli.command.mcp.about": "Naredbe MCP izvršnog okruženja.",
+  "cli.command.routes.about": "Ispiši rute krajnjih točaka deklarirane u SoRLa .gtpack.",
+  "cli.command.run.about": "Alias za start.",
+  "cli.command.start.about": "Pokreni SORX runtime iz SoRLa .gtpack i odgovora pri pokretanju.",
+  "cli.command.validate.about": "Izvrši validacijske pakete ugrađene u paket.",
+  "cli.command.validation.about": "Naredbe izvješća o validaciji.",
+  "cli.command.webhook.about": "Provjeri ili ponovno reproduciraj GHCR publish webhook fixtures.",
+  "cli.help.template": "{about}\n\nUpotreba: {usage}\n\nNaredbe:\n{subcommands}\n\nOpcije:\n{options}",
+  "cli.option.help.help": "Ispiši pomoć.",
+  "cli.option.locale.help": "Kôd lokalizacije za lokalizirani CLI tekst, kao što su en ili es.",
+  "cli.option.non_interactive.help": "Pokreni bez interaktivnih upita.",
+  "cli.option.registry.help": "Putanja do lokalne JSON datoteke registra implementacija.",
+  "cli.option.version.help": "Ispiši verziju.",
+  "cli.output.greeting": "Pozdrav, svijete!"
+}

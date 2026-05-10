@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack කෘති Greentic පද්ධති-වාර්තා ලෙස ධාවනය කරන්න.",
+  "cli.command.aliases.about": "යෙදවුම් අන්වර්ථ නාම කළමනාකරණය කරන්න.",
+  "cli.command.deployments.about": "දේශීය SORX යෙදවුම් කළමනාකරණය කරන්න.",
+  "cli.command.doctor.about": "SORX runtime භාවිතය සඳහා SoRLa .gtpack එකක් වලංගු කරන්න.",
+  "cli.command.help.about": "මෙම පණිවිඩය හෝ දෙන ලද උපවිධාන(යන්)ගේ උපකාරය මුද්‍රණය කරන්න.",
+  "cli.command.inspect.about": "SoRLa .gtpack එකක් පරීක්ෂා කර ස්ථාවර metadata මුද්‍රණය කරන්න.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack එකක් විසින් ප්‍රකාශිත MCP මෙවලම් ලැයිස්තුගත කරන්න.",
+  "cli.command.mcp.about": "MCP ධාවනකාල විධාන.",
+  "cli.command.routes.about": "SoRLa .gtpack එකක් විසින් ප්‍රකාශිත endpoint routes ලැයිස්තුගත කරන්න.",
+  "cli.command.run.about": "start සඳහා alias එක.",
+  "cli.command.start.about": "SoRLa .gtpack එකක් සහ startup පිළිතුරු වලින් SORX runtime එකක් ආරම්භ කරන්න.",
+  "cli.command.validate.about": "පැක් තුළ ඇතුළත් වලංගුකරණ කට්ටල ක්‍රියාත්මක කරන්න.",
+  "cli.command.validation.about": "වලංගුකරණ වාර්තා විධාන.",
+  "cli.command.webhook.about": "GHCR ප්‍රකාශන webhook fixtures සත්‍යාපනය කරන්න හෝ නැවත ධාවනය කරන්න.",
+  "cli.help.template": "{about}\n\nභාවිතය: {usage}\n\nවිධාන:\n{subcommands}\n\nවිකල්ප:\n{options}",
+  "cli.option.help.help": "උපකාරය මුද්‍රණය කරන්න.",
+  "cli.option.locale.help": "දේශීයකරණය කළ CLI පෙළ සඳහා භාෂා කේතය, en හෝ es වැනි.",
+  "cli.option.non_interactive.help": "අන්තර්ක්‍රියාකාරී විමසුම් නොමැතිව ධාවනය කරන්න.",
+  "cli.option.registry.help": "දේශීය යෙදවුම් registry JSON ගොනුවට මාර්ගය.",
+  "cli.option.version.help": "අනුවාදය මුද්‍රණය කරන්න.",
+  "cli.output.greeting": "හෙලෝ, ලෝකය!"
+}

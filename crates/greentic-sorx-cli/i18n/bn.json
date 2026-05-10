@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack আর্টিফ্যাক্টগুলো Greentic সিস্টেম অব রেকর্ড হিসেবে চালান।",
+  "cli.command.aliases.about": "ডিপ্লয়মেন্ট অ্যালিয়াস পরিচালনা করুন।",
+  "cli.command.deployments.about": "স্থানীয় SORX ডিপ্লয়মেন্ট পরিচালনা করুন।",
+  "cli.command.doctor.about": "SORX রানটাইম ব্যবহারের জন্য একটি SoRLa .gtpack যাচাই করুন।",
+  "cli.command.help.about": "এই বার্তাটি বা প্রদত্ত সাবকমান্ড(গুলি)-এর সহায়তা প্রিন্ট করুন।",
+  "cli.command.inspect.about": "একটি SoRLa .gtpack পরিদর্শন করুন এবং স্থিতিশীল মেটাডেটা প্রিন্ট করুন।",
+  "cli.command.mcp-tools.about": "একটি SoRLa .gtpack দ্বারা ঘোষিত MCP টুলগুলির তালিকা দেখান।",
+  "cli.command.mcp.about": "MCP রানটাইম কমান্ড।",
+  "cli.command.routes.about": "একটি SoRLa .gtpack দ্বারা ঘোষিত এন্ডপয়েন্ট রুটগুলোর তালিকা দেখান।",
+  "cli.command.run.about": "start-এর উপনাম।",
+  "cli.command.start.about": "একটি SoRLa .gtpack এবং স্টার্টআপ উত্তর থেকে একটি SORX রানটাইম শুরু করুন।",
+  "cli.command.validate.about": "প্যাক-এম্বেডেড ভ্যালিডেশন স্যুট চালান।",
+  "cli.command.validation.about": "ভ্যালিডেশন রিপোর্ট কমান্ড।",
+  "cli.command.webhook.about": "GHCR প্রকাশ ওয়েবহুক ফিক্সচার যাচাই বা পুনরায় চালান।",
+  "cli.help.template": "{about}\n\nব্যবহার: {usage}\n\nকমান্ড:\n{subcommands}\n\nবিকল্প:\n{options}",
+  "cli.option.help.help": "সহায়তা প্রিন্ট করুন।",
+  "cli.option.locale.help": "স্থানীয়কৃত CLI টেক্সটের জন্য লোকেল কোড, যেমন en বা es।",
+  "cli.option.non_interactive.help": "ইন্টারঅ্যাকটিভ প্রম্পট ছাড়া চালান।",
+  "cli.option.registry.help": "স্থানীয় ডিপ্লয়মেন্ট রেজিস্ট্রি JSON ফাইলের পাথ।",
+  "cli.option.version.help": "সংস্করণ প্রিন্ট করুন।",
+  "cli.output.greeting": "হ্যালো, বিশ্ব!"
+}

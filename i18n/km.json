@@ -1,0 +1,23 @@
+{
+  "cli.about": "ដំណើរការ artifact SoRLa .gtpack ជាប្រព័ន្ធកំណត់ត្រាផ្លូវការរបស់ Greentic។",
+  "cli.command.aliases.about": "គ្រប់គ្រងឈ្មោះក្លែងក្លាយនៃការដាក់ឱ្យដំណើរការ។",
+  "cli.command.deployments.about": "គ្រប់គ្រងការដាក់ឱ្យដំណើរការ SORX មូលដ្ឋាន។",
+  "cli.command.doctor.about": "ផ្ទៀងផ្ទាត់ SoRLa .gtpack សម្រាប់ការប្រើប្រាស់ runtime SORX។",
+  "cli.command.help.about": "បោះពុម្ពសារនេះ ឬជំនួយរបស់អនុពាក្យបញ្ជាដែលបានផ្តល់។",
+  "cli.command.inspect.about": "ពិនិត្យ SoRLa .gtpack ហើយបោះពុម្ព metadata ដែលមានស្ថិរភាព។",
+  "cli.command.mcp-tools.about": "រាយបញ្ជីឧបករណ៍ MCP ដែលបានប្រកាសដោយ SoRLa .gtpack។",
+  "cli.command.mcp.about": "ពាក្យបញ្ជារបស់ MCP runtime។",
+  "cli.command.routes.about": "រាយបញ្ជី route endpoint ដែលបានប្រកាសដោយ SoRLa .gtpack។",
+  "cli.command.run.about": "ឈ្មោះកាត់សម្រាប់ start។",
+  "cli.command.start.about": "ចាប់ផ្តើម runtime SORX ពី SoRLa .gtpack និងចម្លើយពេលចាប់ផ្តើម។",
+  "cli.command.validate.about": "ប្រតិបត្តិសំណុំតេស្តផ្ទៀងផ្ទាត់ដែលបង្កប់ក្នុង pack។",
+  "cli.command.validation.about": "ពាក្យបញ្ជារបាយការណ៍ផ្ទៀងផ្ទាត់។",
+  "cli.command.webhook.about": "ផ្ទៀងផ្ទាត់ ឬចាក់ឡើងវិញនូវ webhook fixtures សម្រាប់ការបោះពុម្ពផ្សាយ GHCR។",
+  "cli.help.template": "{about}\n\nការប្រើប្រាស់: {usage}\n\nពាក្យបញ្ជា:\n{subcommands}\n\nជម្រើស:\n{options}",
+  "cli.option.help.help": "បោះពុម្ពជំនួយ។",
+  "cli.option.locale.help": "កូដ locale សម្រាប់អត្ថបទ CLI ដែលបានបកប្រែ ដូចជា en ឬ es។",
+  "cli.option.non_interactive.help": "ដំណើរការដោយគ្មានប្រអប់សួរឆ្លើយ។",
+  "cli.option.registry.help": "ផ្លូវទៅកាន់ឯកសារ JSON registry នៃការដាក់ឱ្យដំណើរការមូលដ្ឋាន។",
+  "cli.option.version.help": "បោះពុម្ពកំណែ។",
+  "cli.output.greeting": "សួស្តី, ពិភពលោក!"
+}

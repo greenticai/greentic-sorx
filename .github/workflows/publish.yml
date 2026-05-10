@@ -1,0 +1,155 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install i18n translator
+        run: cargo binstall -y greentic-i18n-translator
+
+      - name: Read Cargo version
+        id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "greentic-sorx"))')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Require tag ref
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Publish must run from a vX.Y.Z tag ref." >&2
+            exit 1
+          fi
+
+      - name: Verify tag matches Cargo version
+        run: |
+          expected="v${{ steps.version.outputs.version }}"
+          actual="${GITHUB_REF_NAME}"
+          if [ "$actual" != "$expected" ]; then
+            echo "Tag mismatch: expected ${expected}, got ${actual}" >&2
+            exit 1
+          fi
+
+      - name: Run local checks
+        run: bash ci/local_check.sh
+
+  release-binaries:
+    needs: verify
+    uses: greenticai/.github/.github/workflows/release-binaries.yml@main
+    with:
+      package: greentic-sorx
+      binary: greentic-sorx
+      extra-files: |
+        README.md
+        LICENSE
+    secrets: inherit
+
+  publish-crates:
+    runs-on: ubuntu-latest
+    needs:
+      - verify
+      - release-binaries
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cargo metadata --no-deps --format-version 1 | python3 -c '
+          import json
+          import sys
+
+          metadata = json.load(sys.stdin)
+          members = set(metadata.get("workspace_members", []))
+          publishable = {
+              package["name"]: package
+              for package in metadata["packages"]
+              if (not members or package["id"] in members)
+              and package.get("publish") is not False
+              and package.get("publish") != []
+          }
+          visited = set()
+          order = []
+
+          def visit(name):
+              if name in visited:
+                  return
+              visited.add(name)
+              package = publishable[name]
+              for dependency in package.get("dependencies", []):
+                  dep_name = dependency["name"]
+                  if dependency.get("kind") in ("dev", "build"):
+                      continue
+                  if dep_name in publishable:
+                      visit(dep_name)
+              order.append(package["name"])
+
+          for name in publishable:
+              visit(name)
+
+          print("\n".join(order))
+          ' > /tmp/publishable-crates.txt
+
+          if [ ! -s /tmp/publishable-crates.txt ]; then
+            echo "No publishable crates detected."
+            exit 0
+          fi
+
+          while IFS= read -r crate; do
+            echo "::group::${crate}"
+            dry_attempt=1
+            until cargo publish -p "$crate" --dry-run; do
+              if [ "$dry_attempt" -ge 3 ]; then
+                echo "Dry-run publishing ${crate} failed after ${dry_attempt} attempts." >&2
+                exit 1
+              fi
+              sleep $((dry_attempt * 20))
+              dry_attempt=$((dry_attempt + 1))
+            done
+
+            attempt=1
+            until cargo publish -p "$crate"; do
+              if [ "$attempt" -ge 3 ]; then
+                echo "Publishing ${crate} failed after ${attempt} attempts." >&2
+                exit 1
+              fi
+              sleep $((attempt * 20))
+              attempt=$((attempt + 1))
+            done
+            echo "::endgroup::"
+          done < /tmp/publishable-crates.txt

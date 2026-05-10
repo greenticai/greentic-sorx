@@ -1,0 +1,23 @@
+{
+  "cli.about": "Kør SoRLa .gtpack-artefakter som Greentic-systemer of record.",
+  "cli.command.aliases.about": "Administrer udrulningsaliaser.",
+  "cli.command.deployments.about": "Administrer lokale SORX-udrulninger.",
+  "cli.command.doctor.about": "Valider en SoRLa .gtpack til brug med SORX-runtime.",
+  "cli.command.help.about": "Udskriv denne meddelelse eller hjælpen til de angivne underkommandoer.",
+  "cli.command.inspect.about": "Inspicer en SoRLa .gtpack, og udskriv stabile metadata.",
+  "cli.command.mcp-tools.about": "Vis MCP-værktøjer deklareret af en SoRLa .gtpack.",
+  "cli.command.mcp.about": "MCP-kørselsmiljøkommandoer.",
+  "cli.command.routes.about": "Vis endpoint-ruter, der er erklæret af en SoRLa .gtpack.",
+  "cli.command.run.about": "Alias for start.",
+  "cli.command.start.about": "Start en SORX-runtime fra en SoRLa .gtpack og opstartssvar.",
+  "cli.command.validate.about": "Udfør pakkeindlejrede valideringssuiter.",
+  "cli.command.validation.about": "Kommandoer til valideringsrapporter.",
+  "cli.command.webhook.about": "Verificer eller afspil GHCR-publiceringswebhook-fixtures igen.",
+  "cli.help.template": "{about}\n\nBrug: {usage}\n\nKommandoer:\n{subcommands}\n\nIndstillinger:\n{options}",
+  "cli.option.help.help": "Udskriv hjælp.",
+  "cli.option.locale.help": "Landekode for lokaliseret CLI-tekst, såsom en eller es.",
+  "cli.option.non_interactive.help": "Kør uden interaktive prompter.",
+  "cli.option.registry.help": "Sti til den lokale udrulningsregistrerings JSON-fil.",
+  "cli.option.version.help": "Udskriv version.",
+  "cli.output.greeting": "Hej, verden!"
+}

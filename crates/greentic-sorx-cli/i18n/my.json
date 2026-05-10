@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack အာတီဖက်များကို Greentic မှတ်တမ်းစနစ်များအဖြစ် လည်ပတ်ပါ။",
+  "cli.command.aliases.about": "ဖြန့်ချိမှု alias များကို စီမံပါ။",
+  "cli.command.deployments.about": "ဒေသတွင်း SORX ဖြန့်ချိမှုများကို စီမံပါ။",
+  "cli.command.doctor.about": "SORX runtime အသုံးပြုရန်အတွက် SoRLa .gtpack တစ်ခုကို စစ်ဆေးအတည်ပြုပါ။",
+  "cli.command.help.about": "ဤစာကို သို့မဟုတ် ပေးထားသော subcommand များ၏ အကူအညီကို ပြပါ။",
+  "cli.command.inspect.about": "SoRLa .gtpack တစ်ခုကို စစ်ဆေးပြီး တည်ငြိမ်သော metadata ကို ပုံနှိပ်ဖော်ပြပါ။",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack မှ ကြေညာထားသော MCP tools များကို စာရင်းပြပါ။",
+  "cli.command.mcp.about": "MCP runtime command များ။",
+  "cli.command.routes.about": "SoRLa .gtpack တစ်ခုမှ ကြေညာထားသော endpoint routes များကို စာရင်းပြပါ။",
+  "cli.command.run.about": "start အတွက် အခြားအမည်။",
+  "cli.command.start.about": "SoRLa .gtpack နှင့် startup အဖြေများမှ SORX runtime တစ်ခုကို စတင်ပါ။",
+  "cli.command.validate.about": "pack ထဲတွင် ထည့်သွင်းထားသော validation suite များကို လုပ်ဆောင်ပါ။",
+  "cli.command.validation.about": "Validation report command များ။",
+  "cli.command.webhook.about": "GHCR publish webhook fixture များကို စစ်ဆေးပါ သို့မဟုတ် ပြန်ဖွင့်ပါ။",
+  "cli.help.template": "{about}\n\nအသုံးပြုမှု: {usage}\n\nCommand များ:\n{subcommands}\n\nOption များ:\n{options}",
+  "cli.option.help.help": "အကူအညီကို ပြပါ။",
+  "cli.option.locale.help": "en သို့မဟုတ် es ကဲ့သို့ localized CLI စာသားအတွက် locale code။",
+  "cli.option.non_interactive.help": "interactive prompt များမပါဘဲ လုပ်ဆောင်ပါ။",
+  "cli.option.registry.help": "ဒေသတွင်း deployment registry JSON ဖိုင်သို့ path။",
+  "cli.option.version.help": "ဗားရှင်းကို ပြပါ။",
+  "cli.output.greeting": "မင်္ဂလာပါ၊ ကမ္ဘာလောက!"
+}

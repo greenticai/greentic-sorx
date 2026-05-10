@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack आर्टिफ्याक्टहरूलाई Greentic systems of record का रूपमा चलाउनुहोस्।",
+  "cli.command.aliases.about": "डिप्लोयमेन्ट उपनामहरू व्यवस्थापन गर्नुहोस्।",
+  "cli.command.deployments.about": "स्थानीय SORX डिप्लोयमेन्टहरू व्यवस्थापन गर्नुहोस्।",
+  "cli.command.doctor.about": "SORX runtime प्रयोगका लागि SoRLa .gtpack प्रमाणीकरण गर्नुहोस्।",
+  "cli.command.help.about": "यो सन्देश वा दिइएका उप-कमाण्ड(हरू)को मद्दत छाप्नुहोस्।",
+  "cli.command.inspect.about": "SoRLa .gtpack निरीक्षण गर्नुहोस् र स्थिर metadata प्रिन्ट गर्नुहोस्।",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack द्वारा घोषित MCP उपकरणहरू सूचीकृत गर्नुहोस्।",
+  "cli.command.mcp.about": "MCP रनटाइम कमाण्डहरू।",
+  "cli.command.routes.about": "SoRLa .gtpack द्वारा घोषित endpoint routes सूचीबद्ध गर्नुहोस्।",
+  "cli.command.run.about": "start का लागि Alias।",
+  "cli.command.start.about": "SoRLa .gtpack र startup answers बाट SORX runtime सुरु गर्नुहोस्।",
+  "cli.command.validate.about": "प्याक-भित्र समावेश प्रमाणीकरण सुइटहरू कार्यान्वयन गर्नुहोस्।",
+  "cli.command.validation.about": "प्रमाणीकरण प्रतिवेदन कमाण्डहरू।",
+  "cli.command.webhook.about": "GHCR प्रकाशन वेबहुक फिक्स्चरहरू प्रमाणित गर्नुहोस् वा पुनः चलाउनुहोस्।",
+  "cli.help.template": "{about}\n\nप्रयोग: {usage}\n\nकमाण्डहरू:\n{subcommands}\n\nविकल्पहरू:\n{options}",
+  "cli.option.help.help": "मद्दत छाप्नुहोस्।",
+  "cli.option.locale.help": "स्थानीकृत CLI पाठका लागि लोकेल कोड, जस्तै en वा es।",
+  "cli.option.non_interactive.help": "अन्तर्क्रियात्मक प्रम्प्टहरू बिना चलाउनुहोस्।",
+  "cli.option.registry.help": "स्थानीय डिप्लोयमेन्ट रजिस्ट्री JSON फाइलको पथ।",
+  "cli.option.version.help": "संस्करण छाप्नुहोस्।",
+  "cli.output.greeting": "नमस्ते, संसार!"
+}

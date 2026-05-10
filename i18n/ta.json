@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack கலைப்பொருட்களை Greentic பதிவுகளின் அதிகாரப்பூர்வ அமைப்புகளாக இயக்கவும்.",
+  "cli.command.aliases.about": "பத deployment aliasகளை நிர்வகிக்கவும்.",
+  "cli.command.deployments.about": "உள்ளூர் SORX deploymentகளை நிர்வகிக்கவும்.",
+  "cli.command.doctor.about": "SORX runtime பயன்பாட்டிற்காக SoRLa .gtpack ஐ சரிபார்க்கவும்.",
+  "cli.command.help.about": "இந்த செய்தியை அல்லது கொடுக்கப்பட்ட துணைக் கட்டளை(கள்)ன் உதவியை அச்சிடவும்.",
+  "cli.command.inspect.about": "SoRLa .gtpack ஐ ஆய்வு செய்து நிலையான metadata ஐ அச்சிடவும்.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack அறிவித்த MCP கருவிகளை பட்டியலிடவும்.",
+  "cli.command.mcp.about": "MCP runtime கட்டளைகள்.",
+  "cli.command.routes.about": "SoRLa .gtpack மூலம் அறிவிக்கப்பட்ட endpoint routes ஐ பட்டியலிடவும்.",
+  "cli.command.run.about": "start க்கான மாற்றுப் பெயர்.",
+  "cli.command.start.about": "SoRLa .gtpack மற்றும் startup answers இலிருந்து SORX runtime ஐத் தொடங்கவும்.",
+  "cli.command.validate.about": "pack-இல் உட்பொதிக்கப்பட்ட validation suitesஐ இயக்கவும்.",
+  "cli.command.validation.about": "Validation report கட்டளைகள்.",
+  "cli.command.webhook.about": "GHCR publish webhook fixturesஐ சரிபார்க்கவும் அல்லது மீண்டும் இயக்கவும்.",
+  "cli.help.template": "{about}\n\nபயன்பாடு: {usage}\n\nகட்டளைகள்:\n{subcommands}\n\nவிருப்பங்கள்:\n{options}",
+  "cli.option.help.help": "உதவியை அச்சிடவும்.",
+  "cli.option.locale.help": "உள்ளூர்மயமாக்கப்பட்ட CLI உரைக்கான locale code, உதாரணமாக en அல்லது es.",
+  "cli.option.non_interactive.help": "interactive prompts இல்லாமல் இயக்கவும்.",
+  "cli.option.registry.help": "உள்ளூர் deployment registry JSON கோப்பிற்கான பாதை.",
+  "cli.option.version.help": "பதிப்பை அச்சிடவும்.",
+  "cli.output.greeting": "வணக்கம், உலகமே!"
+}

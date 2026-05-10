@@ -1,0 +1,20 @@
+{
+  "schema": "greentic.sorla.mcp-tools.v1",
+  "tools": [
+    {
+      "name": "sorla_create_tenant",
+      "description": "Create a tenant record",
+      "endpoint_id": "tenant.create"
+    },
+    {
+      "name": "sorla_assign_tenancy",
+      "description": "Assign an active tenancy",
+      "endpoint_id": "tenancy.assign"
+    },
+    {
+      "name": "sorla_list_active_tenants",
+      "description": "List active tenants for a landlord",
+      "endpoint_id": "tenant.active_by_landlord"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "cli.about": "Palaist SoRLa .gtpack artefaktus kā Greentic ierakstu sistēmas.",
+  "cli.command.aliases.about": "Pārvaldīt izvietošanas aizstājvārdus.",
+  "cli.command.deployments.about": "Pārvaldīt lokālās SORX izvietošanas.",
+  "cli.command.doctor.about": "Validēt SoRLa .gtpack SORX izpildlaika lietošanai.",
+  "cli.command.help.about": "Izdrukāt šo ziņojumu vai norādītās apakškomandas(-u) palīdzību.",
+  "cli.command.inspect.about": "Pārbaudīt SoRLa .gtpack un izdrukāt stabilus metadatus.",
+  "cli.command.mcp-tools.about": "Uzskaitīt MCP rīkus, kas deklarēti SoRLa .gtpack.",
+  "cli.command.mcp.about": "MCP izpildlaika komandas.",
+  "cli.command.routes.about": "Uzskaitīt galapunktu maršrutus, kas deklarēti SoRLa .gtpack.",
+  "cli.command.run.about": "Aizstājvārds komandai start.",
+  "cli.command.start.about": "Startēt SORX izpildlaiku no SoRLa .gtpack un palaišanas atbildēm.",
+  "cli.command.validate.about": "Izpildīt pakotnē iegultos validācijas komplektus.",
+  "cli.command.validation.about": "Validācijas pārskatu komandas.",
+  "cli.command.webhook.about": "Pārbaudīt vai atkārtoti atskaņot GHCR publicēšanas tīmekļa aizķeres fixtures.",
+  "cli.help.template": "{about}\n\nLietojums: {usage}\n\nKomandas:\n{subcommands}\n\nOpcijas:\n{options}",
+  "cli.option.help.help": "Izdrukāt palīdzību.",
+  "cli.option.locale.help": "Lokalizācijas kods lokalizētam CLI tekstam, piemēram, en vai es.",
+  "cli.option.non_interactive.help": "Palaist bez interaktīvām uzvednēm.",
+  "cli.option.registry.help": "Ceļš uz lokālā izvietošanas reģistra JSON failu.",
+  "cli.option.version.help": "Izdrukāt versiju.",
+  "cli.output.greeting": "Sveika, pasaule!"
+}

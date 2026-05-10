@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack ആർട്ടിഫാക്റ്റുകൾ Greentic സിസ്റ്റംസ് ഓഫ് റെക്കോർഡ് ആയി പ്രവർത്തിപ്പിക്കുക.",
+  "cli.command.aliases.about": "വിന്യാസ അല്യാസുകൾ നിയന്ത്രിക്കുക.",
+  "cli.command.deployments.about": "പ്രാദേശിക SORX വിന്യാസങ്ങൾ നിയന്ത്രിക്കുക.",
+  "cli.command.doctor.about": "SORX റൺടൈം ഉപയോഗത്തിനായി ഒരു SoRLa .gtpack സാധൂകരിക്കുക.",
+  "cli.command.help.about": "ഈ സന്ദേശമോ നൽകിയ ഉപകമാൻഡിന്റെ(കളുടെ) സഹായമോ പ്രിന്റ് ചെയ്യുക.",
+  "cli.command.inspect.about": "ഒരു SoRLa .gtpack പരിശോധിച്ച് സ്ഥിരമായ മെറ്റാഡാറ്റ അച്ചടിക്കുക.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack പ്രഖ്യാപിച്ച MCP ഉപകരണങ്ങൾ ലിസ്റ്റ് ചെയ്യുക.",
+  "cli.command.mcp.about": "MCP റൺടൈം കമാൻഡുകൾ.",
+  "cli.command.routes.about": "ഒരു SoRLa .gtpack പ്രഖ്യാപിച്ച എൻഡ്‌പോയിന്റ് റൂട്ടുകൾ പട്ടികപ്പെടുത്തുക.",
+  "cli.command.run.about": "start എന്നതിനുള്ള അപരനാമം.",
+  "cli.command.start.about": "ഒരു SoRLa .gtpack ഉം സ്റ്റാർട്ടപ്പ് ഉത്തരങ്ങളും ഉപയോഗിച്ച് ഒരു SORX റൺടൈം ആരംഭിക്കുക.",
+  "cli.command.validate.about": "പാക്കിൽ ഉൾപ്പെടുത്തിയ സാധൂകരണ സ്യൂട്ടുകൾ പ്രവർത്തിപ്പിക്കുക.",
+  "cli.command.validation.about": "സാധൂകരണ റിപ്പോർട്ട് കമാൻഡുകൾ.",
+  "cli.command.webhook.about": "GHCR പ്രസിദ്ധീകരണ വെബ്‌ഹുക്ക് ഫിക്‌ചറുകൾ പരിശോധിക്കുകയോ വീണ്ടും പ്രവർത്തിപ്പിക്കുകയോ ചെയ്യുക.",
+  "cli.help.template": "{about}\n\nഉപയോഗം: {usage}\n\nകമാൻഡുകൾ:\n{subcommands}\n\nഓപ്ഷനുകൾ:\n{options}",
+  "cli.option.help.help": "സഹായം പ്രിന്റ് ചെയ്യുക.",
+  "cli.option.locale.help": "പ്രാദേശികമാക്കിയ CLI ടെക്സ്റ്റിനുള്ള ലോക്കേൽ കോഡ്, en അല്ലെങ്കിൽ es പോലുള്ളത്.",
+  "cli.option.non_interactive.help": "ഇന്ററാക്ടീവ് പ്രോംപ്റ്റുകളില്ലാതെ പ്രവർത്തിപ്പിക്കുക.",
+  "cli.option.registry.help": "പ്രാദേശിക വിന്യാസ രജിസ്ട്രി JSON ഫയലിലേക്കുള്ള പാത.",
+  "cli.option.version.help": "പതിപ്പ് പ്രിന്റ് ചെയ്യുക.",
+  "cli.output.greeting": "ഹലോ, ലോകമേ!"
+}

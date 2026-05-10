@@ -1,0 +1,32 @@
+{
+  "landlord": { "id": "landlord-1", "name": "Green Acres Holdings" },
+  "property": { "id": "property-1", "landlord_id": "landlord-1", "name": "Maple Court" },
+  "unit": { "id": "unit-101", "property_id": "property-1", "label": "101" },
+  "tenant": {
+    "id": "tenant-1",
+    "landlord_id": "landlord-1",
+    "name": "Avery Stone",
+    "active": "true",
+    "preferred_contact": "email"
+  },
+  "tenancy": {
+    "id": "tenancy-1",
+    "landlord_id": "landlord-1",
+    "tenant_id": "tenant-1",
+    "unit_id": "unit-101",
+    "active": "true"
+  },
+  "payment": {
+    "id": "payment-1",
+    "tenancy_id": "tenancy-1",
+    "amount_cents": 125000,
+    "status": "recorded"
+  },
+  "maintenance": {
+    "id": "maintenance-1",
+    "unit_id": "unit-101",
+    "tenant_id": "tenant-1",
+    "status": "open",
+    "summary": "Kitchen faucet leak"
+  }
+}

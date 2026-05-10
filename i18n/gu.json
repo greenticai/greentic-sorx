@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack આર્ટિફેક્ટ્સને Greentic સિસ્ટમ્સ ઑફ રેકોર્ડ તરીકે ચલાવો.",
+  "cli.command.aliases.about": "ડિપ્લોયમેન્ટ એલિયાસ મેનેજ કરો.",
+  "cli.command.deployments.about": "સ્થાનિક SORX ડિપ્લોયમેન્ટ્સ મેનેજ કરો.",
+  "cli.command.doctor.about": "SORX રનટાઇમ ઉપયોગ માટે SoRLa .gtpack માન્ય કરો.",
+  "cli.command.help.about": "આ સંદેશ અથવા આપેલા સબકમાન્ડ(ઓ)ની મદદ પ્રિન્ટ કરો.",
+  "cli.command.inspect.about": "SoRLa .gtpack તપાસો અને સ્થિર મેટાડેટા પ્રિન્ટ કરો.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack દ્વારા જાહેર કરેલા MCP ટૂલ્સની યાદી બતાવો.",
+  "cli.command.mcp.about": "MCP રનટાઇમ કમાન્ડ્સ.",
+  "cli.command.routes.about": "SoRLa .gtpack દ્વારા જાહેર કરાયેલા એન્ડપોઇન્ટ રૂટ્સની યાદી બનાવો.",
+  "cli.command.run.about": "start માટે ઉપનામ.",
+  "cli.command.start.about": "SoRLa .gtpack અને સ્ટાર્ટઅપ જવાબોથી SORX રનટાઇમ શરૂ કરો.",
+  "cli.command.validate.about": "પેકમાં જડિત વેલિડેશન સ્યુટ્સ ચલાવો.",
+  "cli.command.validation.about": "વેલિડેશન રિપોર્ટ કમાન્ડ્સ.",
+  "cli.command.webhook.about": "GHCR publish webhook fixtures ચકાસો અથવા ફરીથી ચલાવો.",
+  "cli.help.template": "{about}\n\nવપરાશ: {usage}\n\nકમાન્ડ્સ:\n{subcommands}\n\nવિકલ્પો:\n{options}",
+  "cli.option.help.help": "મદદ પ્રિન્ટ કરો.",
+  "cli.option.locale.help": "સ્થાનિકીકૃત CLI લખાણ માટે લોકેલ કોડ, જેમ કે en અથવા es.",
+  "cli.option.non_interactive.help": "ઇન્ટરેક્ટિવ પ્રોમ્પ્ટ્સ વિના ચલાવો.",
+  "cli.option.registry.help": "સ્થાનિક ડિપ્લોયમેન્ટ રજિસ્ટ્રી JSON ફાઇલનો પાથ.",
+  "cli.option.version.help": "વર્ઝન પ્રિન્ટ કરો.",
+  "cli.output.greeting": "હેલો, વિશ્વ!"
+}

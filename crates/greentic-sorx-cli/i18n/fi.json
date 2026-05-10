@@ -1,0 +1,23 @@
+{
+  "cli.about": "Suorita SoRLa .gtpack -artefakteja Greenticin järjestelmällisinä tietolähteinä.",
+  "cli.command.aliases.about": "Hallitse käyttöönottoaliaksia.",
+  "cli.command.deployments.about": "Hallitse paikallisia SORX-käyttöönottoja.",
+  "cli.command.doctor.about": "Validoi SoRLa .gtpack SORX-ajonaikaisen ympäristön käyttöä varten.",
+  "cli.command.help.about": "Tulosta tämä viesti tai annettujen alikomentojen ohje.",
+  "cli.command.inspect.about": "Tarkastele SoRLa .gtpack -pakettia ja tulosta vakaat metatiedot.",
+  "cli.command.mcp-tools.about": "Listaa SoRLa .gtpackin määrittelemät MCP-työkalut.",
+  "cli.command.mcp.about": "MCP-ajonaikaiset komennot.",
+  "cli.command.routes.about": "Luettele SoRLa .gtpack -paketin ilmoittamat päätepistereitit.",
+  "cli.command.run.about": "Aliaskomento start-komennolle.",
+  "cli.command.start.about": "Käynnistä SORX-ajonaikainen ympäristö SoRLa .gtpack -paketista ja käynnistysvastauksista.",
+  "cli.command.validate.about": "Suorita pakettiin upotetut validointikokonaisuudet.",
+  "cli.command.validation.about": "Validointiraportin komennot.",
+  "cli.command.webhook.about": "Vahvista tai toista GHCR-julkaisun webhook-kiinnikkeet.",
+  "cli.help.template": "{about}\n\nKäyttö: {usage}\n\nKomennot:\n{subcommands}\n\nValinnat:\n{options}",
+  "cli.option.help.help": "Tulosta ohje.",
+  "cli.option.locale.help": "Lokaalikoodi lokalisoidulle CLI-tekstille, kuten en tai es.",
+  "cli.option.non_interactive.help": "Suorita ilman vuorovaikutteisia kehotteita.",
+  "cli.option.registry.help": "Polku paikallisen käyttöönottojen rekisterin JSON-tiedostoon.",
+  "cli.option.version.help": "Tulosta versio.",
+  "cli.output.greeting": "Hei, maailma!"
+}

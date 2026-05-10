@@ -1,0 +1,23 @@
+{
+  "cli.about": "Run SoRLa .gtpack artifacts as Greentic systems of record.",
+  "cli.command.aliases.about": "Manage deployment aliases.",
+  "cli.command.deployments.about": "Manage local SORX deployments.",
+  "cli.command.doctor.about": "Validate a SoRLa .gtpack for SORX runtime use.",
+  "cli.command.help.about": "Print this message or the help of the given subcommand(s).",
+  "cli.command.inspect.about": "Inspect a SoRLa .gtpack and print stable metadata.",
+  "cli.command.mcp-tools.about": "List MCP tools declared by a SoRLa .gtpack.",
+  "cli.command.mcp.about": "MCP runtime commands.",
+  "cli.command.routes.about": "List endpoint routes declared by a SoRLa .gtpack.",
+  "cli.command.run.about": "Alias for start.",
+  "cli.command.start.about": "Start a SORX runtime from a SoRLa .gtpack and startup answers.",
+  "cli.command.validate.about": "Execute pack-embedded validation suites.",
+  "cli.command.validation.about": "Validation report commands.",
+  "cli.command.webhook.about": "Verify or replay GHCR publish webhook fixtures.",
+  "cli.help.template": "{about}\n\nUsage: {usage}\n\nCommands:\n{subcommands}\n\nOptions:\n{options}",
+  "cli.option.help.help": "Print help.",
+  "cli.option.locale.help": "Locale code for localized CLI text, such as en or es.",
+  "cli.option.non_interactive.help": "Run without interactive prompts.",
+  "cli.option.registry.help": "Path to the local deployment registry JSON file.",
+  "cli.option.version.help": "Print version.",
+  "cli.output.greeting": "Hello, world!"
+}

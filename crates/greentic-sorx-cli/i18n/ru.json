@@ -1,0 +1,23 @@
+{
+  "cli.about": "Запускайте артефакты SoRLa .gtpack как системы записей Greentic.",
+  "cli.command.aliases.about": "Управление псевдонимами развертывания.",
+  "cli.command.deployments.about": "Управление локальными развертываниями SORX.",
+  "cli.command.doctor.about": "Проверьте SoRLa .gtpack для использования в среде выполнения SORX.",
+  "cli.command.help.about": "Вывести это сообщение или справку по указанным подкомандам.",
+  "cli.command.inspect.about": "Проверьте SoRLa .gtpack и выведите стабильные метаданные.",
+  "cli.command.mcp-tools.about": "Список инструментов MCP, объявленных в SoRLa .gtpack.",
+  "cli.command.mcp.about": "Команды среды выполнения MCP.",
+  "cli.command.routes.about": "Перечислите маршруты конечных точек, объявленные SoRLa .gtpack.",
+  "cli.command.run.about": "Псевдоним для start.",
+  "cli.command.start.about": "Запустите среду выполнения SORX из SoRLa .gtpack и ответов запуска.",
+  "cli.command.validate.about": "Выполнить встроенные в пакет наборы проверок.",
+  "cli.command.validation.about": "Команды отчетов о проверке.",
+  "cli.command.webhook.about": "Проверить или воспроизвести фикстуры вебхука публикации GHCR.",
+  "cli.help.template": "{about}\n\nИспользование: {usage}\n\nКоманды:\n{subcommands}\n\nПараметры:\n{options}",
+  "cli.option.help.help": "Вывести справку.",
+  "cli.option.locale.help": "Код локали для локализованного текста CLI, например en или es.",
+  "cli.option.non_interactive.help": "Запуск без интерактивных запросов.",
+  "cli.option.registry.help": "Путь к локальному JSON-файлу реестра развертываний.",
+  "cli.option.version.help": "Вывести версию.",
+  "cli.output.greeting": "Привет, мир!"
+}

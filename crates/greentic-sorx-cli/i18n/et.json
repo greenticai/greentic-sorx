@@ -1,0 +1,23 @@
+{
+  "cli.about": "Käivita SoRLa .gtpack artefakte Greenticu kirjesüsteemidena.",
+  "cli.command.aliases.about": "Halda juurutuse aliaseid.",
+  "cli.command.deployments.about": "Halda kohalikke SORX-i juurutusi.",
+  "cli.command.doctor.about": "Valideeri SoRLa .gtpack SORX-i käituskeskkonnas kasutamiseks.",
+  "cli.command.help.about": "Prindi see teade või antud alamkäsu(de) abi.",
+  "cli.command.inspect.about": "Kontrolli SoRLa .gtpack-i ja prindi stabiilsed metaandmed.",
+  "cli.command.mcp-tools.about": "Loetle SoRLa .gtpackis deklareeritud MCP tööriistad.",
+  "cli.command.mcp.about": "MCP käitusaja käsud.",
+  "cli.command.routes.about": "Loetle SoRLa .gtpack-is deklareeritud lõpp-punktide marsruudid.",
+  "cli.command.run.about": "Aliase käsk start jaoks.",
+  "cli.command.start.about": "Käivita SORX-i käituskeskkond SoRLa .gtpack-ist ja käivitusvastustest.",
+  "cli.command.validate.about": "Käivita pakki manustatud valideerimiskomplektid.",
+  "cli.command.validation.about": "Valideerimisaruande käsud.",
+  "cli.command.webhook.about": "Kontrolli või taasesita GHCR-i avaldamise veebikonksu fikstuure.",
+  "cli.help.template": "{about}\n\nKasutus: {usage}\n\nKäsud:\n{subcommands}\n\nValikud:\n{options}",
+  "cli.option.help.help": "Prindi abi.",
+  "cli.option.locale.help": "Lokaatkood lokaliseeritud CLI teksti jaoks, näiteks en või es.",
+  "cli.option.non_interactive.help": "Käivita ilma interaktiivsete viipadeta.",
+  "cli.option.registry.help": "Tee kohaliku juurutusregistri JSON-failini.",
+  "cli.option.version.help": "Prindi versioon.",
+  "cli.output.greeting": "Tere, maailm!"
+}

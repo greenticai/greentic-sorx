@@ -1,0 +1,23 @@
+{
+  "cli.about": "ເອີ້ນໃຊ້ອາທິແຟັກ SoRLa .gtpack ເປັນລະບົບບັນທຶກຫຼັກຂອງ Greentic.",
+  "cli.command.aliases.about": "ຈັດການນາມແຝງການນຳໃຊ້.",
+  "cli.command.deployments.about": "ຈັດການການນຳໃຊ້ SORX ໃນເຄື່ອງ.",
+  "cli.command.doctor.about": "ກວດສອບ SoRLa .gtpack ສໍາລັບການໃຊ້ງານກັບ SORX runtime.",
+  "cli.command.help.about": "ພິມຂໍ້ຄວາມນີ້ ຫຼື ຄຳຊ່ວຍເຫຼືອຂອງຄຳສັ່ງຍ່ອຍທີ່ລະບຸ.",
+  "cli.command.inspect.about": "ກວດເບິ່ງ SoRLa .gtpack ແລະພິມເມຕາດາຕາທີ່ຄົງທີ່.",
+  "cli.command.mcp-tools.about": "ສະແດງລາຍຊື່ເຄື່ອງມື MCP ທີ່ປະກາດໂດຍ SoRLa .gtpack.",
+  "cli.command.mcp.about": "ຄຳສັ່ງຣັນໄທມ໌ MCP.",
+  "cli.command.routes.about": "ສະແດງລາຍການ endpoint routes ທີ່ປະກາດໂດຍ SoRLa .gtpack.",
+  "cli.command.run.about": "ນາມແຝງສໍາລັບ start.",
+  "cli.command.start.about": "ເລີ່ມ SORX runtime ຈາກ SoRLa .gtpack ແລະຄໍາຕອບການເລີ່ມຕົ້ນ.",
+  "cli.command.validate.about": "ດຳເນີນຊຸດການກວດສອບທີ່ຝັງຢູ່ໃນແພັກ.",
+  "cli.command.validation.about": "ຄຳສັ່ງລາຍງານການກວດສອບ.",
+  "cli.command.webhook.about": "ກວດຢືນຢັນ ຫຼື ຫຼິ້ນຊ້ຳ fixture webhook ການເຜີຍແຜ່ GHCR.",
+  "cli.help.template": "{about}\n\nວິທີໃຊ້: {usage}\n\nຄຳສັ່ງ:\n{subcommands}\n\nຕົວເລືອກ:\n{options}",
+  "cli.option.help.help": "ພິມຄຳຊ່ວຍເຫຼືອ.",
+  "cli.option.locale.help": "ລະຫັດ locale ສຳລັບຂໍ້ຄວາມ CLI ທີ່ແປເປັນທ້ອງຖິ່ນ, ເຊັ່ນ en ຫຼື es.",
+  "cli.option.non_interactive.help": "ຣັນໂດຍບໍ່ມີພຣອມຕ໌ແບບໂຕ້ຕອບ.",
+  "cli.option.registry.help": "ເສັ້ນທາງໄປຫາໄຟລ໌ JSON registry ການນຳໃຊ້ໃນເຄື່ອງ.",
+  "cli.option.version.help": "ພິມເວີຊັນ.",
+  "cli.output.greeting": "ສະບາຍດີ, world!"
+}

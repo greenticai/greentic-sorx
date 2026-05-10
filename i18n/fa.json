@@ -1,0 +1,23 @@
+{
+  "cli.about": "اجرای آرتیفکت‌های SoRLa .gtpack به‌عنوان سامانه‌های ثبت رسمی Greentic.",
+  "cli.command.aliases.about": "مدیریت نام‌های مستعار استقرار.",
+  "cli.command.deployments.about": "مدیریت استقرارهای محلی SORX.",
+  "cli.command.doctor.about": "اعتبارسنجی یک SoRLa .gtpack برای استفاده در زمان اجرای SORX.",
+  "cli.command.help.about": "چاپ این پیام یا راهنمای زیر‌دستور(های) داده‌شده.",
+  "cli.command.inspect.about": "بازرسی یک SoRLa .gtpack و چاپ فراداده پایدار.",
+  "cli.command.mcp-tools.about": "فهرست ابزارهای MCP اعلام‌شده توسط یک .gtpack از SoRLa.",
+  "cli.command.mcp.about": "دستورهای زمان اجرای MCP.",
+  "cli.command.routes.about": "فهرست‌کردن مسیرهای endpoint اعلام‌شده توسط یک SoRLa .gtpack.",
+  "cli.command.run.about": "نام مستعار start.",
+  "cli.command.start.about": "شروع یک زمان اجرای SORX از یک SoRLa .gtpack و پاسخ‌های راه‌اندازی.",
+  "cli.command.validate.about": "اجرای مجموعه‌های اعتبارسنجی تعبیه‌شده در بسته.",
+  "cli.command.validation.about": "دستورهای گزارش اعتبارسنجی.",
+  "cli.command.webhook.about": "تأیید یا بازپخش نمونه‌های وب‌هوک انتشار GHCR.",
+  "cli.help.template": "{about}\n\nنحوه استفاده: {usage}\n\nدستورها:\n{subcommands}\n\nگزینه‌ها:\n{options}",
+  "cli.option.help.help": "چاپ راهنما.",
+  "cli.option.locale.help": "کد محلی‌سازی برای متن محلی‌شده CLI، مانند en یا es.",
+  "cli.option.non_interactive.help": "اجرا بدون اعلان‌های تعاملی.",
+  "cli.option.registry.help": "مسیر فایل JSON رجیستری استقرار محلی.",
+  "cli.option.version.help": "چاپ نسخه.",
+  "cli.output.greeting": "سلام، دنیا!"
+}

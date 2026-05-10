@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack ఆర్టిఫాక్ట్‌లను Greentic సిస్టమ్స్ ఆఫ్ రికార్డ్‌గా అమలు చేయండి.",
+  "cli.command.aliases.about": "డిప్లాయ్‌మెంట్ అలియాస్‌లను నిర్వహించండి.",
+  "cli.command.deployments.about": "స్థానిక SORX డిప్లాయ్‌మెంట్‌లను నిర్వహించండి.",
+  "cli.command.doctor.about": "SORX రన్‌టైమ్ ఉపయోగం కోసం SoRLa .gtpackను ధృవీకరించండి.",
+  "cli.command.help.about": "ఈ సందేశాన్ని లేదా ఇచ్చిన ఉపకమాండ్(ల) సహాయాన్ని ముద్రించండి.",
+  "cli.command.inspect.about": "SoRLa .gtpackను పరిశీలించి స్థిరమైన మెటాడేటాను ప్రింట్ చేయండి.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack ద్వారా ప్రకటించబడిన MCP టూల్స్‌ను జాబితా చేయండి.",
+  "cli.command.mcp.about": "MCP రన్‌టైమ్ కమాండ్‌లు.",
+  "cli.command.routes.about": "SoRLa .gtpack ద్వారా ప్రకటించబడిన ఎండ్‌పాయింట్ రూట్లను జాబితా చేయండి.",
+  "cli.command.run.about": "start కోసం అలియాస్.",
+  "cli.command.start.about": "SoRLa .gtpack మరియు స్టార్టప్ సమాధానాల నుండి SORX రన్‌టైమ్‌ను ప్రారంభించండి.",
+  "cli.command.validate.about": "ప్యాక్‌లో పొందుపరిచిన ధృవీకరణ సూట్‌లను అమలు చేయండి.",
+  "cli.command.validation.about": "ధృవీకరణ నివేదిక కమాండ్‌లు.",
+  "cli.command.webhook.about": "GHCR ప్రచురణ వెబ్‌హుక్ ఫిక్చర్‌లను ధృవీకరించండి లేదా మళ్లీ ప్లే చేయండి.",
+  "cli.help.template": "{about}\n\nవినియోగం: {usage}\n\nకమాండ్‌లు:\n{subcommands}\n\nఎంపికలు:\n{options}",
+  "cli.option.help.help": "సహాయాన్ని ముద్రించండి.",
+  "cli.option.locale.help": "స్థానికీకరించిన CLI టెక్స్ట్ కోసం లోకేల్ కోడ్, ఉదాహరణకు en లేదా es.",
+  "cli.option.non_interactive.help": "ఇంటరాక్టివ్ ప్రాంప్ట్‌లు లేకుండా అమలు చేయండి.",
+  "cli.option.registry.help": "స్థానిక డిప్లాయ్‌మెంట్ రిజిస్ట్రీ JSON ఫైల్‌కు మార్గం.",
+  "cli.option.version.help": "వెర్షన్‌ను ముద్రించండి.",
+  "cli.output.greeting": "హలో, ప్రపంచం!"
+}

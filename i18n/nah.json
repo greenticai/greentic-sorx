@@ -1,0 +1,23 @@
+{
+  "cli.about": "Tlatlalia SoRLa .gtpack artifacts kemej Greentic sistemas de registro.",
+  "cli.command.aliases.about": "Xikyekana deployment aliasmeh.",
+  "cli.command.deployments.about": "Xikyekana local SORX deployments.",
+  "cli.command.doctor.about": "Tlayejyekoa se SoRLa .gtpack ika SORX runtime tekitilis.",
+  "cli.command.help.about": "Xikixpantilti nin tlajkuiloli noso in ayuda tlen in subcommand(s) tlen omomakak.",
+  "cli.command.inspect.about": "Tlachia se SoRLa .gtpack wan xijkuilo stable metadata.",
+  "cli.command.mcp-tools.about": "Xikilistaro MCP teposmeh tlen omotenehkeh ipan se SoRLa .gtpack.",
+  "cli.command.mcp.about": "MCP runtime commands.",
+  "cli.command.routes.about": "Xikpowa endpoint routes tlen kijtoaj se SoRLa .gtpack.",
+  "cli.command.run.about": "Ome itoka ika start.",
+  "cli.command.start.about": "Xipewalti se SORX runtime ika se SoRLa .gtpack wan startup answers.",
+  "cli.command.validate.about": "Xikchiwa validacion suites tlen pack-embedded.",
+  "cli.command.validation.about": "Validation report commands.",
+  "cli.command.webhook.about": "Xikyekita noso xikoksepa tlatitlani GHCR publish webhook fixtures.",
+  "cli.help.template": "{about}\n\nUsage: {usage}\n\nCommands:\n{subcommands}\n\nOptions:\n{options}",
+  "cli.option.help.help": "Xikixpantilti ayuda.",
+  "cli.option.locale.help": "Locale code para CLI text tlen localized, ken en noso es.",
+  "cli.option.non_interactive.help": "Xikchiwa amo interactive prompts.",
+  "cli.option.registry.help": "Ojtli ika in local deployment registry JSON file.",
+  "cli.option.version.help": "Xikixpantilti version.",
+  "cli.output.greeting": "Niltze, tlalticpac!"
+}

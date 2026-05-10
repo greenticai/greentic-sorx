@@ -1,0 +1,23 @@
+{
+  "cli.about": "เรียกใช้ artifacts .gtpack ของ SoRLa เป็นระบบบันทึกหลักของ Greentic",
+  "cli.command.aliases.about": "จัดการนามแฝงการปรับใช้",
+  "cli.command.deployments.about": "จัดการการปรับใช้ SORX ภายในเครื่อง",
+  "cli.command.doctor.about": "ตรวจสอบความถูกต้องของ .gtpack ของ SoRLa สำหรับใช้กับรันไทม์ SORX",
+  "cli.command.help.about": "พิมพ์ข้อความนี้หรือความช่วยเหลือของคำสั่งย่อยที่ระบุ",
+  "cli.command.inspect.about": "ตรวจสอบ .gtpack ของ SoRLa และพิมพ์เมตาดาต้าที่เสถียร",
+  "cli.command.mcp-tools.about": "แสดงรายการเครื่องมือ MCP ที่ประกาศโดย SoRLa .gtpack",
+  "cli.command.mcp.about": "คำสั่งรันไทม์ MCP",
+  "cli.command.routes.about": "แสดงรายการเส้นทาง endpoint ที่ประกาศโดย .gtpack ของ SoRLa",
+  "cli.command.run.about": "นามแฝงของ start",
+  "cli.command.start.about": "เริ่มรันไทม์ SORX จาก .gtpack ของ SoRLa และคำตอบสำหรับการเริ่มต้น",
+  "cli.command.validate.about": "เรียกใช้ชุดตรวจสอบความถูกต้องที่ฝังอยู่ในแพ็ก",
+  "cli.command.validation.about": "คำสั่งรายงานการตรวจสอบความถูกต้อง",
+  "cli.command.webhook.about": "ตรวจสอบหรือเล่นซ้ำฟิกซ์เจอร์เว็บฮุกเผยแพร่ GHCR",
+  "cli.help.template": "{about}\n\nการใช้งาน: {usage}\n\nคำสั่ง:\n{subcommands}\n\nตัวเลือก:\n{options}",
+  "cli.option.help.help": "พิมพ์ความช่วยเหลือ",
+  "cli.option.locale.help": "รหัสโลเคลสำหรับข้อความ CLI ที่แปลเป็นภาษาท้องถิ่น เช่น en หรือ es",
+  "cli.option.non_interactive.help": "เรียกใช้โดยไม่มีพรอมต์แบบโต้ตอบ",
+  "cli.option.registry.help": "พาธไปยังไฟล์ JSON รีจิสทรีการปรับใช้ภายในเครื่อง",
+  "cli.option.version.help": "พิมพ์เวอร์ชัน",
+  "cli.output.greeting": "สวัสดี โลก!"
+}

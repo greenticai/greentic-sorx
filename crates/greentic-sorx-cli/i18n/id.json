@@ -1,0 +1,23 @@
+{
+  "cli.about": "Jalankan artefak .gtpack SoRLa sebagai sistem catatan Greentic.",
+  "cli.command.aliases.about": "Kelola alias deployment.",
+  "cli.command.deployments.about": "Kelola deployment SORX lokal.",
+  "cli.command.doctor.about": "Validasi .gtpack SoRLa untuk penggunaan runtime SORX.",
+  "cli.command.help.about": "Cetak pesan ini atau bantuan untuk subperintah yang diberikan.",
+  "cli.command.inspect.about": "Inspeksi .gtpack SoRLa dan cetak metadata stabil.",
+  "cli.command.mcp-tools.about": "Cantumkan alat MCP yang dideklarasikan oleh .gtpack SoRLa.",
+  "cli.command.mcp.about": "Perintah runtime MCP.",
+  "cli.command.routes.about": "Cantumkan rute endpoint yang dideklarasikan oleh .gtpack SoRLa.",
+  "cli.command.run.about": "Alias untuk start.",
+  "cli.command.start.about": "Mulai runtime SORX dari .gtpack SoRLa dan jawaban startup.",
+  "cli.command.validate.about": "Jalankan rangkaian validasi yang tertanam dalam pack.",
+  "cli.command.validation.about": "Perintah laporan validasi.",
+  "cli.command.webhook.about": "Verifikasi atau putar ulang fixture webhook publikasi GHCR.",
+  "cli.help.template": "{about}\n\nPenggunaan: {usage}\n\nPerintah:\n{subcommands}\n\nOpsi:\n{options}",
+  "cli.option.help.help": "Cetak bantuan.",
+  "cli.option.locale.help": "Kode locale untuk teks CLI yang dilokalkan, seperti en atau es.",
+  "cli.option.non_interactive.help": "Jalankan tanpa prompt interaktif.",
+  "cli.option.registry.help": "Jalur ke file JSON registry deployment lokal.",
+  "cli.option.version.help": "Cetak versi.",
+  "cli.output.greeting": "Halo, dunia!"
+}

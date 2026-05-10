@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack rurukunata Greentic sistemas de record hina purichiy.",
+  "cli.command.aliases.about": "Despliegue sutichakuykunata kamachiy.",
+  "cli.command.deployments.about": "Llaqta SORX desplieguekunata kamachiy.",
+  "cli.command.doctor.about": "Huk SoRLa .gtpack SORX runtime llamk'achinapaq allinchu kasqanta qhawariy.",
+  "cli.command.help.about": "Kay willakuyta utaq qusqa subcomando(kuna)pa yanapakuyninta qillqay.",
+  "cli.command.inspect.about": "Huk SoRLa .gtpack qhawariy hinaspa mana kuyurikuq metadata nisqata ñit'ichiy.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack nisqapi willasqa MCP llamkanakunata sinrichay.",
+  "cli.command.mcp.about": "MCP runtime comandokuna.",
+  "cli.command.routes.about": "SoRLa .gtpack willasqan endpoint ñankunata sutichay.",
+  "cli.command.run.about": "Start nisqapa huk sutin.",
+  "cli.command.start.about": "Huk SORX runtime-ta SoRLa .gtpack-manta startup kutichiykunawan qallariy.",
+  "cli.command.validate.about": "Pack ukhupi churakusqa validacion suitekunata purichiy.",
+  "cli.command.validation.about": "Validacion willakuy comandokuna.",
+  "cli.command.webhook.about": "GHCR publish webhook fixturekunata chiqaqchay utaq yapamanta pukllachiy.",
+  "cli.help.template": "{about}\n\nUso: {usage}\n\nComandokuna:\n{subcommands}\n\nAkllanakuna:\n{options}",
+  "cli.option.help.help": "Yanapakuyta qillqay.",
+  "cli.option.locale.help": "CLI qillqakuna t'ikrasqa kananpaq locale codigo, en utaq es hina.",
+  "cli.option.non_interactive.help": "Tapuykunawan mana interactivo kaspa purichiy.",
+  "cli.option.registry.help": "Llaqta despliegue registro JSON willañiqiman ñan.",
+  "cli.option.version.help": "Versionta qillqay.",
+  "cli.output.greeting": "Rimaykullayki, pacha!"
+}

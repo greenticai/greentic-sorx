@@ -1,0 +1,48 @@
+{
+  "tenant": {
+    "tenant_id": "tenant-e2e",
+    "environment": "local"
+  },
+  "server": {
+    "bind": "127.0.0.1:0",
+    "public_base_url": "http://127.0.0.1:0"
+  },
+  "providers": {
+    "store": {
+      "kind": "foundationdb",
+      "config_ref": "providers.foundationdb.local"
+    }
+  },
+  "bindings": {
+    "entities": {
+      "Landlord": { "provider": "store", "collection": "landlords" },
+      "Property": { "provider": "store", "collection": "properties" },
+      "Unit": { "provider": "store", "collection": "units" },
+      "Tenant": { "provider": "store", "collection": "tenants" },
+      "Tenancy": { "provider": "store", "collection": "tenancies" },
+      "Payment": { "provider": "store", "collection": "payments" },
+      "MaintenanceRequest": { "provider": "store", "collection": "maintenance_requests" }
+    }
+  },
+  "policy": {
+    "approvals": {
+      "low": "auto",
+      "medium": "auto",
+      "high": "require_approval",
+      "critical": "deny"
+    }
+  },
+  "audit": {
+    "sink": "stdout"
+  },
+  "deployment": {
+    "tenant_id": "tenant-e2e",
+    "sor_name": "landlord-tenant",
+    "environment": "local",
+    "deployment_mode": "local_single",
+    "api_version_label": "e2e",
+    "base_path": "/"
+  },
+  "exposure": {},
+  "ghcr": {}
+}

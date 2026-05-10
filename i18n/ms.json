@@ -1,0 +1,23 @@
+{
+  "cli.about": "Jalankan artifak .gtpack SoRLa sebagai sistem rekod Greentic.",
+  "cli.command.aliases.about": "Urus alias pelaksanaan.",
+  "cli.command.deployments.about": "Urus pelaksanaan SORX setempat.",
+  "cli.command.doctor.about": "Sahkan .gtpack SoRLa untuk kegunaan masa jalan SORX.",
+  "cli.command.help.about": "Cetak mesej ini atau bantuan bagi subperintah yang diberikan.",
+  "cli.command.inspect.about": "Periksa .gtpack SoRLa dan cetak metadata stabil.",
+  "cli.command.mcp-tools.about": "Senaraikan alat MCP yang diisytiharkan oleh SoRLa .gtpack.",
+  "cli.command.mcp.about": "Perintah masa jalan MCP.",
+  "cli.command.routes.about": "Senaraikan laluan titik akhir yang diisytiharkan oleh .gtpack SoRLa.",
+  "cli.command.run.about": "Alias untuk start.",
+  "cli.command.start.about": "Mulakan masa jalan SORX daripada .gtpack SoRLa dan jawapan permulaan.",
+  "cli.command.validate.about": "Laksanakan suit pengesahan terbenam pek.",
+  "cli.command.validation.about": "Perintah laporan pengesahan.",
+  "cli.command.webhook.about": "Sahkan atau main semula lekapan webhook penerbitan GHCR.",
+  "cli.help.template": "{about}\n\nPenggunaan: {usage}\n\nPerintah:\n{subcommands}\n\nPilihan:\n{options}",
+  "cli.option.help.help": "Cetak bantuan.",
+  "cli.option.locale.help": "Kod lokal untuk teks CLI tersetempat, seperti en atau es.",
+  "cli.option.non_interactive.help": "Jalankan tanpa gesaan interaktif.",
+  "cli.option.registry.help": "Laluan ke fail JSON pendaftaran pelaksanaan setempat.",
+  "cli.option.version.help": "Cetak versi.",
+  "cli.output.greeting": "Helo, dunia!"
+}

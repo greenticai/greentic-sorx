@@ -1,0 +1,23 @@
+{
+  "cli.about": "Uruchamiaj artefakty SoRLa .gtpack jako systemy referencyjne Greentic.",
+  "cli.command.aliases.about": "Zarządzaj aliasami wdrożeń.",
+  "cli.command.deployments.about": "Zarządzaj lokalnymi wdrożeniami SORX.",
+  "cli.command.doctor.about": "Sprawdź poprawność pakietu SoRLa .gtpack do użycia w środowisku uruchomieniowym SORX.",
+  "cli.command.help.about": "Wyświetl tę wiadomość lub pomoc dla podanych podpoleceń.",
+  "cli.command.inspect.about": "Sprawdź pakiet SoRLa .gtpack i wypisz stabilne metadane.",
+  "cli.command.mcp-tools.about": "Wyświetl listę narzędzi MCP zadeklarowanych przez SoRLa .gtpack.",
+  "cli.command.mcp.about": "Polecenia środowiska uruchomieniowego MCP.",
+  "cli.command.routes.about": "Wyświetl trasy punktów końcowych zadeklarowane przez pakiet SoRLa .gtpack.",
+  "cli.command.run.about": "Alias polecenia start.",
+  "cli.command.start.about": "Uruchom środowisko uruchomieniowe SORX z pakietu SoRLa .gtpack i odpowiedzi startowych.",
+  "cli.command.validate.about": "Wykonaj pakietowe zestawy walidacyjne.",
+  "cli.command.validation.about": "Polecenia raportów walidacji.",
+  "cli.command.webhook.about": "Zweryfikuj lub odtwórz przykłady webhooków publikacji GHCR.",
+  "cli.help.template": "{about}\n\nUżycie: {usage}\n\nPolecenia:\n{subcommands}\n\nOpcje:\n{options}",
+  "cli.option.help.help": "Wyświetl pomoc.",
+  "cli.option.locale.help": "Kod ustawień regionalnych dla zlokalizowanego tekstu CLI, taki jak en lub es.",
+  "cli.option.non_interactive.help": "Uruchom bez interaktywnych monitów.",
+  "cli.option.registry.help": "Ścieżka do lokalnego pliku JSON rejestru wdrożeń.",
+  "cli.option.version.help": "Wyświetl wersję.",
+  "cli.output.greeting": "Witaj, świecie!"
+}

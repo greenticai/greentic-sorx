@@ -1,0 +1,23 @@
+{
+  "cli.about": "Rulează artefacte SoRLa .gtpack ca sisteme de înregistrare Greentic.",
+  "cli.command.aliases.about": "Gestionează aliasurile de implementare.",
+  "cli.command.deployments.about": "Gestionează implementările SORX locale.",
+  "cli.command.doctor.about": "Validează un .gtpack SoRLa pentru utilizare în runtime-ul SORX.",
+  "cli.command.help.about": "Afișează acest mesaj sau ajutorul pentru subcomanda/subcomenzile date.",
+  "cli.command.inspect.about": "Inspectează un .gtpack SoRLa și afișează metadate stabile.",
+  "cli.command.mcp-tools.about": "Listează instrumentele MCP declarate de un .gtpack SoRLa.",
+  "cli.command.mcp.about": "Comenzi pentru runtime-ul MCP.",
+  "cli.command.routes.about": "Listează rutele endpoint declarate de un .gtpack SoRLa.",
+  "cli.command.run.about": "Alias pentru start.",
+  "cli.command.start.about": "Pornește un runtime SORX dintr-un .gtpack SoRLa și răspunsuri de pornire.",
+  "cli.command.validate.about": "Execută suitele de validare încorporate în pachet.",
+  "cli.command.validation.about": "Comenzi pentru raportul de validare.",
+  "cli.command.webhook.about": "Verifică sau redă fixture-urile webhook de publicare GHCR.",
+  "cli.help.template": "{about}\n\nUtilizare: {usage}\n\nComenzi:\n{subcommands}\n\nOpțiuni:\n{options}",
+  "cli.option.help.help": "Afișează ajutorul.",
+  "cli.option.locale.help": "Codul localizării pentru text CLI localizat, cum ar fi en sau es.",
+  "cli.option.non_interactive.help": "Rulează fără solicitări interactive.",
+  "cli.option.registry.help": "Calea către fișierul JSON local al registrului de implementări.",
+  "cli.option.version.help": "Afișează versiunea.",
+  "cli.output.greeting": "Salut, lume!"
+}

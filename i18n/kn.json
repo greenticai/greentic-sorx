@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack ಕಲಾಕೃತಿಗಳನ್ನು Greentic systems of record ಆಗಿ ರನ್ ಮಾಡಿ.",
+  "cli.command.aliases.about": "ನಿಯೋಜನೆ ಅಲಿಯಾಸ್‌ಗಳನ್ನು ನಿರ್ವಹಿಸಿ.",
+  "cli.command.deployments.about": "ಸ್ಥಳೀಯ SORX ನಿಯೋಜನೆಗಳನ್ನು ನಿರ್ವಹಿಸಿ.",
+  "cli.command.doctor.about": "SORX runtime ಬಳಕೆಗಾಗಿ SoRLa .gtpack ಅನ್ನು ಮಾನ್ಯಗೊಳಿಸಿ.",
+  "cli.command.help.about": "ಈ ಸಂದೇಶವನ್ನು ಅಥವಾ ನೀಡಲಾದ ಉಪಕಮಾಂಡ್(ಗಳು)ನ ಸಹಾಯವನ್ನು ಮುದ್ರಿಸಿ.",
+  "cli.command.inspect.about": "SoRLa .gtpack ಅನ್ನು ಪರಿಶೀಲಿಸಿ ಮತ್ತು ಸ್ಥಿರ metadata ಅನ್ನು ಮುದ್ರಿಸಿ.",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack ಘೋಷಿಸಿದ MCP ಉಪಕರಣಗಳನ್ನು ಪಟ್ಟಿ ಮಾಡಿ.",
+  "cli.command.mcp.about": "MCP ರನ್‌ಟೈಮ್ ಕಮಾಂಡ್‌ಗಳು.",
+  "cli.command.routes.about": "SoRLa .gtpack ಘೋಷಿಸಿದ endpoint routes ಅನ್ನು ಪಟ್ಟಿ ಮಾಡಿ.",
+  "cli.command.run.about": "start ಗಾಗಿ alias.",
+  "cli.command.start.about": "SoRLa .gtpack ಮತ್ತು startup answers ಇಂದ SORX runtime ಅನ್ನು ಪ್ರಾರಂಭಿಸಿ.",
+  "cli.command.validate.about": "ಪ್ಯಾಕ್‌ನಲ್ಲಿ ಅಡಕಗೊಂಡಿರುವ ಮಾನ್ಯೀಕರಣ ಸೂಟ್‌ಗಳನ್ನು ಕಾರ್ಯಗತಗೊಳಿಸಿ.",
+  "cli.command.validation.about": "ಮಾನ್ಯೀಕರಣ ವರದಿ ಕಮಾಂಡ್‌ಗಳು.",
+  "cli.command.webhook.about": "GHCR ಪ್ರಕಟಣೆ ವೆಬ್‌ಹುಕ್ ಫಿಕ್ಸ್ಚರ್‌ಗಳನ್ನು ಪರಿಶೀಲಿಸಿ ಅಥವಾ ಮರುಪ್ಲೇ ಮಾಡಿ.",
+  "cli.help.template": "{about}\n\nಬಳಕೆ: {usage}\n\nಕಮಾಂಡ್‌ಗಳು:\n{subcommands}\n\nಆಯ್ಕೆಗಳು:\n{options}",
+  "cli.option.help.help": "ಸಹಾಯವನ್ನು ಮುದ್ರಿಸಿ.",
+  "cli.option.locale.help": "ಸ್ಥಳೀಕರಿಸಿದ CLI ಪಠ್ಯಕ್ಕಾಗಿ ಲೊಕೇಲ್ ಕೋಡ್, ಉದಾಹರಣೆಗೆ en ಅಥವಾ es.",
+  "cli.option.non_interactive.help": "ಸಂವಾದಾತ್ಮಕ ಪ್ರಾಂಪ್ಟ್‌ಗಳಿಲ್ಲದೆ ರನ್ ಮಾಡಿ.",
+  "cli.option.registry.help": "ಸ್ಥಳೀಯ ನಿಯೋಜನೆ ರಿಜಿಸ್ಟ್ರಿ JSON ಫೈಲ್‌ಗೆ ಪಥ.",
+  "cli.option.version.help": "ಆವೃತ್ತಿಯನ್ನು ಮುದ್ರಿಸಿ.",
+  "cli.output.greeting": "ಹಲೋ, ವಿಶ್ವವೇ!"
+}

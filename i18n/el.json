@@ -1,0 +1,23 @@
+{
+  "cli.about": "Εκτελέστε τεχνουργήματα SoRLa .gtpack ως συστήματα αρχείου καταγραφής της Greentic.",
+  "cli.command.aliases.about": "Διαχείριση ψευδωνύμων ανάπτυξης.",
+  "cli.command.deployments.about": "Διαχείριση τοπικών αναπτύξεων SORX.",
+  "cli.command.doctor.about": "Επικυρώστε ένα SoRLa .gtpack για χρήση με το runtime SORX.",
+  "cli.command.help.about": "Εκτύπωση αυτού του μηνύματος ή της βοήθειας των δοσμένων υποεντολών.",
+  "cli.command.inspect.about": "Επιθεωρήστε ένα SoRLa .gtpack και εκτυπώστε σταθερά μεταδεδομένα.",
+  "cli.command.mcp-tools.about": "Λίστα εργαλείων MCP που δηλώνονται από ένα SoRLa .gtpack.",
+  "cli.command.mcp.about": "Εντολές χρόνου εκτέλεσης MCP.",
+  "cli.command.routes.about": "Παραθέστε τις διαδρομές endpoint που δηλώνονται από ένα SoRLa .gtpack.",
+  "cli.command.run.about": "Ψευδώνυμο για start.",
+  "cli.command.start.about": "Εκκινήστε ένα runtime SORX από ένα SoRLa .gtpack και απαντήσεις εκκίνησης.",
+  "cli.command.validate.about": "Εκτέλεση σουιτών επικύρωσης ενσωματωμένων στο πακέτο.",
+  "cli.command.validation.about": "Εντολές αναφοράς επικύρωσης.",
+  "cli.command.webhook.about": "Επαλήθευση ή επανάληψη fixtures webhook δημοσίευσης GHCR.",
+  "cli.help.template": "{about}\n\nΧρήση: {usage}\n\nΕντολές:\n{subcommands}\n\nΕπιλογές:\n{options}",
+  "cli.option.help.help": "Εκτύπωση βοήθειας.",
+  "cli.option.locale.help": "Κωδικός τοπικής ρύθμισης για μεταφρασμένο κείμενο CLI, όπως en ή es.",
+  "cli.option.non_interactive.help": "Εκτέλεση χωρίς διαδραστικές προτροπές.",
+  "cli.option.registry.help": "Διαδρομή προς το τοπικό αρχείο JSON μητρώου ανάπτυξης.",
+  "cli.option.version.help": "Εκτύπωση έκδοσης.",
+  "cli.output.greeting": "Γειά σου, κόσμε!"
+}

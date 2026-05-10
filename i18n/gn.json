@@ -1,0 +1,23 @@
+{
+  "cli.about": "Momba'apo SoRLa .gtpack artefakto kuéra Greentic sistema de registro ramo.",
+  "cli.command.aliases.about": "Eñangareko deployment réra ambuévare.",
+  "cli.command.deployments.about": "Eñangareko SORX deployment lokal rehe.",
+  "cli.command.doctor.about": "Ehechajey peteĩ SoRLa .gtpack SORX runtime jepuru pegua.",
+  "cli.command.help.about": "Eimprimi ko marandu térã subcomando(kuéra) oñeme'ẽva pytyvõ.",
+  "cli.command.inspect.about": "Ema'ẽ peteĩ SoRLa .gtpack rehe ha eprinta metadata estable.",
+  "cli.command.mcp-tools.about": "Embohysýi MCP tembiporu oje'éva peteĩ SoRLa .gtpack-pe.",
+  "cli.command.mcp.about": "MCP runtime comando-kuéra.",
+  "cli.command.routes.about": "Embohysýi endpoint routes oje'eva peteĩ SoRLa .gtpack-pe.",
+  "cli.command.run.about": "Téra ambue start-pe g̃uarã.",
+  "cli.command.start.about": "Emoñepyrũ peteĩ SORX runtime peteĩ SoRLa .gtpack ha startup answers-gui.",
+  "cli.command.validate.about": "Ejapo pack ryepýpe oĩva validación suite-kuéra.",
+  "cli.command.validation.about": "Validación marandu comando-kuéra.",
+  "cli.command.webhook.about": "Ehechajey térã emoñepyrũ jey GHCR publish webhook fixture-kuéra.",
+  "cli.help.template": "{about}\n\nJeporu: {usage}\n\nComando-kuéra:\n{subcommands}\n\nOpción-kuéra:\n{options}",
+  "cli.option.help.help": "Eimprimi pytyvõ.",
+  "cli.option.locale.help": "Locale código CLI jehaipyre oñemohendapyrévape g̃uarã, techapyrã en térã es.",
+  "cli.option.non_interactive.help": "Ejapo interactive prompt'ỹre.",
+  "cli.option.registry.help": "Tape local deployment registry JSON archivo-pe.",
+  "cli.option.version.help": "Eimprimi versión.",
+  "cli.output.greeting": "Mba'éichapa, yvy!"
+}

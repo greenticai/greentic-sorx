@@ -1,0 +1,23 @@
+[package]
+name = "greentic-sorx-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Core types for the Greentic System of Record eXecutor."
+readme = "README.md"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "src/**",
+    "tests/**",
+]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

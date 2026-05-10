@@ -1,0 +1,12 @@
+{
+  "routes": [
+    "/v1/agent/landlords/create",
+    "/v1/agent/properties/create",
+    "/v1/agent/units/create",
+    "/v1/agent/tenants/create",
+    "/v1/agent/tenancies/assign",
+    "/v1/agent/payments/record",
+    "/v1/agent/maintenance/open",
+    "/v1/agent/landlords/{landlord_id}/active-tenants/{active}"
+  ]
+}

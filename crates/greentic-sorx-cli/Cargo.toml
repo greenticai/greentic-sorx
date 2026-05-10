@@ -1,0 +1,51 @@
+[package]
+name = "greentic-sorx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "CLI for the Greentic System of Record eXecutor."
+readme = "README.md"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "i18n/**",
+    "src/**",
+    "benches/**",
+    "tests/**",
+]
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.{ archive-format }"
+bin-dir = "{ name }-v{ version }-{ target }"
+pkg-fmt = "tgz"
+bin = ["greentic-sorx"]
+
+[lib]
+name = "greentic_sorx_cli"
+
+[[bin]]
+name = "greentic-sorx"
+path = "src/main.rs"
+
+[[bench]]
+name = "perf"
+harness = false
+
+[dependencies]
+ciborium.workspace = true
+clap.workspace = true
+greentic-sorx-core.workspace = true
+greentic-sorx-pack.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ciborium.workspace = true
+criterion.workspace = true
+tempfile.workspace = true
+zip.workspace = true

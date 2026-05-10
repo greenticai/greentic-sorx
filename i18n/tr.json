@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack yapıtlarını Greentic kayıt sistemleri olarak çalıştır.",
+  "cli.command.aliases.about": "Dağıtım takma adlarını yönetin.",
+  "cli.command.deployments.about": "Yerel SORX dağıtımlarını yönetin.",
+  "cli.command.doctor.about": "SORX çalışma zamanı kullanımı için bir SoRLa .gtpack'i doğrula.",
+  "cli.command.help.about": "Bu iletiyi veya verilen alt komut(lar)ın yardımını yazdırın.",
+  "cli.command.inspect.about": "Bir SoRLa .gtpack'i incele ve kararlı meta verileri yazdır.",
+  "cli.command.mcp-tools.about": "Bir SoRLa .gtpack tarafından bildirilen MCP araçlarını listeleyin.",
+  "cli.command.mcp.about": "MCP çalışma zamanı komutları.",
+  "cli.command.routes.about": "Bir SoRLa .gtpack tarafından bildirilen uç nokta rotalarını listele.",
+  "cli.command.run.about": "start için takma ad.",
+  "cli.command.start.about": "Bir SoRLa .gtpack ve başlangıç yanıtlarından bir SORX çalışma zamanı başlat.",
+  "cli.command.validate.about": "Paket içine gömülü doğrulama takımlarını çalıştırın.",
+  "cli.command.validation.about": "Doğrulama raporu komutları.",
+  "cli.command.webhook.about": "GHCR yayımlama webhook sabitlerini doğrulayın veya yeniden oynatın.",
+  "cli.help.template": "{about}\n\nKullanım: {usage}\n\nKomutlar:\n{subcommands}\n\nSeçenekler:\n{options}",
+  "cli.option.help.help": "Yardımı yazdır.",
+  "cli.option.locale.help": "Yerelleştirilmiş CLI metni için yerel ayar kodu; örneğin en veya es.",
+  "cli.option.non_interactive.help": "Etkileşimli istemler olmadan çalıştır.",
+  "cli.option.registry.help": "Yerel dağıtım kayıt defteri JSON dosyasının yolu.",
+  "cli.option.version.help": "Sürümü yazdır.",
+  "cli.output.greeting": "Merhaba, dünya!"
+}

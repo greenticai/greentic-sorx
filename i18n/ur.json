@@ -1,0 +1,23 @@
+{
+  "cli.about": "SoRLa .gtpack آرٹیفیکٹس کو Greentic سسٹمز آف ریکارڈ کے طور پر چلائیں۔",
+  "cli.command.aliases.about": "تعیناتی کے عرفی ناموں کا نظم کریں۔",
+  "cli.command.deployments.about": "مقامی SORX تعیناتیوں کا نظم کریں۔",
+  "cli.command.doctor.about": "SORX رن ٹائم کے استعمال کے لیے SoRLa .gtpack کی توثیق کریں۔",
+  "cli.command.help.about": "یہ پیغام یا دیے گئے ذیلی کمانڈز کی مدد پرنٹ کریں۔",
+  "cli.command.inspect.about": "SoRLa .gtpack کا معائنہ کریں اور مستحکم میٹا ڈیٹا پرنٹ کریں۔",
+  "cli.command.mcp-tools.about": "SoRLa .gtpack کے ذریعے اعلان کردہ MCP ٹولز کی فہرست دکھائیں۔",
+  "cli.command.mcp.about": "MCP رن ٹائم کمانڈز۔",
+  "cli.command.routes.about": "SoRLa .gtpack کے ذریعے اعلان کردہ اینڈ پوائنٹ روٹس کی فہرست بنائیں۔",
+  "cli.command.run.about": "start کے لیے عرف۔",
+  "cli.command.start.about": "SoRLa .gtpack اور اسٹارٹ اپ جوابات سے SORX رن ٹائم شروع کریں۔",
+  "cli.command.validate.about": "پیک میں شامل توثیقی سوئٹس چلائیں۔",
+  "cli.command.validation.about": "توثیقی رپورٹ کمانڈز۔",
+  "cli.command.webhook.about": "GHCR پبلش ویب ہک فکسچرز کی توثیق کریں یا دوبارہ چلائیں۔",
+  "cli.help.template": "{about}\n\nاستعمال: {usage}\n\nکمانڈز:\n{subcommands}\n\nاختیارات:\n{options}",
+  "cli.option.help.help": "مدد پرنٹ کریں۔",
+  "cli.option.locale.help": "مقامی CLI متن کے لیے لوکیل کوڈ، جیسے en یا es۔",
+  "cli.option.non_interactive.help": "تعاملی اشاروں کے بغیر چلائیں۔",
+  "cli.option.registry.help": "مقامی تعیناتی رجسٹری JSON فائل کا راستہ۔",
+  "cli.option.version.help": "ورژن پرنٹ کریں۔",
+  "cli.output.greeting": "ہیلو، دنیا!"
+}
