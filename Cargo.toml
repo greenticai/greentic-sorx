@@ -19,7 +19,7 @@ categories = ["command-line-utilities"]
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
 ciborium = "0.2"
-criterion = "0.5"
+criterion = "0.8"
 greentic-sorx-core = { version = "0.1.0", path = "crates/greentic-sorx-core" }
 greentic-sorx-pack = { version = "0.1.0", path = "crates/greentic-sorx-pack" }
 hex = "0.4"
