@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "مدیریت نام‌های مستعار استقرار.",
   "cli.command.deployments.about": "مدیریت استقرارهای محلی SORX.",
   "cli.command.doctor.about": "اعتبارسنجی یک SoRLa .gtpack برای استفاده در زمان اجرای SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "چاپ این پیام یا راهنمای زیر‌دستور(های) داده‌شده.",
   "cli.command.inspect.about": "بازرسی یک SoRLa .gtpack و چاپ فراداده پایدار.",
   "cli.command.mcp-tools.about": "فهرست ابزارهای MCP اعلام‌شده توسط یک .gtpack از SoRLa.",

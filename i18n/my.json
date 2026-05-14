@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "ဖြန့်ချိမှု alias များကို စီမံပါ။",
   "cli.command.deployments.about": "ဒေသတွင်း SORX ဖြန့်ချိမှုများကို စီမံပါ။",
   "cli.command.doctor.about": "SORX runtime အသုံးပြုရန်အတွက် SoRLa .gtpack တစ်ခုကို စစ်ဆေးအတည်ပြုပါ။",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "ဤစာကို သို့မဟုတ် ပေးထားသော subcommand များ၏ အကူအညီကို ပြပါ။",
   "cli.command.inspect.about": "SoRLa .gtpack တစ်ခုကို စစ်ဆေးပြီး တည်ငြိမ်သော metadata ကို ပုံနှိပ်ဖော်ပြပါ။",
   "cli.command.mcp-tools.about": "SoRLa .gtpack မှ ကြေညာထားသော MCP tools များကို စာရင်းပြပါ။",

@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Управление псевдонимами развертывания.",
   "cli.command.deployments.about": "Управление локальными развертываниями SORX.",
   "cli.command.doctor.about": "Проверьте SoRLa .gtpack для использования в среде выполнения SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Вывести это сообщение или справку по указанным подкомандам.",
   "cli.command.inspect.about": "Проверьте SoRLa .gtpack и выведите стабильные метаданные.",
   "cli.command.mcp-tools.about": "Список инструментов MCP, объявленных в SoRLa .gtpack.",

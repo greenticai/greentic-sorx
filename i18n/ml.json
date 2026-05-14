@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "വിന്യാസ അല്യാസുകൾ നിയന്ത്രിക്കുക.",
   "cli.command.deployments.about": "പ്രാദേശിക SORX വിന്യാസങ്ങൾ നിയന്ത്രിക്കുക.",
   "cli.command.doctor.about": "SORX റൺടൈം ഉപയോഗത്തിനായി ഒരു SoRLa .gtpack സാധൂകരിക്കുക.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "ഈ സന്ദേശമോ നൽകിയ ഉപകമാൻഡിന്റെ(കളുടെ) സഹായമോ പ്രിന്റ് ചെയ്യുക.",
   "cli.command.inspect.about": "ഒരു SoRLa .gtpack പരിശോധിച്ച് സ്ഥിരമായ മെറ്റാഡാറ്റ അച്ചടിക്കുക.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack പ്രഖ്യാപിച്ച MCP ഉപകരണങ്ങൾ ലിസ്റ്റ് ചെയ്യുക.",

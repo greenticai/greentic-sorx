@@ -8,8 +8,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
-use crate::inspect::{SorxInspectPack, SorxInspectReport, SorxInspectSorla, SorxInspectSorx};
+use crate::inspect::{
+    SorxInspectOntology, SorxInspectPack, SorxInspectReport, SorxInspectSorla, SorxInspectSorx,
+};
 use crate::manifest::{PackLock, PackManifest};
+use crate::ontology::{OntologyAssets, OntologyGraph, RetrievalBindings, validate_ontology_assets};
 
 const SORX_RUNTIME_EXTENSION_ID: &str = "greentic.sorx.runtime.v1";
 const REQUIRED_ENTRIES: &[&str] = &[
@@ -43,6 +46,7 @@ pub struct SorlaAssets {
     pub arazzo_yaml: Option<String>,
     pub mcp_tools_json: Option<Value>,
     pub llms_txt_fragment: Option<String>,
+    pub ontology: Option<OntologyAssets>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +109,26 @@ impl std::error::Error for SorxPackError {}
 pub fn load_sorla_pack(path: &Path) -> Result<LoadedSorlaPack, SorxPackError> {
     validate_input_path(path)?;
     let pack_digest = Some(format!("sha256:{}", sha256_file(path)?));
-    let mut archive = open_gtpack(path)?;
+    let archive = open_gtpack(path)?;
+    load_sorla_pack_archive(path.to_path_buf(), pack_digest, archive)
+}
+
+pub fn load_sorla_pack_from_bytes(bytes: &[u8]) -> Result<LoadedSorlaPack, SorxPackError> {
+    let pack_digest = Some(format!("sha256:{}", sha256_hex(bytes)));
+    let archive = ZipArchive::new(Cursor::new(bytes)).map_err(|err| {
+        SorxPackError::new(
+            "invalid_archive",
+            format!("failed to read gtpack archive from bytes: {err}"),
+        )
+    })?;
+    load_sorla_pack_archive(PathBuf::from("<bytes>"), pack_digest, archive)
+}
+
+fn load_sorla_pack_archive<R: Read + Seek>(
+    pack_path: PathBuf,
+    pack_digest: Option<String>,
+    mut archive: ZipArchive<R>,
+) -> Result<LoadedSorlaPack, SorxPackError> {
     let entries = zip_entry_names(&mut archive)?;
     validate_entry_paths(&entries)?;
 
@@ -139,6 +162,9 @@ pub fn load_sorla_pack(path: &Path) -> Result<LoadedSorlaPack, SorxPackError> {
 
     let mut doctor_errors = validation_errors;
     doctor_errors.extend(validate_mcp_tools(&sorla_assets));
+    if let Some(ontology) = &sorla_assets.ontology {
+        doctor_errors.extend(validate_ontology_assets(ontology));
+    }
     let mut doctor_warnings = Vec::new();
     if lock.is_none() {
         doctor_warnings.push("pack.lock.cbor is missing; lock validation was skipped".to_string());
@@ -146,7 +172,7 @@ pub fn load_sorla_pack(path: &Path) -> Result<LoadedSorlaPack, SorxPackError> {
     doctor_warnings.extend(secret_warnings(&sorx_assets));
 
     Ok(LoadedSorlaPack {
-        pack_path: path.to_path_buf(),
+        pack_path,
         pack_name: manifest.pack.name.clone(),
         pack_version: manifest.pack.version.clone(),
         pack_digest,
@@ -163,6 +189,20 @@ pub fn load_sorla_pack(path: &Path) -> Result<LoadedSorlaPack, SorxPackError> {
 
 pub fn inspect_sorla_pack(path: &Path) -> Result<SorxInspectReport, SorxPackError> {
     let pack = load_sorla_pack(path)?;
+    inspect_loaded_sorla_pack(pack)
+}
+
+pub fn inspect_gtpack_bytes(bytes: &[u8]) -> Result<SorxInspectReport, SorxPackError> {
+    let pack = load_sorla_pack_from_bytes(bytes)?;
+    inspect_loaded_sorla_pack(pack)
+}
+
+pub fn startup_schema_from_gtpack_bytes(bytes: &[u8]) -> Result<Value, SorxPackError> {
+    let pack = load_sorla_pack_from_bytes(bytes)?;
+    Ok(pack.sorx_assets.start_schema_json)
+}
+
+fn inspect_loaded_sorla_pack(pack: LoadedSorlaPack) -> Result<SorxInspectReport, SorxPackError> {
     Ok(SorxInspectReport {
         schema: "greentic.sorx.inspect.v1".to_string(),
         pack: SorxInspectPack {
@@ -189,6 +229,24 @@ pub fn inspect_sorla_pack(path: &Path) -> Result<SorxInspectReport, SorxPackErro
             has_validation_suite_cbor: pack.sorx_assets.validation_suite_cbor.is_some(),
             has_validation_suite_json: pack.sorx_assets.validation_suite_json.is_some(),
         },
+        ontology: pack
+            .sorla_assets
+            .ontology
+            .as_ref()
+            .map(|ontology| SorxInspectOntology {
+                present: true,
+                schema: Some(ontology.graph.schema.clone()),
+                concept_count: ontology.graph.concepts.len(),
+                relationship_count: ontology.graph.relationships.len(),
+                retrieval_bindings_present: ontology.retrieval_bindings.is_some(),
+            })
+            .unwrap_or(SorxInspectOntology {
+                present: false,
+                schema: None,
+                concept_count: 0,
+                relationship_count: 0,
+                retrieval_bindings_present: false,
+            }),
     })
 }
 
@@ -469,6 +527,7 @@ fn read_sorla_assets<R: Read + Seek>(
         None
     };
     let llms_txt_fragment = optional_zip_text(archive, entries, "assets/sorla/llms.txt.fragment")?;
+    let ontology = read_ontology_assets(archive, entries)?;
 
     Ok(SorlaAssets {
         model_cbor,
@@ -477,7 +536,49 @@ fn read_sorla_assets<R: Read + Seek>(
         arazzo_yaml,
         mcp_tools_json,
         llms_txt_fragment,
+        ontology,
     })
+}
+
+fn read_ontology_assets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    entries: &BTreeSet<String>,
+) -> Result<Option<OntologyAssets>, SorxPackError> {
+    if !entries.contains("assets/sorla/ontology.graph.json") {
+        return Ok(None);
+    }
+    let graph_json = parse_json(archive, "assets/sorla/ontology.graph.json")?;
+    let graph = serde_json::from_value::<OntologyGraph>(graph_json.clone()).map_err(|err| {
+        SorxPackError::new(
+            "invalid_ontology_graph",
+            format!("assets/sorla/ontology.graph.json does not match expected shape: {err}"),
+        )
+    })?;
+    let ir_cbor = optional_zip_bytes(archive, entries, "assets/sorla/ontology.ir.cbor")?;
+    let retrieval_bindings_json = if entries.contains("assets/sorla/retrieval-bindings.json") {
+        Some(parse_json(archive, "assets/sorla/retrieval-bindings.json")?)
+    } else {
+        None
+    };
+    let retrieval_bindings = retrieval_bindings_json
+        .as_ref()
+        .map(|value| serde_json::from_value::<RetrievalBindings>(value.clone()))
+        .transpose()
+        .map_err(|err| {
+            SorxPackError::new(
+                "invalid_retrieval_bindings",
+                format!(
+                    "assets/sorla/retrieval-bindings.json does not match expected shape: {err}"
+                ),
+            )
+        })?;
+    Ok(Some(OntologyAssets {
+        graph_json,
+        graph,
+        ir_cbor,
+        retrieval_bindings_json,
+        retrieval_bindings,
+    }))
 }
 
 fn read_sorx_assets<R: Read + Seek>(
@@ -854,6 +955,46 @@ mod tests {
         );
     }
 
+    fn add_valid_ontology(entries: &mut BTreeMap<String, Vec<u8>>) {
+        entries.insert(
+            "assets/sorla/ontology.graph.json".to_string(),
+            br#"{"schema":"greentic.sorla.ontology.graph.v1","concepts":[{"id":"Tenant"},{"id":"Payment"}],"relationships":[{"id":"tenant_makes_payment","from":"Tenant","to":"Payment"}],"records":[{"id":"tenant-1","concept_id":"Tenant"}]}"#.to_vec(),
+        );
+        entries.insert(
+            "assets/sorla/retrieval-bindings.json".to_string(),
+            br#"{"schema":"greentic.sorla.retrieval-bindings.v1","bindings":[{"id":"tenant-evidence","concept_id":"Tenant","scope":{"concepts":["Tenant"],"relationships":["tenant_makes_payment"]}}]}"#.to_vec(),
+        );
+        let mut manifest: PackManifest =
+            ciborium::de::from_reader(Cursor::new(entries.get("pack.cbor").unwrap().clone()))
+                .unwrap();
+        manifest
+            .assets
+            .push("assets/sorla/ontology.graph.json".to_string());
+        manifest
+            .assets
+            .push("assets/sorla/retrieval-bindings.json".to_string());
+        let sorla = manifest
+            .extension
+            .get_mut("sorla")
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        sorla.insert(
+            "ontology_graph".to_string(),
+            Value::String("assets/sorla/ontology.graph.json".to_string()),
+        );
+        sorla.insert(
+            "retrieval_bindings".to_string(),
+            Value::String("assets/sorla/retrieval-bindings.json".to_string()),
+        );
+        entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert(
+            "manifest.json".to_string(),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+        refresh_lock(entries);
+    }
+
     fn write_pack(entries: BTreeMap<String, Vec<u8>>) -> (TempDir, PathBuf) {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("pack.gtpack");
@@ -909,6 +1050,116 @@ mod tests {
         assert!(json.contains("\"schema\": \"greentic.sorx.inspect.v1\""));
         assert!(json.contains("\"name\": \"landlord-tenant-sor\""));
         assert!(json.contains("\"has_mcp_tools\": true"));
+        assert!(json.contains("\"present\": false"));
+    }
+
+    #[test]
+    fn pack_without_ontology_still_works() {
+        let (_temp, path) = write_pack(valid_entries());
+        let pack = load_sorla_pack(&path).unwrap();
+        assert!(pack.sorla_assets.ontology.is_none());
+        let report = doctor_sorla_pack(&path);
+        assert!(report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn valid_ontology_passes_doctor_and_inspect_summary() {
+        let mut entries = valid_entries();
+        add_valid_ontology(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(doctor.ok, "{doctor:?}");
+        let report = inspect_sorla_pack(&path).unwrap();
+        assert!(report.ontology.present);
+        assert_eq!(
+            report.ontology.schema.as_deref(),
+            Some("greentic.sorla.ontology.graph.v1")
+        );
+        assert_eq!(report.ontology.concept_count, 2);
+        assert_eq!(report.ontology.relationship_count, 1);
+        assert!(report.ontology.retrieval_bindings_present);
+    }
+
+    #[test]
+    fn invalid_ontology_relationship_fails_doctor() {
+        let mut entries = valid_entries();
+        add_valid_ontology(&mut entries);
+        entries.insert(
+            "assets/sorla/ontology.graph.json".to_string(),
+            br#"{"schema":"greentic.sorla.ontology.graph.v1","concepts":[{"id":"Tenant"}],"relationships":[{"id":"bad","from":"Tenant","to":"Missing"}]}"#.to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        assert!(
+            doctor.errors[0]
+                .message
+                .contains("references unknown to concept")
+        );
+    }
+
+    #[test]
+    fn retrieval_binding_validation_references_graph_ids() {
+        let mut entries = valid_entries();
+        add_valid_ontology(&mut entries);
+        entries.insert(
+            "assets/sorla/retrieval-bindings.json".to_string(),
+            br#"{"schema":"greentic.sorla.retrieval-bindings.v1","bindings":[{"id":"missing","concept_id":"Missing"}]}"#.to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        assert!(doctor.errors[0].message.contains("unknown concept"));
+    }
+
+    #[test]
+    fn ontology_ir_hash_must_match_when_present() {
+        let mut entries = valid_entries();
+        add_valid_ontology(&mut entries);
+        entries.insert(
+            "assets/sorla/ontology.ir.cbor".to_string(),
+            vec![0xa1, 0x61, 0x78, 0x01],
+        );
+        entries.insert(
+            "assets/sorla/ontology.graph.json".to_string(),
+            br#"{"schema":"greentic.sorla.ontology.graph.v1","ir_sha256":"sha256:deadbeef","concepts":[{"id":"Tenant"},{"id":"Payment"}],"relationships":[{"id":"tenant_makes_payment","from":"Tenant","to":"Payment"}]}"#.to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        assert!(doctor.errors[0].message.contains("IR hash"));
+    }
+
+    #[test]
+    fn ontology_secret_and_absolute_path_values_fail_doctor() {
+        let mut entries = valid_entries();
+        add_valid_ontology(&mut entries);
+        entries.insert(
+            "assets/sorla/ontology.graph.json".to_string(),
+            br#"{"schema":"greentic.sorla.ontology.graph.v1","concepts":[{"id":"Tenant","source_path":"/Users/alice/private.csv","note":"password: bad"}],"relationships":[]}"#.to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        let messages = doctor
+            .errors
+            .iter()
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("secret-like"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("absolute local path"))
+        );
     }
 
     #[test]

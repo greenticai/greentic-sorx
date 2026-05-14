@@ -6,6 +6,7 @@ pub struct SorxInspectReport {
     pub pack: SorxInspectPack,
     pub sorla: SorxInspectSorla,
     pub sorx: SorxInspectSorx,
+    pub ontology: SorxInspectOntology,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -33,4 +34,14 @@ pub struct SorxInspectSorx {
     pub validation_suite_status: String,
     pub has_validation_suite_cbor: bool,
     pub has_validation_suite_json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SorxInspectOntology {
+    pub present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub concept_count: usize,
+    pub relationship_count: usize,
+    pub retrieval_bindings_present: bool,
 }

@@ -6,6 +6,12 @@ greentic-sorx inspect landlord.gtpack
 greentic-sorx routes landlord.gtpack --json
 greentic-sorx routes --deployment <deployment-id> --json
 greentic-sorx mcp-tools landlord.gtpack
+greentic-sorx graph concepts landlord.gtpack --json
+greentic-sorx graph relationships landlord.gtpack --json
+greentic-sorx graph paths landlord.gtpack --from Tenant --to Payment --json
+greentic-sorx graph neighbors landlord.gtpack --entity-type Tenant --entity-id tenant-1 --depth 2 --json
+greentic-sorx graph explain landlord.gtpack --from Tenant --to Payment --json
+greentic-sorx evidence query landlord.gtpack --answers landlord.answers.json --query "lease status" --entity-type Tenant --entity-id tenant-1 --max-depth 2 --json
 greentic-sorx deployments list
 greentic-sorx deployments inspect <deployment-id>
 greentic-sorx deployments create --pack landlord.gtpack --tenant acme --sor landlord --environment production --api-version v1 --base-path /sorx/acme/landlord/v1 --visibility private
@@ -49,6 +55,15 @@ Stable exit codes:
 `run` is currently an alias for the HTTP `start --answers` path. `mcp start`
 validates answers and emits an adapter runtime plan; full MCP server transport
 is still future work.
+
+`inspect` includes an `ontology` summary when a pack contains
+`assets/sorla/ontology.graph.json`, including the graph schema, concept count,
+relationship count, and whether `assets/sorla/retrieval-bindings.json` is
+present.
+
+`start --dry-run --json` includes `provider_compatibility` for ontology-enabled
+packs. Packs without ontology report a passed compatibility section with no
+bindings or issues.
 
 Registry commands write to `--registry <path>`, `SORX_REGISTRY_PATH`, or the
 default user config path.

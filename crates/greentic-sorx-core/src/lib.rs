@@ -4,11 +4,14 @@ mod approval;
 mod audit;
 mod deployment;
 mod error;
+mod evidence;
 mod ghcr_webhook;
 mod mcp;
 mod model;
+mod ontology_graph;
 mod policy;
 mod provider;
+mod provider_compatibility;
 pub mod providers;
 mod router;
 mod runtime;
@@ -28,6 +31,11 @@ pub use deployment::{
     RollbackAliasRequest, SorxDeployment, StateMode, TrafficHeaderMatch, TrafficMode, TrafficSplit,
 };
 pub use error::{SorxError, SorxResult};
+pub use evidence::{
+    DeterministicEvidenceProvider, EvidenceExplain, EvidenceItem, EvidenceProvider,
+    EvidenceQueryFilter, EvidenceQueryResult, OntologyAuditEvent, OntologyScope, ScopedEntity,
+    ontology_audit_event, redact_audit_value,
+};
 pub use ghcr_webhook::{
     GhcrPublishedMetadata, GhcrWebhookConfig, GhcrWebhookError, GhcrWebhookOutcome,
     GithubWebhookHeaders, OciArtifactResolver, OciReference, PromotionPolicy, ResolvedOciArtifact,
@@ -40,11 +48,24 @@ pub use model::{
     EndpointResult, EndpointStatus, InvocationSource, OperationKind, RiskLevel, RuntimePack,
     SorxEvent,
 };
-pub use policy::{PolicyAction, PolicyConfig, PolicyDecision, PolicyEngine, PolicyMode};
+pub use ontology_graph::{
+    OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,
+};
+pub use policy::{
+    OntologyPolicyAction, OntologyPolicyDecision, OntologyPolicyDecisionKind, OntologyPolicyReason,
+    OntologyPolicyRedaction, OntologyPolicyResource, OntologyPolicySubject, PolicyAction,
+    PolicyConfig, PolicyDecision, PolicyEngine, PolicyMode, RelationshipTraversalPermission,
+    SensitivityContext,
+};
 pub use provider::{
     BindingResolver, CreateOp, DeleteOp, DeleteResult, EntityRecord, GetOp, ProviderBinding,
     ProviderNamespace, ProviderRegistry, QueryOp, QueryResult, SorStoreProvider, StoreProviderKind,
     UpdateOp, default_collection_name,
+};
+pub use provider_compatibility::{
+    ProviderCapabilityRequirement, ProviderCompatibilityInput, ProviderCompatibilityIssue,
+    ProviderCompatibilityIssueCategory, ProviderCompatibilityReport, ProviderCompatibilityStatus,
+    ProviderResolutionMode, ResolvedProviderBinding, resolve_provider_compatibility,
 };
 pub use providers::{FoundationDbProviderAdapter, FoundationDbProviderConfig, MemoryStoreProvider};
 pub use router::EndpointRouter;

@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Pārvaldīt izvietošanas aizstājvārdus.",
   "cli.command.deployments.about": "Pārvaldīt lokālās SORX izvietošanas.",
   "cli.command.doctor.about": "Validēt SoRLa .gtpack SORX izpildlaika lietošanai.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Izdrukāt šo ziņojumu vai norādītās apakškomandas(-u) palīdzību.",
   "cli.command.inspect.about": "Pārbaudīt SoRLa .gtpack un izdrukāt stabilus metadatus.",
   "cli.command.mcp-tools.about": "Uzskaitīt MCP rīkus, kas deklarēti SoRLa .gtpack.",

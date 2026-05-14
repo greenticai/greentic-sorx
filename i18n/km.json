@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "គ្រប់គ្រងឈ្មោះក្លែងក្លាយនៃការដាក់ឱ្យដំណើរការ។",
   "cli.command.deployments.about": "គ្រប់គ្រងការដាក់ឱ្យដំណើរការ SORX មូលដ្ឋាន។",
   "cli.command.doctor.about": "ផ្ទៀងផ្ទាត់ SoRLa .gtpack សម្រាប់ការប្រើប្រាស់ runtime SORX។",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "បោះពុម្ពសារនេះ ឬជំនួយរបស់អនុពាក្យបញ្ជាដែលបានផ្តល់។",
   "cli.command.inspect.about": "ពិនិត្យ SoRLa .gtpack ហើយបោះពុម្ព metadata ដែលមានស្ថិរភាព។",
   "cli.command.mcp-tools.about": "រាយបញ្ជីឧបករណ៍ MCP ដែលបានប្រកាសដោយ SoRLa .gtpack។",

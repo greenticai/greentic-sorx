@@ -38,6 +38,30 @@ Additional event names used by current flows:
 - `sorx.approval.requested`
 - `sorx.endpoint.failed`
 
+Ontology-aware command outputs include an `audit_events` array using the stable
+`greentic.sorx.ontology.audit.v1` schema. Current ontology event names:
+
+- `ontology.graph.loaded`
+- `ontology.path.resolved`
+- `provider.compatibility.checked`
+- `evidence.query.planned`
+- `evidence.query.executed`
+- `entity.links.resolved`
+- `policy.ontology.decision`
+- `action.ontology.executed`
+- `public.exposure.gated`
+
+Ontology explain payloads expose graph hashes, concepts, relationships,
+providers, evidence IDs, policy decisions, and redaction metadata.
+- `ontology.graph.loaded`
+- `ontology.path.resolved`
+- `evidence.query.planned`
+- `evidence.query.executed`
+
+Ontology graph and evidence commands include deterministic `audit_events`
+arrays in their JSON output. These command-level events use ontology hashes,
+IDs, and counts rather than request bodies.
+
 Planned deployment lifecycle events:
 
 - `sorx.pack.loaded`
@@ -45,4 +69,5 @@ Planned deployment lifecycle events:
 - `sorx.tool.registered`
 - `sorx.request.received`
 
-Audit events intentionally record metadata, not request bodies.
+Audit events intentionally record metadata, not request bodies. Secret-like
+fields in ontology audit details are redacted before serialization.

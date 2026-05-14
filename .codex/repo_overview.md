@@ -370,7 +370,7 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
   - **Likely cause / nature of issue:** No current build/test failure was observed.
 
 - **Location:** Coverage policy
-  - **Evidence:** `greentic-dev coverage` completed successfully with workspace line coverage of 81.26%.
+  - **Evidence:** `greentic-dev coverage` completed successfully on May 13, 2026 with workspace line coverage of 80.83%.
   - **Likely cause / nature of issue:** No current coverage policy failure was observed.
 
 - **Location:** Lightweight benchmark smoke

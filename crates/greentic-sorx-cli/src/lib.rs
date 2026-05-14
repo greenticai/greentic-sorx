@@ -1,17 +1,30 @@
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use greentic_sorx_core::{
-    CreateDeploymentRequest, DeploymentVisibility, EndpointRouter, GhcrWebhookConfig,
+    CreateDeploymentRequest, DeploymentVisibility, DeterministicEvidenceProvider, EndpointRouter,
+    EvidenceProvider, EvidenceQueryFilter, EvidenceQueryResult, GhcrWebhookConfig,
     GhcrWebhookError, GithubWebhookHeaders, LocalDeploymentRegistryStore, OciArtifactResolver,
-    OciReference, PackArtifact, ResolvedOciArtifact, RollbackAliasRequest, SorxCommandContext,
-    StateMode, build_startup_plan, handle_ghcr_published_webhook, mcp_tools_from_metadata,
-    normalize_start_answers, parse_ghcr_published_metadata, runtime_config_from_answers,
+    OciReference, OntologyAuditEvent, OntologyConceptNode, OntologyGraphService,
+    OntologyPolicyAction, OntologyPolicyDecisionKind, OntologyPolicyResource,
+    OntologyPolicySubject, OntologyRelationshipEdge, OntologyScope, PackArtifact, PolicyEngine,
+    ProviderCompatibilityInput, ProviderCompatibilityStatus, ProviderResolutionMode,
+    ResolvedOciArtifact, RollbackAliasRequest, ScopedEntity, SensitivityContext,
+    SorxCommandContext, StateMode, build_startup_plan, handle_ghcr_published_webhook,
+    mcp_tools_from_metadata, normalize_start_answers,
+    ontology_audit_event as core_ontology_audit_event, parse_ghcr_published_metadata,
+    resolve_provider_compatibility, runtime_config_from_answers,
 };
-use greentic_sorx_pack::{doctor_sorla_pack, inspect_sorla_pack, load_sorla_pack};
+use greentic_sorx_pack::{
+    SorxDoctorReport, SorxInspectReport, doctor_sorla_loaded_pack, doctor_sorla_pack,
+    inspect_gtpack_bytes, inspect_sorla_pack, load_sorla_pack, load_sorla_pack_from_bytes,
+    startup_schema_from_gtpack_bytes,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 mod http_runtime;
 mod validation;
@@ -121,6 +134,11 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Validate or inspect generated artifact inputs.
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommands,
+    },
     /// Inspect a SoRLa .gtpack and print stable metadata.
     Inspect {
         /// Path to a SoRLa .gtpack archive.
@@ -147,6 +165,16 @@ pub enum Commands {
     McpTools {
         /// Path to a SoRLa .gtpack archive.
         pack: PathBuf,
+    },
+    /// Traverse static ontology graphs.
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommands,
+    },
+    /// Query ontology-scoped evidence.
+    Evidence {
+        #[command(subcommand)]
+        command: EvidenceCommands,
     },
     /// MCP runtime commands.
     Mcp {
@@ -235,6 +263,56 @@ pub enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ArtifactCommands {
+    /// Validate a .gtpack file or Designer artifact JSON.
+    Validate {
+        /// Path to a SoRLa .gtpack archive.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Path to Designer generic artifact JSON.
+        #[arg(long = "artifact-json")]
+        artifact_json: Option<PathBuf>,
+
+        /// Optional startup answers JSON for provider compatibility.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+
+        /// Emit stable JSON. This is currently the default output format.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a .gtpack file or Designer artifact JSON.
+    Inspect {
+        /// Path to a SoRLa .gtpack archive.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Path to Designer generic artifact JSON.
+        #[arg(long = "artifact-json")]
+        artifact_json: Option<PathBuf>,
+
+        /// Emit stable JSON. This is currently the default output format.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Emit the embedded startup schema from a .gtpack file or Designer artifact JSON.
+    StartupSchema {
+        /// Path to a SoRLa .gtpack archive.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Path to Designer generic artifact JSON.
+        #[arg(long = "artifact-json")]
+        artifact_json: Option<PathBuf>,
+
+        /// Emit stable JSON. This is currently the default output format.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum WebhookCommands {
     /// Parse and validate a fixture payload shape without mutating the registry.
     VerifyFixture {
@@ -250,6 +328,78 @@ pub enum WebhookCommands {
         /// X-Hub-Signature-256 value.
         #[arg(long)]
         signature: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GraphCommands {
+    /// List ontology concepts.
+    Concepts {
+        pack: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List ontology relationships.
+    Relationships {
+        pack: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find type paths between ontology concepts.
+    Paths {
+        pack: PathBuf,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, default_value_t = 4)]
+        max_depth: u8,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List static ontology relationships near an entity type.
+    Neighbors {
+        pack: PathBuf,
+        #[arg(long = "entity-type")]
+        entity_type: String,
+        #[arg(long = "entity-id")]
+        entity_id: String,
+        #[arg(long, default_value_t = 1)]
+        depth: u8,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explain type paths between ontology concepts.
+    Explain {
+        pack: PathBuf,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, default_value_t = 4)]
+        max_depth: u8,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EvidenceCommands {
+    /// Query evidence within an ontology scope.
+    Query {
+        pack: PathBuf,
+        #[arg(long)]
+        answers: PathBuf,
+        #[arg(long)]
+        query: String,
+        #[arg(long = "entity-type")]
+        entity_type: String,
+        #[arg(long = "entity-id")]
+        entity_id: String,
+        #[arg(long, default_value_t = 1)]
+        max_depth: u8,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -527,6 +677,12 @@ fn localized_help(locale: &str) -> String {
         "mcp-tools",
         catalog.text("cli.command.mcp-tools.about"),
     );
+    set_subcommand_about(&mut cmd, "graph", catalog.text("cli.command.graph.about"));
+    set_subcommand_about(
+        &mut cmd,
+        "evidence",
+        catalog.text("cli.command.evidence.about"),
+    );
     set_subcommand_about(&mut cmd, "mcp", catalog.text("cli.command.mcp.about"));
     set_subcommand_about(
         &mut cmd,
@@ -721,6 +877,7 @@ fn dispatch(
 ) -> CliResult<()> {
     match command {
         Commands::Doctor { pack, json } => run_doctor(pack, json),
+        Commands::Artifact { command } => run_artifact(command, _context),
         Commands::Inspect { pack, json } => run_inspect(pack, json),
         Commands::Routes {
             pack,
@@ -737,6 +894,8 @@ fn dispatch(
             )),
         },
         Commands::McpTools { pack } => run_mcp_tools(pack),
+        Commands::Graph { command } => run_graph(command),
+        Commands::Evidence { command } => run_evidence(command, _context),
         Commands::Mcp {
             command: McpCommands::Start { pack, answers },
         } => run_mcp_start(pack, answers, _context),
@@ -1308,6 +1467,298 @@ fn run_doctor(pack: PathBuf, json: bool) -> CliResult<()> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GeneratedArtifactLike {
+    kind: String,
+    filename: String,
+    media_type: String,
+    sha256: String,
+    bytes_base64: String,
+    #[serde(default)]
+    metadata_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ArtifactValidationReport {
+    schema: String,
+    valid: bool,
+    artifact: ArtifactReportMetadata,
+    doctor: SorxDoctorReport,
+    inspect: Option<SorxInspectReport>,
+    startup_schema: Option<serde_json::Value>,
+    provider_compatibility: Option<greentic_sorx_core::ProviderCompatibilityReport>,
+    diagnostics: Vec<ArtifactDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ArtifactReportMetadata {
+    filename: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ArtifactDiagnostic {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactInput {
+    bytes: Vec<u8>,
+    filename: String,
+    sha256: String,
+}
+
+fn run_artifact(command: ArtifactCommands, context: &SorxCommandContext) -> CliResult<()> {
+    match command {
+        ArtifactCommands::Validate {
+            file,
+            artifact_json,
+            answers,
+            json: _,
+        } => run_artifact_validate(file, artifact_json, answers, context),
+        ArtifactCommands::Inspect {
+            file,
+            artifact_json,
+            json: _,
+        } => {
+            let input = read_artifact_input(file, artifact_json)?;
+            let report = inspect_gtpack_bytes(&input.bytes)
+                .map_err(|err| CliError::pack(err.to_string()))?;
+            print_json(&report)
+        }
+        ArtifactCommands::StartupSchema {
+            file,
+            artifact_json,
+            json: _,
+        } => {
+            let input = read_artifact_input(file, artifact_json)?;
+            let schema = startup_schema_from_gtpack_bytes(&input.bytes)
+                .map_err(|err| CliError::pack(err.to_string()))?;
+            print_json(&schema)
+        }
+    }
+}
+
+fn run_artifact_validate(
+    file: Option<PathBuf>,
+    artifact_json: Option<PathBuf>,
+    answers: Option<PathBuf>,
+    context: &SorxCommandContext,
+) -> CliResult<()> {
+    let input = read_artifact_input(file, artifact_json)?;
+    let loaded = load_sorla_pack_from_bytes(&input.bytes);
+    let doctor = match &loaded {
+        Ok(pack) => doctor_sorla_loaded_pack(pack),
+        Err(err) => SorxDoctorReport {
+            ok: false,
+            errors: vec![greentic_sorx_pack::SorxDoctorIssue {
+                level: greentic_sorx_pack::SorxDoctorIssueLevel::Error,
+                code: err.code().to_string(),
+                message: err.to_string(),
+            }],
+            warnings: Vec::new(),
+        },
+    };
+    let inspect = loaded
+        .as_ref()
+        .ok()
+        .and_then(|_| inspect_gtpack_bytes(&input.bytes).ok());
+    let startup_schema = loaded
+        .as_ref()
+        .ok()
+        .map(|pack| pack.sorx_assets.start_schema_json.clone());
+    let mut diagnostics = Vec::new();
+    let provider_compatibility = match (loaded.as_ref().ok(), answers) {
+        (Some(pack), Some(answers)) => Some(provider_compatibility_for_answers(
+            pack,
+            &answers,
+            context,
+            &mut diagnostics,
+        )?),
+        _ => None,
+    };
+    let provider_compatible = provider_compatibility.as_ref().is_none_or(|report| {
+        report.status == greentic_sorx_core::ProviderCompatibilityStatus::Passed
+    });
+    let valid = doctor.ok && diagnostics.is_empty() && provider_compatible;
+    let report = ArtifactValidationReport {
+        schema: "greentic.sorx.artifact.validation-report.v1".to_string(),
+        valid,
+        artifact: ArtifactReportMetadata {
+            filename: input.filename,
+            sha256: input.sha256,
+        },
+        doctor,
+        inspect,
+        startup_schema,
+        provider_compatibility,
+        diagnostics,
+    };
+    print_json(&report)?;
+    if report.valid {
+        Ok(())
+    } else {
+        Err(CliError::pack("artifact validation failed"))
+    }
+}
+
+fn provider_compatibility_for_answers(
+    pack: &greentic_sorx_pack::LoadedSorlaPack,
+    answers_path: &Path,
+    context: &SorxCommandContext,
+    diagnostics: &mut Vec<ArtifactDiagnostic>,
+) -> CliResult<greentic_sorx_core::ProviderCompatibilityReport> {
+    let raw = fs::read_to_string(answers_path).map_err(|err| {
+        CliError::answers(format!(
+            "failed to read answers {}: {err}",
+            answers_path.display()
+        ))
+    })?;
+    let answers_json: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+        CliError::answers(format!(
+            "answers {} are invalid JSON: {err}",
+            answers_path.display()
+        ))
+    })?;
+    let normalized = normalize_start_answers(
+        &pack.sorx_assets.start_schema_json,
+        &answers_json,
+        context.non_interactive,
+    )
+    .map_err(|err| CliError::answers(err.to_string()))?;
+    let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers)
+        .map_err(|err| CliError::answers(err.to_string()))?;
+    let report = resolve_provider_compatibility(
+        &config,
+        &provider_compatibility_input(pack),
+        ProviderResolutionMode::DryRun,
+    );
+    if report.status != greentic_sorx_core::ProviderCompatibilityStatus::Passed {
+        diagnostics.push(ArtifactDiagnostic {
+            code: "provider_compatibility_failed".to_string(),
+            message: "provider compatibility failed for supplied answers".to_string(),
+        });
+    }
+    Ok(report)
+}
+
+fn read_artifact_input(
+    file: Option<PathBuf>,
+    artifact_json: Option<PathBuf>,
+) -> CliResult<ArtifactInput> {
+    match (file, artifact_json) {
+        (Some(file), None) => read_artifact_file(&file),
+        (None, Some(artifact_json)) => read_artifact_json(&artifact_json),
+        (Some(_), Some(_)) => Err(CliError::usage(
+            "artifact commands accept either --file or --artifact-json, not both",
+        )),
+        (None, None) => Err(CliError::usage(
+            "artifact commands require --file or --artifact-json",
+        )),
+    }
+}
+
+fn read_artifact_file(path: &Path) -> CliResult<ArtifactInput> {
+    let bytes = fs::read(path)
+        .map_err(|err| CliError::pack(format!("failed to read {}: {err}", path.display())))?;
+    let sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    Ok(ArtifactInput {
+        bytes,
+        filename: path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("generated.gtpack")
+            .to_string(),
+        sha256,
+    })
+}
+
+fn read_artifact_json(path: &Path) -> CliResult<ArtifactInput> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| CliError::pack(format!("failed to read {}: {err}", path.display())))?;
+    let artifact: GeneratedArtifactLike = serde_json::from_str(&raw).map_err(|err| {
+        CliError::pack(format!(
+            "artifact JSON {} is invalid: {err}",
+            path.display()
+        ))
+    })?;
+    if artifact.kind != "gtpack" {
+        return Err(CliError::pack(format!(
+            "artifact kind must be `gtpack`, got `{}`",
+            artifact.kind
+        )));
+    }
+    if artifact.media_type != "application/vnd.greentic.gtpack" {
+        return Err(CliError::pack(format!(
+            "artifact media_type must be `application/vnd.greentic.gtpack`, got `{}`",
+            artifact.media_type
+        )));
+    }
+    let bytes = decode_base64(&artifact.bytes_base64)?;
+    let actual = hex::encode(Sha256::digest(&bytes));
+    let expected = artifact
+        .sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(&artifact.sha256);
+    if expected != actual {
+        return Err(CliError::pack(format!(
+            "artifact sha256 mismatch: expected {}, got sha256:{}",
+            artifact.sha256, actual
+        )));
+    }
+    Ok(ArtifactInput {
+        bytes,
+        filename: artifact.filename,
+        sha256: format!("sha256:{actual}"),
+    })
+}
+
+fn decode_base64(input: &str) -> CliResult<Vec<u8>> {
+    let values = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .map(base64_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.len() % 4 != 0 {
+        return Err(CliError::pack(
+            "artifact bytes_base64 length is not a multiple of 4",
+        ));
+    }
+    let mut out = Vec::new();
+    for chunk in values.chunks(4) {
+        let pad = chunk.iter().filter(|value| **value == 64).count();
+        if chunk[0] == 64 || chunk[1] == 64 || (chunk[2] == 64 && chunk[3] != 64) || pad > 2 {
+            return Err(CliError::pack("artifact bytes_base64 has invalid padding"));
+        }
+        let first = (chunk[0] << 2) | (chunk[1] >> 4);
+        out.push(first);
+        if chunk[2] != 64 {
+            let second = ((chunk[1] & 0x0f) << 4) | (chunk[2] >> 2);
+            out.push(second);
+        }
+        if chunk[3] != 64 {
+            let third = ((chunk[2] & 0x03) << 6) | chunk[3];
+            out.push(third);
+        }
+    }
+    Ok(out)
+}
+
+fn base64_value(byte: u8) -> Result<u8, CliError> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        b'=' => Ok(64),
+        _ => Err(CliError::pack(
+            "artifact bytes_base64 contains invalid base64",
+        )),
+    }
+}
+
 fn run_inspect(pack: PathBuf, _json: bool) -> CliResult<()> {
     let report = inspect_sorla_pack(&pack).map_err(|err| CliError::pack(err.to_string()))?;
     let encoded = serde_json::to_string_pretty(&report)
@@ -1384,6 +1835,557 @@ fn run_mcp_tools(pack: PathBuf) -> CliResult<()> {
         .map_err(|err| CliError::generic(format!("failed to encode MCP tools: {err}")))?;
     println!("{encoded}");
     Ok(())
+}
+
+fn run_graph(command: GraphCommands) -> CliResult<()> {
+    match command {
+        GraphCommands::Concepts { pack, json: _ } => {
+            let service = ontology_graph_service(&pack)?;
+            let graph_hash = ontology_hash_from_pack(&pack)?;
+            print_json(&serde_json::json!({
+                "schema": "greentic.sorx.graph.concepts.v1",
+                "concepts": service.concepts(),
+                "audit_events": [ontology_audit_event("ontology.graph.loaded", serde_json::json!({
+                    "ontology_graph_hash": graph_hash
+                }))]
+            }))
+        }
+        GraphCommands::Relationships { pack, json: _ } => {
+            let service = ontology_graph_service(&pack)?;
+            let graph_hash = ontology_hash_from_pack(&pack)?;
+            print_json(&serde_json::json!({
+                "schema": "greentic.sorx.graph.relationships.v1",
+                "relationships": service.relationships(),
+                "audit_events": [ontology_audit_event("ontology.graph.loaded", serde_json::json!({
+                    "ontology_graph_hash": graph_hash
+                }))]
+            }))
+        }
+        GraphCommands::Paths {
+            pack,
+            from,
+            to,
+            max_depth,
+            json: _,
+        } => {
+            let service = ontology_graph_service(&pack)?;
+            let paths = service
+                .find_type_paths(&from, &to, max_depth)
+                .map_err(|err| CliError::pack(err.to_string()))?;
+            enforce_relationship_policy_for_paths(&pack, &paths)?;
+            let graph_hash = ontology_hash_from_pack(&pack)?;
+            print_json(&serde_json::json!({
+                "schema": "greentic.sorx.graph.paths.v1",
+                "from": from,
+                "to": to,
+                "max_depth": max_depth,
+                "paths": paths.clone(),
+                "explain": {
+                    "ontology_graph_hash": graph_hash,
+                    "concepts_used": concepts_used_from_paths(&paths),
+                    "relationships_used": relationships_used_from_paths(&paths),
+                    "providers_used": [],
+                    "evidence_used": [],
+                    "policy_decisions": [],
+                    "redactions": [],
+                    "graph_paths_considered": paths
+                },
+                "audit_events": [
+                    ontology_audit_event("ontology.graph.loaded", serde_json::json!({"ontology_graph_hash": graph_hash})),
+                    ontology_audit_event("ontology.path.resolved", serde_json::json!({"from": from, "to": to}))
+                ]
+            }))
+        }
+        GraphCommands::Neighbors {
+            pack,
+            entity_type,
+            entity_id,
+            depth,
+            json: _,
+        } => {
+            let service = ontology_graph_service(&pack)?;
+            let relationships = service
+                .neighbors(&entity_type, depth)
+                .map_err(|err| CliError::pack(err.to_string()))?;
+            enforce_relationship_policy_for_relationships(&pack, &relationships)?;
+            let graph_hash = ontology_hash_from_pack(&pack)?;
+            print_json(&serde_json::json!({
+                "schema": "greentic.sorx.graph.neighbors.v1",
+                "entity": {
+                    "type": entity_type,
+                    "id": entity_id
+                },
+                "depth": depth,
+                "relationships": relationships.clone(),
+                "explain": {
+                    "ontology_graph_hash": graph_hash,
+                    "relationships_used": relationships.iter().map(|relationship| relationship.id.clone()).collect::<Vec<_>>()
+                },
+                "audit_events": [
+                    ontology_audit_event("ontology.graph.loaded", serde_json::json!({"ontology_graph_hash": graph_hash})),
+                    ontology_audit_event("ontology.path.resolved", serde_json::json!({"entity_type": entity_type, "depth": depth}))
+                ]
+            }))
+        }
+        GraphCommands::Explain {
+            pack,
+            from,
+            to,
+            max_depth,
+            json: _,
+        } => {
+            let service = ontology_graph_service(&pack)?;
+            let paths = service
+                .find_type_paths(&from, &to, max_depth)
+                .map_err(|err| CliError::pack(err.to_string()))?;
+            enforce_relationship_policy_for_paths(&pack, &paths)?;
+            let graph_hash = ontology_hash_from_pack(&pack)?;
+            print_json(&serde_json::json!({
+                "schema": "greentic.sorx.graph.explain.v1",
+                "from": from,
+                "to": to,
+                "explain": {
+                    "ontology_graph_hash": graph_hash,
+                    "max_depth": max_depth,
+                    "path_count": paths.len(),
+                    "paths": paths.clone(),
+                    "concepts_used": concepts_used_from_paths(&paths),
+                    "relationships_used": relationships_used_from_paths(&paths),
+                    "providers_used": [],
+                    "evidence_used": [],
+                    "policy_decisions": [],
+                    "redactions": [],
+                    "provider_backed_instances": false
+                },
+                "audit_events": [
+                    ontology_audit_event("ontology.graph.loaded", serde_json::json!({"ontology_graph_hash": graph_hash})),
+                    ontology_audit_event("ontology.path.resolved", serde_json::json!({"from": from, "to": to}))
+                ]
+            }))
+        }
+    }
+}
+
+fn ontology_graph_service(pack: &Path) -> CliResult<OntologyGraphService> {
+    let pack = load_sorla_pack(pack).map_err(|err| CliError::pack(err.to_string()))?;
+    let ontology =
+        pack.sorla_assets.ontology.as_ref().ok_or_else(|| {
+            CliError::pack("pack does not contain assets/sorla/ontology.graph.json")
+        })?;
+    ontology_graph_service_from_ontology(ontology)
+}
+
+fn ontology_graph_service_from_ontology(
+    ontology: &greentic_sorx_pack::OntologyAssets,
+) -> CliResult<OntologyGraphService> {
+    let concepts = ontology
+        .graph
+        .concepts
+        .iter()
+        .map(|concept| OntologyConceptNode {
+            id: concept.id.clone(),
+            label: concept.label.clone(),
+        })
+        .collect::<Vec<_>>();
+    let relationships = ontology
+        .graph
+        .relationships
+        .iter()
+        .map(|relationship| {
+            let from = relationship.from.clone().ok_or_else(|| {
+                CliError::pack(format!(
+                    "ontology relationship `{}` is missing from/source concept",
+                    relationship.id
+                ))
+            })?;
+            let to = relationship.to.clone().ok_or_else(|| {
+                CliError::pack(format!(
+                    "ontology relationship `{}` is missing to/target concept",
+                    relationship.id
+                ))
+            })?;
+            Ok(OntologyRelationshipEdge {
+                id: relationship.id.clone(),
+                from,
+                to,
+                label: relationship.label.clone(),
+            })
+        })
+        .collect::<CliResult<Vec<_>>>()?;
+    OntologyGraphService::new(concepts, relationships)
+        .map_err(|err| CliError::pack(err.to_string()))
+}
+
+fn run_evidence(command: EvidenceCommands, context: &SorxCommandContext) -> CliResult<()> {
+    match command {
+        EvidenceCommands::Query {
+            pack,
+            answers,
+            query,
+            entity_type,
+            entity_id,
+            max_depth,
+            json: _,
+        } => run_evidence_query(
+            pack,
+            answers,
+            query,
+            entity_type,
+            entity_id,
+            max_depth,
+            context,
+        ),
+    }
+}
+
+fn run_evidence_query(
+    pack: PathBuf,
+    answers: PathBuf,
+    query: String,
+    entity_type: String,
+    entity_id: String,
+    max_depth: u8,
+    context: &SorxCommandContext,
+) -> CliResult<()> {
+    let pack = load_sorla_pack(&pack).map_err(|err| CliError::pack(err.to_string()))?;
+    let ontology =
+        pack.sorla_assets.ontology.as_ref().ok_or_else(|| {
+            CliError::pack("pack does not contain assets/sorla/ontology.graph.json")
+        })?;
+    let raw = fs::read_to_string(&answers).map_err(|err| {
+        CliError::answers(format!(
+            "failed to read answers {}: {err}",
+            answers.display()
+        ))
+    })?;
+    let answers_json: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+        CliError::answers(format!(
+            "answers {} are invalid JSON: {err}",
+            answers.display()
+        ))
+    })?;
+    let normalized = normalize_start_answers(
+        &pack.sorx_assets.start_schema_json,
+        &answers_json,
+        context.non_interactive,
+    )
+    .map_err(|err| CliError::answers(err.to_string()))?;
+    let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers)
+        .map_err(|err| CliError::answers(err.to_string()))?;
+    let compatibility = resolve_provider_compatibility(
+        &config,
+        &provider_compatibility_input(&pack),
+        ProviderResolutionMode::RuntimeStartup,
+    );
+    let mut audit_events = vec![ontology_audit_event(
+        "provider.compatibility.checked",
+        serde_json::json!({
+            "status": compatibility.status,
+            "bindings": compatibility.bindings.clone(),
+            "issue_count": compatibility.issues.len()
+        }),
+    )];
+    if compatibility.status != ProviderCompatibilityStatus::Passed {
+        return Err(CliError::provider(format!(
+            "provider compatibility failed: {}",
+            compatibility
+                .issues
+                .first()
+                .map(|issue| issue.message.as_str())
+                .unwrap_or("missing evidence provider")
+        )));
+    }
+    let provider_id = compatibility
+        .bindings
+        .iter()
+        .find(|binding| binding.requirement == "evidence.query")
+        .map(|binding| binding.provider_id.clone())
+        .ok_or_else(|| CliError::provider("missing evidence provider binding"))?;
+    let service = ontology_graph_service_from_ontology(ontology)?;
+    service.concept(&entity_type).ok_or_else(|| {
+        CliError::pack(format!("ontology concept `{entity_type}` does not exist"))
+    })?;
+    let evidence_policy = PolicyEngine::default().decide_ontology(
+        &local_policy_subject(),
+        &OntologyPolicyResource::Evidence {
+            entity_type: entity_type.clone(),
+            entity_id: entity_id.clone(),
+        },
+        OntologyPolicyAction::RetrieveEvidence,
+        &sensitivity_context_from_ontology(ontology),
+    );
+    audit_events.push(ontology_audit_event(
+        "policy.ontology.decision",
+        serde_json::to_value(&evidence_policy).map_err(|err| {
+            CliError::generic(format!("failed to encode ontology policy decision: {err}"))
+        })?,
+    ));
+    if evidence_policy.decision != OntologyPolicyDecisionKind::Allow {
+        return Err(CliError::new(
+            SorxExitCode::PolicyDenied,
+            serde_json::to_string(&evidence_policy)
+                .unwrap_or_else(|_| "ontology policy denied evidence query".to_string()),
+        ));
+    }
+    let relationships = service
+        .neighbors(&entity_type, max_depth)
+        .map_err(|err| CliError::pack(err.to_string()))?;
+    enforce_relationship_policy_for_relationships_from_ontology(ontology, &relationships)?;
+    let graph_paths_considered = service
+        .concepts()
+        .into_iter()
+        .filter(|concept| concept.id != entity_type)
+        .flat_map(|concept| {
+            service
+                .find_type_paths(&entity_type, &concept.id, max_depth)
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let scope = OntologyScope {
+        root_entities: vec![ScopedEntity {
+            entity_type: entity_type.clone(),
+            entity_id: entity_id.clone(),
+        }],
+        concepts: scoped_concepts(&entity_type, &relationships),
+        relationships: relationships
+            .iter()
+            .map(|relationship| relationship.id.clone())
+            .collect(),
+    };
+    audit_events.push(ontology_audit_event(
+        "evidence.query.planned",
+        serde_json::json!({
+            "provider_id": provider_id.clone(),
+            "query": query.clone(),
+            "scope": scope.clone(),
+            "max_depth": max_depth
+        }),
+    ));
+    let provider = DeterministicEvidenceProvider::new(provider_id.clone());
+    let evidence = provider
+        .query(EvidenceQueryFilter {
+            query: query.clone(),
+            scope: scope.clone(),
+            max_depth,
+        })
+        .map_err(|err| CliError::provider(err.to_string()))?;
+    audit_events.push(ontology_audit_event(
+        "entity.links.resolved",
+        serde_json::json!({
+            "linked_entities": evidence
+                .iter()
+                .flat_map(|item| item.linked_entities.iter())
+                .collect::<Vec<_>>()
+        }),
+    ));
+    let ontology_graph_hash = ontology_graph_hash(ontology);
+    let concepts_used = graph_paths_considered
+        .iter()
+        .flat_map(|path| path.concepts.iter().cloned())
+        .chain(scope.concepts.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let evidence_used = evidence
+        .iter()
+        .map(|item| item.evidence_id.clone())
+        .collect::<Vec<_>>();
+    let evidence_count = evidence.len();
+    let relationships_used = scope.relationships.clone();
+    audit_events.push(ontology_audit_event(
+        "evidence.query.executed",
+        serde_json::json!({
+            "provider_id": provider_id.clone(),
+            "evidence_count": evidence_count,
+            "evidence_ids": evidence_used.clone()
+        }),
+    ));
+    let policy_decisions = vec![format!("{:?}", evidence_policy.decision)];
+    let redactions = evidence_policy
+        .redactions
+        .iter()
+        .map(|redaction| format!("{}.{}", redaction.entity_type, redaction.field))
+        .collect::<Vec<_>>();
+    let result = EvidenceQueryResult {
+        schema: "greentic.sorx.evidence-query-result.v1".to_string(),
+        query,
+        ontology_scope: scope,
+        evidence,
+        explain: greentic_sorx_core::EvidenceExplain {
+            retrieval_binding: ontology
+                .retrieval_bindings
+                .as_ref()
+                .and_then(|bindings| bindings.bindings.first())
+                .map(|binding| binding.id.clone()),
+            provider_id: provider_id.clone(),
+            graph_paths_considered,
+            ontology_graph_hash: ontology_graph_hash.clone(),
+            concepts_used,
+            relationships_used,
+            providers_used: vec![provider_id.clone()],
+            evidence_used,
+            policy_decisions,
+            redactions,
+        },
+        audit_events,
+    };
+    print_json(&result)
+}
+
+fn scoped_concepts(root: &str, relationships: &[OntologyRelationshipEdge]) -> Vec<String> {
+    let mut concepts = std::collections::BTreeSet::from([root.to_string()]);
+    for relationship in relationships {
+        concepts.insert(relationship.from.clone());
+        concepts.insert(relationship.to.clone());
+    }
+    concepts.into_iter().collect()
+}
+
+fn ontology_hash_from_pack(pack: &Path) -> CliResult<String> {
+    let pack = load_sorla_pack(pack).map_err(|err| CliError::pack(err.to_string()))?;
+    let ontology =
+        pack.sorla_assets.ontology.as_ref().ok_or_else(|| {
+            CliError::pack("pack does not contain assets/sorla/ontology.graph.json")
+        })?;
+    Ok(ontology_graph_hash(ontology))
+}
+
+fn ontology_graph_hash(ontology: &greentic_sorx_pack::OntologyAssets) -> String {
+    let encoded = serde_json::to_vec(&ontology.graph_json).unwrap_or_default();
+    format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
+}
+
+fn ontology_audit_event(event: &str, details: serde_json::Value) -> OntologyAuditEvent {
+    core_ontology_audit_event(event, "local-cli", details)
+}
+
+fn concepts_used_from_paths(paths: &[greentic_sorx_core::TypePath]) -> Vec<String> {
+    paths
+        .iter()
+        .flat_map(|path| path.concepts.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn relationships_used_from_paths(paths: &[greentic_sorx_core::TypePath]) -> Vec<String> {
+    paths
+        .iter()
+        .flat_map(|path| path.relationships.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn enforce_relationship_policy_for_paths(
+    pack: &Path,
+    paths: &[greentic_sorx_core::TypePath],
+) -> CliResult<()> {
+    let pack = load_sorla_pack(pack).map_err(|err| CliError::pack(err.to_string()))?;
+    let Some(ontology) = &pack.sorla_assets.ontology else {
+        return Ok(());
+    };
+    let relationships = paths
+        .iter()
+        .flat_map(|path| path.relationships.iter())
+        .map(|id| OntologyRelationshipEdge {
+            id: id.clone(),
+            from: String::new(),
+            to: String::new(),
+            label: None,
+        })
+        .collect::<Vec<_>>();
+    enforce_relationship_policy_for_relationships_from_ontology(ontology, &relationships)
+}
+
+fn enforce_relationship_policy_for_relationships(
+    pack: &Path,
+    relationships: &[OntologyRelationshipEdge],
+) -> CliResult<()> {
+    let pack = load_sorla_pack(pack).map_err(|err| CliError::pack(err.to_string()))?;
+    let Some(ontology) = &pack.sorla_assets.ontology else {
+        return Ok(());
+    };
+    enforce_relationship_policy_for_relationships_from_ontology(ontology, relationships)
+}
+
+fn enforce_relationship_policy_for_relationships_from_ontology(
+    ontology: &greentic_sorx_pack::OntologyAssets,
+    relationships: &[OntologyRelationshipEdge],
+) -> CliResult<()> {
+    let sensitivity = sensitivity_context_from_ontology(ontology);
+    let engine = PolicyEngine::default();
+    for relationship in relationships {
+        let decision = engine.decide_ontology(
+            &local_policy_subject(),
+            &OntologyPolicyResource::Relationship {
+                relationship: relationship.id.clone(),
+            },
+            OntologyPolicyAction::Traverse,
+            &sensitivity,
+        );
+        if decision.decision != OntologyPolicyDecisionKind::Allow {
+            return Err(CliError::new(
+                SorxExitCode::PolicyDenied,
+                serde_json::to_string(&decision).unwrap_or_else(|_| {
+                    "ontology policy denied relationship traversal".to_string()
+                }),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn local_policy_subject() -> OntologyPolicySubject {
+    OntologyPolicySubject {
+        subject: "local-cli".to_string(),
+        roles: Vec::new(),
+    }
+}
+
+fn sensitivity_context_from_ontology(
+    ontology: &greentic_sorx_pack::OntologyAssets,
+) -> SensitivityContext {
+    let mut context = SensitivityContext::default();
+    let Some(policy) = ontology.graph_json.get("policy") else {
+        return context;
+    };
+    if policy
+        .get("evidence_requires_approval")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        context.evidence_requires_approval = true;
+    }
+    if let Some(relationships) = policy
+        .get("deny_relationships")
+        .and_then(serde_json::Value::as_array)
+    {
+        context.denied_relationships.extend(
+            relationships
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string),
+        );
+    }
+    if let Some(fields) = policy
+        .get("sensitive_fields")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (entity_type, values) in fields {
+            context.sensitive_fields.insert(
+                entity_type.clone(),
+                values
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect(),
+            );
+        }
+    }
+    context
 }
 
 fn run_mcp_start(pack: PathBuf, answers: PathBuf, context: &SorxCommandContext) -> CliResult<()> {
@@ -1494,13 +2496,78 @@ fn run_start(
             CliError::generic(format!("failed to encode normalized answers: {err}"))
         })?
     } else {
-        build_startup_plan(&pack.pack_name, &pack.pack_version, &normalized.answers)
-            .map_err(|err| CliError::answers(err.to_string()))?
+        let mut plan = build_startup_plan(&pack.pack_name, &pack.pack_version, &normalized.answers)
+            .map_err(|err| CliError::answers(err.to_string()))?;
+        let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers)
+            .map_err(|err| CliError::answers(err.to_string()))?;
+        let compatibility = resolve_provider_compatibility(
+            &config,
+            &provider_compatibility_input(&pack),
+            ProviderResolutionMode::DryRun,
+        );
+        if let Some(object) = plan.as_object_mut() {
+            object.insert(
+                "provider_compatibility".to_string(),
+                serde_json::to_value(compatibility).map_err(|err| {
+                    CliError::generic(format!("failed to encode provider compatibility: {err}"))
+                })?,
+            );
+        }
+        plan
     };
     let encoded = serde_json::to_string_pretty(&output)
         .map_err(|err| CliError::generic(format!("failed to encode startup output: {err}")))?;
     println!("{encoded}");
     Ok(())
+}
+
+fn provider_compatibility_input(
+    pack: &greentic_sorx_pack::LoadedSorlaPack,
+) -> ProviderCompatibilityInput {
+    let Some(ontology) = &pack.sorla_assets.ontology else {
+        return ProviderCompatibilityInput::none();
+    };
+    ProviderCompatibilityInput {
+        ontology_present: true,
+        ontology_schema_supported: ontology.graph.schema == "greentic.sorla.ontology.graph.v1",
+        retrieval_bindings_present: ontology.retrieval_bindings.is_some(),
+        retrieval_bindings_schema_supported: ontology
+            .retrieval_bindings
+            .as_ref()
+            .is_none_or(|bindings| bindings.schema == "greentic.sorla.retrieval-bindings.v1"),
+        requires_entity_link: ontology_requires_entity_link(ontology),
+    }
+}
+
+fn ontology_requires_entity_link(ontology: &greentic_sorx_pack::OntologyAssets) -> bool {
+    let graph_requires = ontology
+        .graph_json
+        .get("requires_entity_link")
+        .or_else(|| ontology.graph_json.get("requires_entity_linking"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let bindings_require = ontology
+        .retrieval_bindings_json
+        .as_ref()
+        .is_some_and(value_requires_entity_link);
+    graph_requires || bindings_require
+}
+
+fn value_requires_entity_link(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Array(values) => values.iter().any(value_requires_entity_link),
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            (matches!(
+                key.as_str(),
+                "requires_entity_link" | "requires_entity_linking" | "entity_link"
+            ) && value.as_bool().unwrap_or(false))
+                || value_requires_entity_link(value)
+        }),
+        serde_json::Value::Null | serde_json::Value::Number(_) | serde_json::Value::String(_) => {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1560,9 +2627,78 @@ mod tests {
     }
 
     #[test]
+    fn parses_artifact_validate_command() {
+        let cli = parse_from([
+            "greentic-sorx",
+            "artifact",
+            "validate",
+            "--artifact-json",
+            "generated-artifact.json",
+            "--answers",
+            "answers.json",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Artifact {
+                command: ArtifactCommands::Validate { .. }
+            }
+        ));
+    }
+
+    #[test]
     fn parses_routes_command() {
         let cli = parse_from(["greentic-sorx", "routes", "landlord.gtpack"]).unwrap();
         assert!(matches!(cli.command, Commands::Routes { .. }));
+    }
+
+    #[test]
+    fn parses_graph_paths_command() {
+        let cli = parse_from([
+            "greentic-sorx",
+            "graph",
+            "paths",
+            "landlord.gtpack",
+            "--from",
+            "Tenant",
+            "--to",
+            "Payment",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Graph {
+                command: GraphCommands::Paths { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_evidence_query_command() {
+        let cli = parse_from([
+            "greentic-sorx",
+            "evidence",
+            "query",
+            "landlord.gtpack",
+            "--answers",
+            "answers.json",
+            "--query",
+            "lease status",
+            "--entity-type",
+            "Tenant",
+            "--entity-id",
+            "tenant-1",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Evidence {
+                command: EvidenceCommands::Query { .. }
+            }
+        ));
     }
 
     #[test]
@@ -1845,6 +2981,7 @@ mod tests {
     fn help_mentions_expected_commands() {
         let help = command().render_long_help().to_string();
         assert!(help.contains("doctor"));
+        assert!(help.contains("artifact"));
         assert!(help.contains("inspect"));
         assert!(help.contains("routes"));
         assert!(help.contains("start"));

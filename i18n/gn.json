@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Eñangareko deployment réra ambuévare.",
   "cli.command.deployments.about": "Eñangareko SORX deployment lokal rehe.",
   "cli.command.doctor.about": "Ehechajey peteĩ SoRLa .gtpack SORX runtime jepuru pegua.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Eimprimi ko marandu térã subcomando(kuéra) oñeme'ẽva pytyvõ.",
   "cli.command.inspect.about": "Ema'ẽ peteĩ SoRLa .gtpack rehe ha eprinta metadata estable.",
   "cli.command.mcp-tools.about": "Embohysýi MCP tembiporu oje'éva peteĩ SoRLa .gtpack-pe.",

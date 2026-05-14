@@ -14,12 +14,14 @@ Release workflows:
 
 - `.github/workflows/release.yml` verifies release readiness and does not
   publish.
-- `.github/workflows/publish.yml` runs on a matching `vX.Y.Z` tag, verifies
-  release metadata, builds and uploads the six GitHub Release archives for
-  `cargo-binstall`, then publishes crates.io packages in dependency order with
-  `CARGO_REGISTRY_TOKEN`.
-- `.github/workflows/release-binaries.yml` is a manual helper for rebuilding
-  GitHub Release archives.
+- `.github/workflows/publish.yml` runs on pushes to `main`/`master`, verifies
+  release metadata, creates or verifies the matching `vX.Y.Z` tag, dispatches
+  `.github/workflows/release-binaries.yml` on that tag, waits for the six
+  GitHub Release archives for `cargo-binstall`, then publishes crates.io
+  packages in dependency order with `CARGO_REGISTRY_TOKEN`.
+- `.github/workflows/release-binaries.yml` is dispatch-only. It runs the shared
+  binary release workflow when invoked on a tag ref and can be manually
+  dispatched to rebuild GitHub Release archives for an existing tag.
 
 `cargo-binstall` expects archives named
 `greentic-sorx-vX.Y.Z-<target>.tgz` with the binary under the archive directory

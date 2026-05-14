@@ -21,6 +21,15 @@ greentic-sorx start landlord.gtpack --answers examples/landlord.answers.json --d
 greentic-sorx start landlord.gtpack --answers examples/landlord.answers.json --emit-answers
 ```
 
+If the pack includes SoRLa ontology artifacts, `doctor` validates them and
+`inspect` reports a stable ontology summary. The supported optional paths are:
+
+```text
+assets/sorla/ontology.graph.json
+assets/sorla/ontology.ir.cbor
+assets/sorla/retrieval-bindings.json
+```
+
 For the checked-in landlord/tenant scenario:
 
 ```bash

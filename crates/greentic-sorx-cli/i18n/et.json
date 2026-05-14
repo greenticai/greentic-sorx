@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Halda juurutuse aliaseid.",
   "cli.command.deployments.about": "Halda kohalikke SORX-i juurutusi.",
   "cli.command.doctor.about": "Valideeri SoRLa .gtpack SORX-i käituskeskkonnas kasutamiseks.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Prindi see teade või antud alamkäsu(de) abi.",
   "cli.command.inspect.about": "Kontrolli SoRLa .gtpack-i ja prindi stabiilsed metaandmed.",
   "cli.command.mcp-tools.about": "Loetle SoRLa .gtpackis deklareeritud MCP tööriistad.",

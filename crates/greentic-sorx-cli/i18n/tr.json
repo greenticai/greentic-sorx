@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Dağıtım takma adlarını yönetin.",
   "cli.command.deployments.about": "Yerel SORX dağıtımlarını yönetin.",
   "cli.command.doctor.about": "SORX çalışma zamanı kullanımı için bir SoRLa .gtpack'i doğrula.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Bu iletiyi veya verilen alt komut(lar)ın yardımını yazdırın.",
   "cli.command.inspect.about": "Bir SoRLa .gtpack'i incele ve kararlı meta verileri yazdır.",
   "cli.command.mcp-tools.about": "Bir SoRLa .gtpack tarafından bildirilen MCP araçlarını listeleyin.",

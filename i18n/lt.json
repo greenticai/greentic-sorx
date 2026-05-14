@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Tvarkyti diegimo pseudonimus.",
   "cli.command.deployments.about": "Tvarkyti vietinius SORX diegimus.",
   "cli.command.doctor.about": "Patikrinkite SoRLa .gtpack tinkamumą naudoti SORX vykdymo aplinkoje.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Išspausdinti šį pranešimą arba nurodytos (-ų) pakomandės (-ių) pagalbą.",
   "cli.command.inspect.about": "Patikrinkite SoRLa .gtpack ir išveskite stabilius metaduomenis.",
   "cli.command.mcp-tools.about": "Išvardyti MCP įrankius, deklaruotus SoRLa .gtpack.",

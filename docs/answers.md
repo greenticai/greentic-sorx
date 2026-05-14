@@ -26,3 +26,13 @@ Security rules:
 - Inline secret-like values are rejected unless they are references.
 - Direct provider `config` is allowed only in `local` or `test`.
 - Use `config_ref` for shared, staging, and production environments.
+
+Provider entries may include optional ontology/evidence capability metadata:
+
+- `capabilities`: provider capabilities such as `ontology-scoped-evidence-query`
+  or `entity-link`.
+- `contract_version`: provider contract version, currently compatible with
+  `greentic.sorx.provider.v1` or `1`.
+
+Dry-run startup plans use these fields to report provider compatibility for
+ontology-enabled packs.

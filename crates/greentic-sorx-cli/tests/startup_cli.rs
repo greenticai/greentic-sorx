@@ -301,3 +301,32 @@ fn direct_provider_config_is_rejected_outside_local_or_test() {
             .any(|issue| issue.path == "providers.store.config")
     );
 }
+
+#[test]
+fn start_dry_run_sorts_provider_capabilities_stably() {
+    let (temp, pack) = write_pack();
+    let mut answers = full_answers();
+    answers["providers"]["store"]["capabilities"] = json!([
+        "ontology-scoped-evidence-query",
+        "entity-link",
+        "ontology-scoped-evidence-query"
+    ]);
+    let answers = write_json(&temp, "answers.json", &answers);
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "start",
+            pack.to_str().unwrap(),
+            "--answers",
+            answers.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        stdout["providers"][0]["capabilities"],
+        json!(["entity-link", "ontology-scoped-evidence-query"])
+    );
+}

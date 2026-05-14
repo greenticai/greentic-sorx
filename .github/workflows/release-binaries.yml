@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   dispatch-tag-release:
-    if: github.event_name == 'workflow_dispatch' && github.ref_type != 'tag'
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -32,7 +32,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          requested_tag="${{ github.event.inputs.tag || '' }}"
+          requested_tag=""
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            requested_tag="${{ github.event.inputs.tag || '' }}"
+          fi
+
           if [[ -n "$requested_tag" ]]; then
             if [[ "$requested_tag" == v* ]]; then
               tag="$requested_tag"

@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Hantera distributionsalias.",
   "cli.command.deployments.about": "Hantera lokala SORX-distributioner.",
   "cli.command.doctor.about": "Validera en SoRLa .gtpack för användning med SORX-körmiljön.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Skriv ut detta meddelande eller hjälpen för angivna underkommandon.",
   "cli.command.inspect.about": "Inspektera en SoRLa .gtpack och skriv ut stabil metadata.",
   "cli.command.mcp-tools.about": "Lista MCP-verktyg som deklareras av ett SoRLa .gtpack.",

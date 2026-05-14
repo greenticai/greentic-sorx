@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Spravovat aliasy nasazení.",
   "cli.command.deployments.about": "Spravovat místní nasazení SORX.",
   "cli.command.doctor.about": "Ověřte SoRLa .gtpack pro použití v runtime SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Vypsat tuto zprávu nebo nápovědu k zadaným podřízeným příkazům.",
   "cli.command.inspect.about": "Zkontrolujte SoRLa .gtpack a vypište stabilní metadata.",
   "cli.command.mcp-tools.about": "Vypsat nástroje MCP deklarované v .gtpack SoRLa.",

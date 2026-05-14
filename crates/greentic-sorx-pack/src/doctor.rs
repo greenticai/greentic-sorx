@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::loader::load_sorla_pack;
+use crate::loader::{LoadedSorlaPack, load_sorla_pack, load_sorla_pack_from_bytes};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SorxDoctorReport {
@@ -45,27 +45,42 @@ impl SorxDoctorIssue {
 
 pub fn doctor_sorla_pack(path: &Path) -> SorxDoctorReport {
     match load_sorla_pack(path) {
-        Ok(pack) => {
-            let errors = pack
-                .doctor_errors
-                .into_iter()
-                .map(|message| SorxDoctorIssue::error("validation_suite_invalid", message))
-                .collect::<Vec<_>>();
-            let warnings = pack
-                .doctor_warnings
-                .into_iter()
-                .map(|message| SorxDoctorIssue::warning("warning", message))
-                .collect::<Vec<_>>();
-            SorxDoctorReport {
-                ok: errors.is_empty(),
-                errors,
-                warnings,
-            }
-        }
+        Ok(pack) => doctor_sorla_loaded_pack(&pack),
         Err(err) => SorxDoctorReport {
             ok: false,
             errors: vec![SorxDoctorIssue::error(err.code(), err.to_string())],
             warnings: Vec::new(),
         },
+    }
+}
+
+pub fn doctor_sorla_pack_from_bytes(bytes: &[u8]) -> SorxDoctorReport {
+    match load_sorla_pack_from_bytes(bytes) {
+        Ok(pack) => doctor_sorla_loaded_pack(&pack),
+        Err(err) => SorxDoctorReport {
+            ok: false,
+            errors: vec![SorxDoctorIssue::error(err.code(), err.to_string())],
+            warnings: Vec::new(),
+        },
+    }
+}
+
+pub fn doctor_sorla_loaded_pack(pack: &LoadedSorlaPack) -> SorxDoctorReport {
+    let errors = pack
+        .doctor_errors
+        .iter()
+        .cloned()
+        .map(|message| SorxDoctorIssue::error("validation_suite_invalid", message))
+        .collect::<Vec<_>>();
+    let warnings = pack
+        .doctor_warnings
+        .iter()
+        .cloned()
+        .map(|message| SorxDoctorIssue::warning("warning", message))
+        .collect::<Vec<_>>();
+    SorxDoctorReport {
+        ok: errors.is_empty(),
+        errors,
+        warnings,
     }
 }

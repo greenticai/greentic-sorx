@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "डिप्लॉयमेंट उपनाम प्रबंधित करें.",
   "cli.command.deployments.about": "स्थानीय SORX डिप्लॉयमेंट प्रबंधित करें.",
   "cli.command.doctor.about": "SORX रनटाइम उपयोग के लिए SoRLa .gtpack को मान्य करें.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "यह संदेश या दिए गए सबकमांड का सहायता संदेश प्रिंट करें.",
   "cli.command.inspect.about": "SoRLa .gtpack का निरीक्षण करें और स्थिर मेटाडेटा प्रिंट करें.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack द्वारा घोषित MCP टूल सूचीबद्ध करें.",

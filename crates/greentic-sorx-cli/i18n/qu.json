@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Despliegue sutichakuykunata kamachiy.",
   "cli.command.deployments.about": "Llaqta SORX desplieguekunata kamachiy.",
   "cli.command.doctor.about": "Huk SoRLa .gtpack SORX runtime llamk'achinapaq allinchu kasqanta qhawariy.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Kay willakuyta utaq qusqa subcomando(kuna)pa yanapakuyninta qillqay.",
   "cli.command.inspect.about": "Huk SoRLa .gtpack qhawariy hinaspa mana kuyurikuq metadata nisqata ñit'ichiy.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack nisqapi willasqa MCP llamkanakunata sinrichay.",

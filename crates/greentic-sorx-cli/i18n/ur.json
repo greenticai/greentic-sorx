@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "تعیناتی کے عرفی ناموں کا نظم کریں۔",
   "cli.command.deployments.about": "مقامی SORX تعیناتیوں کا نظم کریں۔",
   "cli.command.doctor.about": "SORX رن ٹائم کے استعمال کے لیے SoRLa .gtpack کی توثیق کریں۔",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "یہ پیغام یا دیے گئے ذیلی کمانڈز کی مدد پرنٹ کریں۔",
   "cli.command.inspect.about": "SoRLa .gtpack کا معائنہ کریں اور مستحکم میٹا ڈیٹا پرنٹ کریں۔",
   "cli.command.mcp-tools.about": "SoRLa .gtpack کے ذریعے اعلان کردہ MCP ٹولز کی فہرست دکھائیں۔",

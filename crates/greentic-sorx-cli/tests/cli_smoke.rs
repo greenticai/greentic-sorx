@@ -2,6 +2,7 @@ use std::process::Command;
 
 use greentic_sorx_core::default_start_schema;
 use greentic_sorx_pack::{PackIdentity, PackManifest};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -81,6 +82,40 @@ fn binary_start_dry_run_emits_plan() {
     assert_eq!(stdout["schema"], "greentic.sorx.start.plan.v1");
     assert_eq!(stdout["providers"][0]["id"], "store");
     assert_eq!(stdout["policy"]["high"], "require_approval");
+    assert_eq!(stdout["provider_compatibility"]["status"], "passed");
+}
+
+#[test]
+fn binary_start_dry_run_reports_ontology_provider_compatibility() {
+    let fixture = PackFixture::new_with_ontology();
+    let answers = fixture.write_answers(ontology_answers());
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "start",
+            fixture.pack.to_str().unwrap(),
+            "--answers",
+            answers.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("plan output should be JSON");
+    assert_eq!(stdout["provider_compatibility"]["status"], "passed");
+    assert_eq!(
+        stdout["provider_compatibility"]["bindings"][0]["requirement"],
+        "entity.link"
+    );
+    assert_eq!(
+        stdout["provider_compatibility"]["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -96,6 +131,422 @@ fn binary_routes_json_is_stable() {
         serde_json::from_slice(&output.stdout).expect("routes output should be JSON");
     assert_eq!(stdout["schema"], "greentic.sorx.routes.v1");
     assert_eq!(stdout["routes"][0]["endpoint_id"], "tenant.create");
+}
+
+#[test]
+fn binary_graph_paths_json_is_stable() {
+    let fixture = PackFixture::new_with_ontology();
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "graph",
+            "paths",
+            fixture.pack.to_str().unwrap(),
+            "--from",
+            "Tenant",
+            "--to",
+            "Payment",
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("graph output should be JSON");
+    assert_eq!(stdout["schema"], "greentic.sorx.graph.paths.v1");
+    assert_eq!(
+        stdout["paths"][0]["relationships"][0],
+        "tenant_makes_payment"
+    );
+}
+
+#[test]
+fn binary_graph_unknown_concept_fails_clearly() {
+    let fixture = PackFixture::new_with_ontology();
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "graph",
+            "paths",
+            fixture.pack.to_str().unwrap(),
+            "--from",
+            "Tenant",
+            "--to",
+            "Missing",
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("ontology concept `Missing` does not exist"));
+}
+
+#[test]
+fn binary_graph_relationship_policy_denies_traversal() {
+    let fixture = PackFixture::new_with_denied_relationship();
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "graph",
+            "paths",
+            fixture.pack.to_str().unwrap(),
+            "--from",
+            "Tenant",
+            "--to",
+            "Payment",
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert_eq!(output.status.code(), Some(7));
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("relationship_traversal_denied"));
+}
+
+#[test]
+fn binary_evidence_query_json_is_stable() {
+    let fixture = PackFixture::new_with_ontology();
+    let answers = fixture.write_answers(ontology_answers());
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "evidence",
+            "query",
+            fixture.pack.to_str().unwrap(),
+            "--answers",
+            answers.to_str().unwrap(),
+            "--query",
+            "lease status",
+            "--entity-type",
+            "Tenant",
+            "--entity-id",
+            "tenant-1",
+            "--max-depth",
+            "2",
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("evidence output should be JSON");
+    assert_eq!(stdout["schema"], "greentic.sorx.evidence-query-result.v1");
+    assert_eq!(stdout["explain"]["provider_id"], "rag");
+    assert_eq!(
+        stdout["evidence"][0]["provenance"],
+        "deterministic-memory-evidence-provider"
+    );
+    assert_eq!(
+        stdout["ontology_scope"]["relationships"][0],
+        "tenant_makes_payment"
+    );
+    assert_eq!(
+        stdout["audit_events"][0]["schema"],
+        "greentic.sorx.ontology.audit.v1"
+    );
+    assert_eq!(
+        stdout["audit_events"][0]["event"],
+        "provider.compatibility.checked"
+    );
+    assert_eq!(stdout["audit_events"][2]["event"], "evidence.query.planned");
+    assert!(
+        stdout["explain"]["ontology_graph_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(stdout["explain"]["providers_used"][0], "rag");
+}
+
+#[test]
+fn binary_deterministic_ontology_business_scenario_is_stable() {
+    let fixture = PackFixture::new_with_business_ontology();
+    let answers = fixture.write_answers(ontology_answers());
+
+    let doctor = run_json(["doctor", fixture.pack.to_str().unwrap(), "--json"]);
+    assert_eq!(doctor["ok"], true);
+
+    let start = run_json([
+        "start",
+        fixture.pack.to_str().unwrap(),
+        "--answers",
+        answers.to_str().unwrap(),
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(start["schema"], "greentic.sorx.start.plan.v1");
+    assert_eq!(start["provider_compatibility"]["status"], "passed");
+
+    let graph = run_json([
+        "graph",
+        "paths",
+        fixture.pack.to_str().unwrap(),
+        "--from",
+        "Customer",
+        "--to",
+        "EvidenceDocument",
+        "--json",
+    ]);
+    assert_eq!(graph["schema"], "greentic.sorx.graph.paths.v1");
+    assert_eq!(graph["paths"][0]["concepts"][0], "Customer");
+    assert_eq!(graph["paths"][0]["concepts"][2], "EvidenceDocument");
+    assert_eq!(
+        graph["paths"][0]["relationships"][0],
+        "customer_has_contract"
+    );
+    assert_eq!(
+        graph["paths"][0]["relationships"][1],
+        "contract_has_evidence"
+    );
+
+    let evidence_args = [
+        "evidence",
+        "query",
+        fixture.pack.to_str().unwrap(),
+        "--answers",
+        answers.to_str().unwrap(),
+        "--query",
+        "risk evidence",
+        "--entity-type",
+        "Customer",
+        "--entity-id",
+        "customer-001",
+        "--max-depth",
+        "3",
+        "--json",
+    ];
+    let evidence = run_json(evidence_args);
+    let evidence_repeat = run_json(evidence_args);
+    assert_eq!(evidence, evidence_repeat);
+    assert_eq!(evidence["schema"], "greentic.sorx.evidence-query-result.v1");
+    assert_eq!(
+        evidence["ontology_scope"]["root_entities"][0]["entity_type"],
+        "Customer"
+    );
+    assert_eq!(
+        evidence["evidence"][0]["evidence_id"],
+        "evidence:rag:Customer:customer-001"
+    );
+    assert_eq!(
+        evidence["explain"]["retrieval_binding"],
+        "business-risk-evidence"
+    );
+    assert_eq!(evidence["explain"]["providers_used"][0], "rag");
+    assert!(
+        evidence["explain"]["concepts_used"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|concept| concept == "EvidenceDocument")
+    );
+    assert!(
+        evidence["audit_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["event"] == "policy.ontology.decision")
+    );
+}
+
+#[test]
+fn binary_artifact_validate_file_emits_combined_report() {
+    let fixture = PackFixture::new_with_ontology();
+    let report = run_json([
+        "artifact",
+        "validate",
+        "--file",
+        fixture.pack.to_str().unwrap(),
+        "--json",
+    ]);
+
+    assert_eq!(
+        report["schema"],
+        "greentic.sorx.artifact.validation-report.v1"
+    );
+    assert_eq!(report["valid"], true);
+    assert_eq!(report["doctor"]["ok"], true);
+    assert_eq!(report["inspect"]["pack"]["name"], "landlord");
+    assert_eq!(
+        report["startup_schema"]["schema"],
+        "greentic.sorx.start.schema.v1"
+    );
+    assert_eq!(report["provider_compatibility"], serde_json::Value::Null);
+}
+
+#[test]
+fn binary_artifact_validate_json_with_answers_reports_provider_compatibility() {
+    let fixture = PackFixture::new_with_ontology();
+    let artifact = fixture.write_artifact_json("artifact.json", None, None, None, None);
+    let answers = fixture.write_answers(ontology_answers());
+    let report = run_json([
+        "artifact",
+        "validate",
+        "--artifact-json",
+        artifact.to_str().unwrap(),
+        "--answers",
+        answers.to_str().unwrap(),
+        "--json",
+    ]);
+
+    assert_eq!(report["valid"], true);
+    assert_eq!(
+        report["artifact"]["sha256"],
+        format!("sha256:{}", fixture.pack_sha256())
+    );
+    assert_eq!(report["provider_compatibility"]["status"], "passed");
+    assert_eq!(
+        report["provider_compatibility"]["bindings"][0]["requirement"],
+        "entity.link"
+    );
+}
+
+#[test]
+fn binary_artifact_inspect_and_startup_schema_accept_artifact_json() {
+    let fixture = PackFixture::new();
+    let artifact = fixture.write_artifact_json("artifact.json", None, None, None, None);
+    let inspect = run_json([
+        "artifact",
+        "inspect",
+        "--artifact-json",
+        artifact.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(inspect["schema"], "greentic.sorx.inspect.v1");
+    assert_eq!(inspect["pack"]["name"], "landlord");
+
+    let schema = run_json([
+        "artifact",
+        "startup-schema",
+        "--artifact-json",
+        artifact.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(schema["schema"], "greentic.sorx.start.schema.v1");
+}
+
+#[test]
+fn binary_artifact_json_rejects_hash_mismatch() {
+    let fixture = PackFixture::new();
+    let artifact = fixture.write_artifact_json(
+        "bad-hash.json",
+        Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        None,
+        None,
+        None,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "artifact",
+            "validate",
+            "--artifact-json",
+            artifact.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("artifact sha256 mismatch"));
+}
+
+#[test]
+fn binary_artifact_json_rejects_wrong_media_type_and_kind() {
+    let fixture = PackFixture::new();
+    let bad_media = fixture.write_artifact_json(
+        "bad-media.json",
+        None,
+        Some("application/octet-stream"),
+        None,
+        None,
+    );
+    let media_output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "artifact",
+            "validate",
+            "--artifact-json",
+            bad_media.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+    assert_eq!(media_output.status.code(), Some(3));
+    let media_stderr = String::from_utf8(media_output.stderr).expect("stderr should be UTF-8");
+    assert!(media_stderr.contains("artifact media_type must be"));
+
+    let bad_kind = fixture.write_artifact_json("bad-kind.json", None, None, Some("bundle"), None);
+    let kind_output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "artifact",
+            "validate",
+            "--artifact-json",
+            bad_kind.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+    assert_eq!(kind_output.status.code(), Some(3));
+    let kind_stderr = String::from_utf8(kind_output.stderr).expect("stderr should be UTF-8");
+    assert!(kind_stderr.contains("artifact kind must be"));
+}
+
+#[test]
+fn binary_artifact_json_rejects_malformed_base64() {
+    let fixture = PackFixture::new();
+    let artifact = fixture.write_artifact_json("bad-base64.json", None, None, None, Some("@@"));
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "artifact",
+            "validate",
+            "--artifact-json",
+            artifact.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("invalid base64"));
+}
+
+#[test]
+fn binary_evidence_query_missing_provider_fails() {
+    let fixture = PackFixture::new_with_ontology();
+    let answers = fixture.write_answers(
+        r#"{
+  "tenant": { "tenant_id": "tenant-a" },
+  "server": { "public_base_url": "http://127.0.0.1:8787" },
+  "providers": { "store": { "kind": "memory" } },
+  "policy": { "approvals": {} },
+  "audit": {},
+  "deployment": { "tenant_id": "tenant-a", "sor_name": "landlord", "environment": "local" },
+  "exposure": {},
+  "ghcr": {}
+}"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args([
+            "evidence",
+            "query",
+            fixture.pack.to_str().unwrap(),
+            "--answers",
+            answers.to_str().unwrap(),
+            "--query",
+            "lease status",
+            "--entity-type",
+            "Tenant",
+            "--entity-id",
+            "tenant-1",
+        ])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(5));
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("provider compatibility failed"));
 }
 
 #[test]
@@ -446,6 +897,24 @@ struct PackFixture {
 
 impl PackFixture {
     fn new() -> Self {
+        Self::from_entries(pack_entries())
+    }
+
+    fn new_with_ontology() -> Self {
+        Self::from_entries(pack_entries_with_ontology(None))
+    }
+
+    fn new_with_denied_relationship() -> Self {
+        Self::from_entries(pack_entries_with_ontology(Some(
+            r#","policy":{"deny_relationships":["tenant_makes_payment"]}"#,
+        )))
+    }
+
+    fn new_with_business_ontology() -> Self {
+        Self::from_entries(pack_entries_with_business_ontology())
+    }
+
+    fn from_entries(entries: Vec<(String, Vec<u8>)>) -> Self {
         let temp = TempDir::new().unwrap();
         let pack = temp.path().join("landlord.gtpack");
         let file = std::fs::File::create(&pack).unwrap();
@@ -453,7 +922,7 @@ impl PackFixture {
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .unix_permissions(0o644);
-        for (name, bytes) in pack_entries() {
+        for (name, bytes) in entries {
             writer.start_file(name, options).unwrap();
             std::io::Write::write_all(&mut writer, &bytes).unwrap();
         }
@@ -466,6 +935,135 @@ impl PackFixture {
         std::fs::write(&path, text).unwrap();
         path
     }
+
+    fn pack_sha256(&self) -> String {
+        let bytes = std::fs::read(&self.pack).unwrap();
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    fn write_artifact_json(
+        &self,
+        name: &str,
+        sha256: Option<&str>,
+        media_type: Option<&str>,
+        kind: Option<&str>,
+        bytes_base64: Option<&str>,
+    ) -> std::path::PathBuf {
+        let bytes = std::fs::read(&self.pack).unwrap();
+        let path = self._temp.path().join(name);
+        let sha256 = sha256
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.pack_sha256());
+        let artifact = serde_json::json!({
+            "kind": kind.unwrap_or("gtpack"),
+            "filename": "landlord.gtpack",
+            "media_type": media_type.unwrap_or("application/vnd.greentic.gtpack"),
+            "sha256": sha256,
+            "bytes_base64": bytes_base64
+                .map(ToString::to_string)
+                .unwrap_or_else(|| encode_base64(&bytes)),
+            "metadata_json": {}
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&artifact).unwrap()).unwrap();
+        path
+    }
+}
+
+fn run_json<const N: usize>(args: [&str; N]) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        .args(args)
+        .output()
+        .expect("greentic-sorx binary should run");
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).expect("command output should be JSON")
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn pack_entries_with_ontology(policy_fragment: Option<&str>) -> Vec<(String, Vec<u8>)> {
+    let mut entries = pack_entries();
+    let policy_fragment = policy_fragment.unwrap_or("");
+    entries.push((
+        "assets/sorla/ontology.graph.json".to_string(),
+        format!(
+            r#"{{"schema":"greentic.sorla.ontology.graph.v1","requires_entity_link":true,"concepts":[{{"id":"Tenant"}},{{"id":"Payment"}}],"relationships":[{{"id":"tenant_makes_payment","from":"Tenant","to":"Payment"}}]{policy_fragment}}}"#
+        )
+        .into_bytes(),
+    ));
+    entries.push((
+        "assets/sorla/retrieval-bindings.json".to_string(),
+        br#"{"schema":"greentic.sorla.retrieval-bindings.v1","bindings":[{"id":"tenant-evidence","concept_id":"Tenant"}]}"#.to_vec(),
+    ));
+    entries
+}
+
+fn pack_entries_with_business_ontology() -> Vec<(String, Vec<u8>)> {
+    let mut entries = pack_entries();
+    entries.push((
+        "assets/sorla/ontology.graph.json".to_string(),
+        br#"{
+  "schema": "greentic.sorla.ontology.graph.v1",
+  "requires_entity_link": true,
+  "concepts": [
+    { "id": "Asset" },
+    { "id": "Contract" },
+    { "id": "Customer" },
+    { "id": "EvidenceDocument" },
+    { "id": "Obligation" },
+    { "id": "Party" },
+    { "id": "Supplier" }
+  ],
+  "relationships": [
+    { "id": "contract_governs_asset", "from": "Contract", "to": "Asset" },
+    { "id": "contract_has_evidence", "from": "Contract", "to": "EvidenceDocument" },
+    { "id": "customer_has_contract", "from": "Customer", "to": "Contract" },
+    { "id": "supplier_fulfils_obligation", "from": "Supplier", "to": "Obligation" }
+  ],
+  "policy": {
+    "sensitive_concepts": ["EvidenceDocument"]
+  }
+}"#
+        .to_vec(),
+    ));
+    entries.push((
+        "assets/sorla/retrieval-bindings.json".to_string(),
+        br#"{
+  "schema": "greentic.sorla.retrieval-bindings.v1",
+  "bindings": [
+    {
+      "id": "business-risk-evidence",
+      "concept_id": "Customer",
+      "scope": {
+        "concepts": ["Customer", "Contract", "EvidenceDocument"],
+        "relationships": ["customer_has_contract", "contract_has_evidence"]
+      }
+    }
+  ]
+}"#
+        .to_vec(),
+    ));
+    entries
 }
 
 fn pack_entries() -> Vec<(String, Vec<u8>)> {
@@ -532,4 +1130,24 @@ fn pack_entries() -> Vec<(String, Vec<u8>)> {
             br#"{"id":"tenant-2","name":"Acme"}"#.to_vec(),
         ),
     ]
+}
+
+fn ontology_answers() -> &'static str {
+    r#"{
+  "tenant": { "tenant_id": "tenant-a" },
+  "server": { "public_base_url": "http://127.0.0.1:8787" },
+  "providers": {
+    "store": { "kind": "memory", "config_ref": "providers.memory.local" },
+    "rag": {
+      "kind": "memory",
+      "capabilities": ["ontology-scoped-evidence-query", "entity-link"],
+      "contract_version": "greentic.sorx.provider.v1"
+    }
+  },
+  "policy": { "approvals": {} },
+  "audit": {},
+  "deployment": { "tenant_id": "tenant-a", "sor_name": "landlord", "environment": "local" },
+  "exposure": {},
+  "ghcr": {}
+}"#
 }

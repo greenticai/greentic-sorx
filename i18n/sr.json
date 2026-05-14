@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Upravljajte aliasima za implementaciju.",
   "cli.command.deployments.about": "Upravljajte lokalnim SORX implementacijama.",
   "cli.command.doctor.about": "Validiraj SoRLa .gtpack za upotrebu u SORX izvršnom okruženju.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Odštampaj ovu poruku ili pomoć za date podkomande.",
   "cli.command.inspect.about": "Pregledaj SoRLa .gtpack i ispiši stabilne metapodatke.",
   "cli.command.mcp-tools.about": "Izlistaj MCP alate deklarisane u SoRLa .gtpack.",

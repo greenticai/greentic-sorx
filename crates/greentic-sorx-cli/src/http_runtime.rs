@@ -671,6 +671,7 @@ mod tests {
                     "tools": [{"name": "tenant.create", "endpoint_id": "tenant.create"}]
                 })),
                 llms_txt_fragment: None,
+                ontology: None,
             },
             sorx_assets: SorxAssets {
                 start_schema_json: default_start_schema(),

@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Administrer udrulningsaliaser.",
   "cli.command.deployments.about": "Administrer lokale SORX-udrulninger.",
   "cli.command.doctor.about": "Valider en SoRLa .gtpack til brug med SORX-runtime.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Udskriv denne meddelelse eller hjælpen til de angivne underkommandoer.",
   "cli.command.inspect.about": "Inspicer en SoRLa .gtpack, og udskriv stabile metadata.",
   "cli.command.mcp-tools.about": "Vis MCP-værktøjer deklareret af en SoRLa .gtpack.",

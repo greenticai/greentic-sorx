@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "ຈັດການນາມແຝງການນຳໃຊ້.",
   "cli.command.deployments.about": "ຈັດການການນຳໃຊ້ SORX ໃນເຄື່ອງ.",
   "cli.command.doctor.about": "ກວດສອບ SoRLa .gtpack ສໍາລັບການໃຊ້ງານກັບ SORX runtime.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "ພິມຂໍ້ຄວາມນີ້ ຫຼື ຄຳຊ່ວຍເຫຼືອຂອງຄຳສັ່ງຍ່ອຍທີ່ລະບຸ.",
   "cli.command.inspect.about": "ກວດເບິ່ງ SoRLa .gtpack ແລະພິມເມຕາດາຕາທີ່ຄົງທີ່.",
   "cli.command.mcp-tools.about": "ສະແດງລາຍຊື່ເຄື່ອງມື MCP ທີ່ປະກາດໂດຍ SoRLa .gtpack.",
