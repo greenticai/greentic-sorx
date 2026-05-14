@@ -195,6 +195,16 @@ pub struct PromotionStatus {
     pub promotable_private: bool,
     pub promotable_public: bool,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<PromotionGateStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromotionGateStatus {
+    pub id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,8 +224,10 @@ struct ValidationGate {
     digest_matches: bool,
     result: Option<String>,
     public_exposure_allowed: bool,
+    private_ok: bool,
     ok: bool,
     reason: Option<String>,
+    gates: Vec<PromotionGateStatus>,
 }
 
 impl DeploymentVisibility {
@@ -397,7 +409,7 @@ impl DeploymentRegistry {
             validation_report_digest_matches: validation.digest_matches,
             validation_result: validation.result,
             public_exposure_allowed: validation.public_exposure_allowed,
-            promotable_private: validation.ok
+            promotable_private: validation.private_ok
                 && matches!(
                     deployment.status,
                     DeploymentStatus::Pending
@@ -411,6 +423,7 @@ impl DeploymentRegistry {
                     DeploymentStatus::Validated | DeploymentStatus::ActivePrivate
                 ),
             reason: validation.reason,
+            gates: validation.gates,
         })
     }
 
@@ -421,7 +434,7 @@ impl DeploymentRegistry {
         automation_source: Option<String>,
     ) -> Result<SorxDeployment, DeploymentRegistryError> {
         let deployment = self.deployment_required(deployment_id)?.clone();
-        self.require_validation_gate(&deployment)?;
+        self.require_private_validation_gate(&deployment)?;
         let promoted = self.update_status(deployment_id, DeploymentStatus::ActivePrivate)?;
         self.record_promotion_audit(PromotionAuditEvent {
             event: "sorx.deployment.promoted_private".to_string(),
@@ -759,6 +772,26 @@ impl DeploymentRegistry {
         }
     }
 
+    fn require_private_validation_gate(
+        &self,
+        deployment: &SorxDeployment,
+    ) -> Result<(), DeploymentRegistryError> {
+        let gate = self.validation_gate(deployment);
+        if gate.private_ok {
+            Ok(())
+        } else {
+            Err(DeploymentRegistryError::new(
+                "promotion_blocked",
+                gate.reason.unwrap_or_else(|| {
+                    format!(
+                        "deployment `{}` does not have a passing validation report",
+                        deployment.deployment_id
+                    )
+                }),
+            ))
+        }
+    }
+
     fn validation_gate(&self, deployment: &SorxDeployment) -> ValidationGate {
         let Some(report) = self.latest_validation_report(&deployment.deployment_id) else {
             return ValidationGate {
@@ -766,8 +799,14 @@ impl DeploymentRegistry {
                 digest_matches: false,
                 result: None,
                 public_exposure_allowed: false,
+                private_ok: false,
                 ok: false,
                 reason: Some("validation report is required before promotion".to_string()),
+                gates: vec![PromotionGateStatus {
+                    id: "validation-report".to_string(),
+                    status: "missing".to_string(),
+                    reason: Some("validation report is required before promotion".to_string()),
+                }],
             };
         };
         let report_digest = report
@@ -788,13 +827,63 @@ impl DeploymentRegistry {
             .get("public_exposure_allowed")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let ok = digest_matches && result.as_deref() == Some("pass") && public_exposure_allowed;
+        let mut gates = vec![
+            PromotionGateStatus {
+                id: "validation-report".to_string(),
+                status: if result.as_deref() == Some("pass") && digest_matches {
+                    "passed"
+                } else {
+                    "failed"
+                }
+                .to_string(),
+                reason: if digest_matches {
+                    None
+                } else {
+                    Some("validation report pack digest does not match deployment".to_string())
+                },
+            },
+            PromotionGateStatus {
+                id: "public-exposure".to_string(),
+                status: if public_exposure_allowed {
+                    "passed"
+                } else {
+                    "failed"
+                }
+                .to_string(),
+                reason: if public_exposure_allowed {
+                    None
+                } else {
+                    Some("validation report does not allow public exposure".to_string())
+                },
+            },
+        ];
+        let ontology_gates = ontology_promotion_gates(report);
+        let override_allowed = report
+            .get("local_operator_policy_override")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let ontology_ok =
+            ontology_gates.iter().all(|gate| gate.status == "passed") || override_allowed;
+        gates.extend(ontology_gates);
+        if override_allowed {
+            gates.push(PromotionGateStatus {
+                id: "local-operator-override".to_string(),
+                status: "passed".to_string(),
+                reason: Some(
+                    "local operator override allowed ontology public exposure".to_string(),
+                ),
+            });
+        }
+        let private_ok = digest_matches && result.as_deref() == Some("pass");
+        let ok = private_ok && public_exposure_allowed && ontology_ok;
         let reason = if ok {
             None
         } else if !digest_matches {
             Some("validation report pack digest does not match deployment".to_string())
         } else if result.as_deref() != Some("pass") {
             Some("validation report did not pass required gates".to_string())
+        } else if !ontology_ok {
+            Some("ontology public exposure gates did not pass".to_string())
         } else {
             Some("validation report does not allow public exposure".to_string())
         };
@@ -803,8 +892,10 @@ impl DeploymentRegistry {
             digest_matches,
             result,
             public_exposure_allowed,
+            private_ok,
             ok,
             reason,
+            gates,
         }
     }
 
@@ -1037,6 +1128,38 @@ fn digest_suffix(digest: &str) -> String {
         .collect::<String>()
 }
 
+fn ontology_promotion_gates(report: &serde_json::Value) -> Vec<PromotionGateStatus> {
+    let Some(ontology) = report
+        .get("ontology")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    [
+        ("ontology-static", "static_validation"),
+        ("provider-compatibility", "provider_compatibility"),
+        ("retrieval-bindings", "retrieval_bindings"),
+        ("ontology-policy", "policy_validation"),
+    ]
+    .into_iter()
+    .map(|(id, key)| {
+        let passed = ontology
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|status| status == "passed" || status == "pass");
+        PromotionGateStatus {
+            id: id.to_string(),
+            status: if passed { "passed" } else { "failed" }.to_string(),
+            reason: if passed {
+                None
+            } else {
+                Some(format!("ontology gate `{key}` did not pass"))
+            },
+        }
+    })
+    .collect()
+}
+
 fn clean_segment(value: &str) -> String {
     let cleaned = value
         .chars()
@@ -1217,6 +1340,100 @@ mod tests {
             .promote_public(&created.deployment_id, "tester", None)
             .unwrap_err();
         assert_eq!(err.code, "promotion_blocked");
+    }
+
+    #[test]
+    fn ontology_public_promotion_requires_ontology_gates() {
+        let mut registry = DeploymentRegistry::default();
+        let created = registry
+            .create_deployment(request("1.0.0", "sha256:111", "v1"))
+            .unwrap();
+        let mut report = passing_report(&created);
+        report["ontology"] = serde_json::json!({
+            "static_validation": "passed",
+            "provider_compatibility": "failed",
+            "retrieval_bindings": "passed",
+            "policy_validation": "passed"
+        });
+        registry.record_validation_report(report).unwrap();
+        let status = registry.promotion_status(&created.deployment_id).unwrap();
+        assert!(!status.promotable_public);
+        assert!(
+            status
+                .gates
+                .iter()
+                .any(|gate| { gate.id == "provider-compatibility" && gate.status == "failed" })
+        );
+        let err = registry
+            .promote_public(&created.deployment_id, "tester", None)
+            .unwrap_err();
+        assert_eq!(err.code, "promotion_blocked");
+    }
+
+    #[test]
+    fn ontology_gate_failure_does_not_block_private_promotion() {
+        let mut registry = DeploymentRegistry::default();
+        let created = registry
+            .create_deployment(request("1.0.0", "sha256:111", "v1"))
+            .unwrap();
+        let mut report = passing_report(&created);
+        report["public_exposure_allowed"] = serde_json::json!(false);
+        report["ontology"] = serde_json::json!({
+            "static_validation": "passed",
+            "provider_compatibility": "failed",
+            "retrieval_bindings": "passed",
+            "policy_validation": "passed"
+        });
+        registry.record_validation_report(report).unwrap();
+        let status = registry.promotion_status(&created.deployment_id).unwrap();
+        assert!(status.promotable_private);
+        assert!(!status.promotable_public);
+        let private = registry
+            .promote_private(&created.deployment_id, "tester", None)
+            .unwrap();
+        assert_eq!(private.status, DeploymentStatus::ActivePrivate);
+    }
+
+    #[test]
+    fn local_operator_override_allows_ontology_gate_failure_and_is_audited() {
+        let mut registry = DeploymentRegistry::default();
+        let created = registry
+            .create_deployment(request("1.0.0", "sha256:111", "v1"))
+            .unwrap();
+        let mut report = passing_report(&created);
+        report["local_operator_policy_override"] = serde_json::json!(true);
+        report["ontology"] = serde_json::json!({
+            "static_validation": "passed",
+            "provider_compatibility": "failed",
+            "retrieval_bindings": "passed",
+            "policy_validation": "passed"
+        });
+        registry.record_validation_report(report).unwrap();
+        registry
+            .validate_deployment(&created.deployment_id)
+            .unwrap();
+        registry
+            .promote_private(&created.deployment_id, "tester", None)
+            .unwrap();
+        let status = registry.promotion_status(&created.deployment_id).unwrap();
+        assert!(status.promotable_public);
+        assert!(
+            status
+                .gates
+                .iter()
+                .any(|gate| gate.id == "local-operator-override")
+        );
+        registry
+            .promote_public(
+                &created.deployment_id,
+                "tester",
+                Some("override-test".to_string()),
+            )
+            .unwrap();
+        assert!(registry.promotion_audit_events.iter().any(|event| {
+            event.deployment_id == created.deployment_id
+                && event.automation_source.as_deref() == Some("override-test")
+        }));
     }
 
     #[test]

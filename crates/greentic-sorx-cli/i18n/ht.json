@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Jere alyas deplwaman yo.",
   "cli.command.deployments.about": "Jere deplwaman SORX lokal yo.",
   "cli.command.doctor.about": "Valide yon SoRLa .gtpack pou itilizasyon nan runtime SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Enprime mesaj sa a oswa èd pou soukòmand yo bay la.",
   "cli.command.inspect.about": "Enspekte yon SoRLa .gtpack epi enprime metadata ki estab.",
   "cli.command.mcp-tools.about": "Lis zouti MCP yon .gtpack SoRLa deklare.",

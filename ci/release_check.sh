@@ -83,16 +83,28 @@ if "overrides" in binstall:
     fail("package.metadata.binstall must not override Windows to zip; release workflow emits tgz for all targets")
 
 publish_text = PUBLISH_WORKFLOW.read_text()
-if "uses: greenticai/.github/.github/workflows/release-binaries.yml@main" not in publish_text:
-    fail("publish workflow must call the shared release-binaries workflow")
+if "branches:" not in publish_text or "      - main" not in publish_text:
+    fail("publish workflow must trigger from main branch pushes")
+if "Create or verify release tag" not in publish_text:
+    fail("publish workflow must create or verify the vX.Y.Z release tag before binary release")
+if "gh workflow run release-binaries.yml --ref" not in publish_text:
+    fail("publish workflow must dispatch release-binaries.yml on the version tag")
+if "gh run watch" not in publish_text:
+    fail("publish workflow must wait for release-binaries.yml before publishing crates")
 if "publish-crates:" not in publish_text or "release-binaries" not in publish_text.split("publish-crates:", 1)[1].split("environment:", 1)[0]:
     fail("publish-crates must depend on release-binaries")
-if "GITHUB_REF_TYPE" not in publish_text or "Publish must run from a vX.Y.Z tag ref." not in publish_text:
-    fail("publish workflow must require a tag ref before releasing")
+if "Publish must run from the main branch" not in publish_text:
+    fail("publish workflow must require a main/master branch ref before releasing")
 
 binaries_text = BINARIES_WORKFLOW.read_text()
+if "workflow_dispatch:" not in binaries_text:
+    fail("release-binaries workflow must be dispatchable by publish.yml")
 if "\n  push:" in binaries_text or "\npush:" in binaries_text:
-    fail("release-binaries workflow must be manual-only; tag releases are orchestrated by publish.yml")
+    fail("release-binaries workflow must not trigger directly from pushes; publish.yml orchestrates main releases")
+if "if: github.ref_type != 'tag'" not in binaries_text:
+    fail("release-binaries branch/manual dispatch job must only re-dispatch from non-tag refs")
+if "if: github.ref_type == 'tag'" not in binaries_text:
+    fail("release-binaries workflow must run the shared binary release workflow on tag refs")
 
 members = set(metadata.get("workspace_members", []))
 publishable = {
@@ -141,4 +153,3 @@ print("crates.io publish order:")
 for name in order:
     print(f"  {name}")
 PY
-

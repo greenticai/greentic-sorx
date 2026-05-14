@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "デプロイメントエイリアスを管理します。",
   "cli.command.deployments.about": "ローカルの SORX デプロイメントを管理します。",
   "cli.command.doctor.about": "SORX ランタイムで使用するために SoRLa .gtpack を検証します。",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "このメッセージ、または指定されたサブコマンドのヘルプを表示します。",
   "cli.command.inspect.about": "SoRLa .gtpack を検査し、安定したメタデータを出力します。",
   "cli.command.mcp-tools.about": "SoRLa .gtpack で宣言された MCP ツールを一覧表示します。",

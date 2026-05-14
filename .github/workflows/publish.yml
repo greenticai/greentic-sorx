@@ -3,19 +3,24 @@ name: Publish
 on:
   workflow_dispatch:
   push:
-    tags:
-      - v*
+    branches:
+      - main
+      - master
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -38,36 +43,73 @@ jobs:
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "greentic-sorx"))')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Require tag ref
+      - name: Require main branch
         run: |
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
-            echo "Publish must run from a vX.Y.Z tag ref." >&2
+          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
+            echo "Publish must run from the main branch so it can create and release the matching version tag." >&2
             exit 1
           fi
-
-      - name: Verify tag matches Cargo version
-        run: |
-          expected="v${{ steps.version.outputs.version }}"
-          actual="${GITHUB_REF_NAME}"
-          if [ "$actual" != "$expected" ]; then
-            echo "Tag mismatch: expected ${expected}, got ${actual}" >&2
+          if [ "${GITHUB_REF_NAME}" != "main" ] && [ "${GITHUB_REF_NAME}" != "master" ]; then
+            echo "Publish must run from main or master, got ${GITHUB_REF_NAME}." >&2
             exit 1
           fi
 
       - name: Run local checks
         run: bash ci/local_check.sh
 
+      - name: Create or verify release tag
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          head_sha="$(git rev-parse HEAD)"
+          git fetch --force --tags origin
+
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            tag_sha="$(git rev-list -n 1 "${tag}")"
+            if [ "$tag_sha" != "$head_sha" ]; then
+              echo "Tag ${tag} already exists at ${tag_sha}, but this publish run is for ${head_sha}." >&2
+              exit 1
+            fi
+            echo "Tag ${tag} already points at this commit."
+          else
+            git tag "${tag}" "${head_sha}"
+            git push origin "refs/tags/${tag}"
+          fi
+
   release-binaries:
+    runs-on: ubuntu-latest
     needs: verify
-    uses: greenticai/.github/.github/workflows/release-binaries.yml@main
-    with:
-      package: greentic-sorx
-      binary: greentic-sorx
-      extra-files: |
-        README.md
-        LICENSE
-    secrets: inherit
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch release-binaries.yml on version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gh workflow run release-binaries.yml --ref "${RELEASE_TAG}"
+
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release-binaries.yml/runs?event=workflow_dispatch&per_page=20" \
+              --jq ".workflow_runs | map(select(.head_branch == \"${RELEASE_TAG}\" and .head_sha == \"${RELEASE_SHA}\")) | sort_by(.created_at) | last | .id // empty")"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "Could not find release-binaries.yml run for ${RELEASE_TAG} at ${RELEASE_SHA}." >&2
+            exit 1
+          fi
+
+          gh run watch "$run_id" --exit-status
 
   publish-crates:
     runs-on: ubuntu-latest

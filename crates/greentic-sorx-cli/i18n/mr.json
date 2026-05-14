@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "उपयोजन उपनावे व्यवस्थापित करा.",
   "cli.command.deployments.about": "स्थानिक SORX उपयोजने व्यवस्थापित करा.",
   "cli.command.doctor.about": "SORX रनटाइम वापरासाठी SoRLa .gtpack सत्यापित करा.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "हा संदेश किंवा दिलेल्या उपकमांडची/उपकमांड्सची मदत छापा.",
   "cli.command.inspect.about": "SoRLa .gtpack तपासा आणि स्थिर मेटाडेटा छापा.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack द्वारे घोषित MCP साधनांची यादी करा.",

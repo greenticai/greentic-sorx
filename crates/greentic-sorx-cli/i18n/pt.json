@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Gerenciar aliases de implantação.",
   "cli.command.deployments.about": "Gerenciar implantações locais do SORX.",
   "cli.command.doctor.about": "Valide um .gtpack SoRLa para uso no runtime SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Imprimir esta mensagem ou a ajuda do(s) subcomando(s) fornecido(s).",
   "cli.command.inspect.about": "Inspecione um .gtpack SoRLa e imprima metadados estáveis.",
   "cli.command.mcp-tools.about": "Listar ferramentas MCP declaradas por um .gtpack SoRLa.",

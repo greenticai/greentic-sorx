@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "إدارة الأسماء المستعارة للنشر.",
   "cli.command.deployments.about": "إدارة عمليات نشر SORX المحلية.",
   "cli.command.doctor.about": "تحقق من صلاحية SoRLa .gtpack لاستخدامه مع وقت تشغيل SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "طباعة هذه الرسالة أو تعليمات الأمر الفرعي المحدد.",
   "cli.command.inspect.about": "افحص SoRLa .gtpack واطبع بيانات تعريف ثابتة.",
   "cli.command.mcp-tools.about": "عرض أدوات MCP المعلنة بواسطة حزمة SoRLa بامتداد .gtpack.",

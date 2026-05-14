@@ -33,4 +33,4 @@ jobs:
         run: cargo binstall -y greentic-i18n-translator
 
       - name: Verify release readiness
-        run: bash scripts/local_check.sh
+        run: bash ci/local_check.sh

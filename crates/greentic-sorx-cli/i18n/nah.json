@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Xikyekana deployment aliasmeh.",
   "cli.command.deployments.about": "Xikyekana local SORX deployments.",
   "cli.command.doctor.about": "Tlayejyekoa se SoRLa .gtpack ika SORX runtime tekitilis.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Xikixpantilti nin tlajkuiloli noso in ayuda tlen in subcommand(s) tlen omomakak.",
   "cli.command.inspect.about": "Tlachia se SoRLa .gtpack wan xijkuilo stable metadata.",
   "cli.command.mcp-tools.about": "Xikilistaro MCP teposmeh tlen omotenehkeh ipan se SoRLa .gtpack.",

@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "管理部署别名。",
   "cli.command.deployments.about": "管理本地 SORX 部署。",
   "cli.command.doctor.about": "验证 SoRLa .gtpack 是否可供 SORX 运行时使用。",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "打印此消息或给定子命令的帮助。",
   "cli.command.inspect.about": "检查 SoRLa .gtpack 并打印稳定的元数据。",
   "cli.command.mcp-tools.about": "列出 SoRLa .gtpack 声明的 MCP 工具。",

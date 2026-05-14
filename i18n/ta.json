@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "பத deployment aliasகளை நிர்வகிக்கவும்.",
   "cli.command.deployments.about": "உள்ளூர் SORX deploymentகளை நிர்வகிக்கவும்.",
   "cli.command.doctor.about": "SORX runtime பயன்பாட்டிற்காக SoRLa .gtpack ஐ சரிபார்க்கவும்.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "இந்த செய்தியை அல்லது கொடுக்கப்பட்ட துணைக் கட்டளை(கள்)ன் உதவியை அச்சிடவும்.",
   "cli.command.inspect.about": "SoRLa .gtpack ஐ ஆய்வு செய்து நிலையான metadata ஐ அச்சிடவும்.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack அறிவித்த MCP கருவிகளை பட்டியலிடவும்.",

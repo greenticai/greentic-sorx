@@ -38,6 +38,16 @@ deployment registry and public rollout work.
 - Mutating operations should use `Idempotency-Key`. SORX scopes create
   idempotency by operation so one key cannot cross operation boundaries.
 - Request bodies are not included in audit events by default.
+- Ontology graph and evidence commands enforce static ontology policy hints
+  before relationship traversal or evidence retrieval.
+- Ontology policy decisions can return redaction metadata for sensitive fields
+  and deny evidence or traversal over restricted concepts.
+- Ontology/evidence explain and audit payloads carry hashes, IDs, and counts;
+  request bodies and secret values are not added to those command audit events.
+- Public promotion for ontology-enabled validation reports requires ontology
+  static validation, provider compatibility, retrieval binding validation, and
+  ontology policy validation gates to pass unless a local operator override is
+  recorded.
 
 ## Policy Defaults
 

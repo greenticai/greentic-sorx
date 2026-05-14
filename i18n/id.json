@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Kelola alias deployment.",
   "cli.command.deployments.about": "Kelola deployment SORX lokal.",
   "cli.command.doctor.about": "Validasi .gtpack SoRLa untuk penggunaan runtime SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Cetak pesan ini atau bantuan untuk subperintah yang diberikan.",
   "cli.command.inspect.about": "Inspeksi .gtpack SoRLa dan cetak metadata stabil.",
   "cli.command.mcp-tools.about": "Cantumkan alat MCP yang dideklarasikan oleh .gtpack SoRLa.",

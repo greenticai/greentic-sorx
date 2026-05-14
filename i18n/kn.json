@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "ನಿಯೋಜನೆ ಅಲಿಯಾಸ್‌ಗಳನ್ನು ನಿರ್ವಹಿಸಿ.",
   "cli.command.deployments.about": "ಸ್ಥಳೀಯ SORX ನಿಯೋಜನೆಗಳನ್ನು ನಿರ್ವಹಿಸಿ.",
   "cli.command.doctor.about": "SORX runtime ಬಳಕೆಗಾಗಿ SoRLa .gtpack ಅನ್ನು ಮಾನ್ಯಗೊಳಿಸಿ.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "ಈ ಸಂದೇಶವನ್ನು ಅಥವಾ ನೀಡಲಾದ ಉಪಕಮಾಂಡ್(ಗಳು)ನ ಸಹಾಯವನ್ನು ಮುದ್ರಿಸಿ.",
   "cli.command.inspect.about": "SoRLa .gtpack ಅನ್ನು ಪರಿಶೀಲಿಸಿ ಮತ್ತು ಸ್ಥಿರ metadata ಅನ್ನು ಮುದ್ರಿಸಿ.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack ಘೋಷಿಸಿದ MCP ಉಪಕರಣಗಳನ್ನು ಪಟ್ಟಿ ಮಾಡಿ.",

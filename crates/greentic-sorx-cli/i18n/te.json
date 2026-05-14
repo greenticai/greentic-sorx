@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "డిప్లాయ్‌మెంట్ అలియాస్‌లను నిర్వహించండి.",
   "cli.command.deployments.about": "స్థానిక SORX డిప్లాయ్‌మెంట్‌లను నిర్వహించండి.",
   "cli.command.doctor.about": "SORX రన్‌టైమ్ ఉపయోగం కోసం SoRLa .gtpackను ధృవీకరించండి.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "ఈ సందేశాన్ని లేదా ఇచ్చిన ఉపకమాండ్(ల) సహాయాన్ని ముద్రించండి.",
   "cli.command.inspect.about": "SoRLa .gtpackను పరిశీలించి స్థిరమైన మెటాడేటాను ప్రింట్ చేయండి.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack ద్వారా ప్రకటించబడిన MCP టూల్స్‌ను జాబితా చేయండి.",

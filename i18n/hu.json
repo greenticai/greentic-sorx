@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Telepítési aliasok kezelése.",
   "cli.command.deployments.about": "Helyi SORX-telepítések kezelése.",
   "cli.command.doctor.about": "SoRLa .gtpack ellenőrzése SORX futtatókörnyezeti használathoz.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Ennek az üzenetnek vagy a megadott alparancs(ok) súgójának kiírása.",
   "cli.command.inspect.about": "SoRLa .gtpack vizsgálata és stabil metaadatok kiírása.",
   "cli.command.mcp-tools.about": "Egy SoRLa .gtpack által deklarált MCP-eszközök listázása.",

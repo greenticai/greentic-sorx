@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Pamahalaan ang mga alias ng deployment.",
   "cli.command.deployments.about": "Pamahalaan ang mga lokal na deployment ng SORX.",
   "cli.command.doctor.about": "I-validate ang isang SoRLa .gtpack para sa paggamit ng SORX runtime.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "I-print ang mensaheng ito o ang tulong ng ibinigay na subcommand(s).",
   "cli.command.inspect.about": "Suriin ang isang SoRLa .gtpack at i-print ang stable na metadata.",
   "cli.command.mcp-tools.about": "Ilista ang mga MCP tool na idineklara ng isang SoRLa .gtpack.",

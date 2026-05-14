@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "배포 별칭을 관리합니다.",
   "cli.command.deployments.about": "로컬 SORX 배포를 관리합니다.",
   "cli.command.doctor.about": "SORX 런타임 사용을 위해 SoRLa .gtpack을 검증합니다.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "이 메시지 또는 지정된 하위 명령의 도움말을 출력합니다.",
   "cli.command.inspect.about": "SoRLa .gtpack을 검사하고 안정적인 메타데이터를 출력합니다.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack에서 선언한 MCP 도구를 나열합니다.",

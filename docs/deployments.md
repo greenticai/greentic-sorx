@@ -52,6 +52,17 @@ deployment ID and pack digest. The report must have `result=pass` and
 Promotion writes an audit event into the registry before exposing the route or
 moving an alias.
 
+For ontology-enabled validation reports, promotion status also reports
+per-gate ontology checks: `ontology-static`, `provider-compatibility`,
+`retrieval-bindings`, and `ontology-policy`. All ontology gates must pass unless
+a local operator policy override is recorded in the validation report. Overrides
+are surfaced as a `local-operator-override` gate and promotion still writes a
+registry audit event.
+
+Private activation only requires the validation report to be present, match the
+pack digest, and pass. Ontology public-exposure gates do not block private
+activation.
+
 Rollback is alias-based and does not delete the failed deployment:
 
 ```bash

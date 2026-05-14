@@ -50,6 +50,8 @@ pub struct ProviderBindingConfig {
     pub kind: String,
     pub config_ref: Option<String>,
     pub config: Option<Value>,
+    pub capabilities: Vec<String>,
+    pub contract_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +190,12 @@ pub fn default_start_schema() -> Value {
                         "properties": {
                             "kind": { "type": "string", "enum": ["memory", "foundationdb"] },
                             "config_ref": { "type": "string" },
+                            "capabilities": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "default": []
+                            },
+                            "contract_version": { "type": "string" },
                             "config": {}
                         }
                     }
@@ -198,6 +206,12 @@ pub fn default_start_schema() -> Value {
                     "properties": {
                         "kind": { "type": "string", "enum": ["memory", "foundationdb"] },
                         "config_ref": { "type": "string" },
+                        "capabilities": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "default": []
+                        },
+                        "contract_version": { "type": "string" },
                         "config": {}
                     }
                 }
@@ -483,7 +497,9 @@ pub fn build_startup_plan(
                 "id": id,
                 "kind": provider.kind,
                 "config_ref": provider.config_ref,
-                "has_direct_config": provider.config.is_some()
+                "has_direct_config": provider.config.is_some(),
+                "capabilities": provider.capabilities,
+                "contract_version": provider.contract_version
             })
         })
         .collect::<Vec<_>>();
@@ -780,12 +796,18 @@ fn provider_configs(object: &Map<String, Value>) -> BTreeMap<String, ProviderBin
         .iter()
         .filter_map(|(id, value)| {
             let provider = value.as_object()?;
+            let mut capabilities =
+                string_array_at(Some(provider), "capabilities").unwrap_or_default();
+            capabilities.sort();
+            capabilities.dedup();
             Some((
                 id.clone(),
                 ProviderBindingConfig {
                     kind: string_at(provider, "kind").unwrap_or_default(),
                     config_ref: string_at(provider, "config_ref"),
                     config: provider.get("config").cloned(),
+                    capabilities,
+                    contract_version: string_at(provider, "contract_version"),
                 },
             ))
         })

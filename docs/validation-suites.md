@@ -65,3 +65,30 @@ failures block public readiness. Recommended failures appear in the report but
 do not block public readiness. Informational tests never block.
 
 No validation suite test can run shell commands or arbitrary code from a pack.
+
+Pack doctor validation also checks optional SoRLa ontology assets when present:
+
+- `assets/sorla/ontology.graph.json`
+- `assets/sorla/ontology.ir.cbor`
+- `assets/sorla/retrieval-bindings.json`
+
+Ontology validation is static. It checks supported schemas, unique concept and
+relationship IDs, relationship endpoints, optional record metadata references,
+retrieval binding references, ontology IR hashes, secret-like values, and
+absolute local paths.
+
+Validation reports for ontology-enabled packs can include an `ontology` object
+with gate statuses used by public promotion. These gates are intentionally
+public-exposure gates; private activation still follows the base validation
+report result and digest checks.
+
+```json
+{
+  "ontology": {
+    "static_validation": "passed",
+    "provider_compatibility": "passed",
+    "retrieval_bindings": "passed",
+    "policy_validation": "passed"
+  }
+}
+```

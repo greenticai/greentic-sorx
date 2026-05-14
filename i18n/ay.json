@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Uñt'ayawi sutinak apnaqaña.",
   "cli.command.deployments.about": "Local SORX uñt'ayawinak apnaqaña.",
   "cli.command.doctor.about": "SoRLa .gtpack ukaxa SORX runtime apnaqañatakixa chiqapa uñakipaña.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "Aka yatiyaw qillqaña jan ukax churata subcomando(s) yanapt'awipa.",
   "cli.command.inspect.about": "SoRLa .gtpack uñakipaña ukatxa estable metadata imprimir luraña.",
   "cli.command.mcp-tools.about": "SoRLa .gtpack ukan yatiyata MCP herramientas ukanak lista luraña.",

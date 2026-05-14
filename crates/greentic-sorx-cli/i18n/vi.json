@@ -3,6 +3,8 @@
   "cli.command.aliases.about": "Quản lý bí danh triển khai.",
   "cli.command.deployments.about": "Quản lý các triển khai SORX cục bộ.",
   "cli.command.doctor.about": "Xác thực một SoRLa .gtpack để sử dụng với runtime SORX.",
+  "cli.command.evidence.about": "Query ontology-scoped evidence.",
+  "cli.command.graph.about": "Traverse static ontology graphs.",
   "cli.command.help.about": "In thông báo này hoặc phần trợ giúp của các lệnh con đã cho.",
   "cli.command.inspect.about": "Kiểm tra một SoRLa .gtpack và in siêu dữ liệu ổn định.",
   "cli.command.mcp-tools.about": "Liệt kê các công cụ MCP được khai báo bởi SoRLa .gtpack.",
