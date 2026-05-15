@@ -56,6 +56,10 @@ Stable exit codes:
 validates answers and emits an adapter runtime plan; full MCP server transport
 is still future work.
 
+`inspect` includes a `business_actions` summary when a pack contains
+`assets/sorla/business-actions.json`, including action count, lock presence,
+hash validity, and execution-target validity.
+
 `inspect` includes an `ontology` summary when a pack contains
 `assets/sorla/ontology.graph.json`, including the graph schema, concept count,
 relationship count, and whether `assets/sorla/retrieval-bindings.json` is

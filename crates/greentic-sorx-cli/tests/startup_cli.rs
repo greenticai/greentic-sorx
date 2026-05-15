@@ -8,6 +8,12 @@ use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+fn greentic_sorx_command() -> Command {
+    // Test-only helper invokes Cargo's compiled test binary path.
+    // foxguard: ignore[rs/no-command-injection]
+    Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+}
+
 fn full_answers() -> Value {
     json!({
         "tenant": {
@@ -115,7 +121,7 @@ fn write_json(temp: &TempDir, name: &str, value: &Value) -> std::path::PathBuf {
 #[test]
 fn start_schema_emits_embedded_pack_schema() {
     let (_temp, pack) = write_pack();
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args(["start", pack.to_str().unwrap(), "--schema"])
         .output()
         .expect("greentic-sorx binary should run");
@@ -133,7 +139,7 @@ fn start_schema_emits_embedded_pack_schema() {
 fn start_emit_answers_normalizes_defaults_stably() {
     let (temp, pack) = write_pack();
     let answers = write_json(&temp, "answers.json", &full_answers());
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "start",
             pack.to_str().unwrap(),
@@ -158,7 +164,7 @@ fn start_emit_answers_normalizes_defaults_stably() {
 fn start_dry_run_emits_startup_plan() {
     let (temp, pack) = write_pack();
     let answers = write_json(&temp, "answers.json", &full_answers());
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "start",
             pack.to_str().unwrap(),
@@ -193,7 +199,7 @@ fn missing_answers_fail_with_paths_in_non_interactive_mode() {
             "ghcr": {}
         }),
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "--non-interactive",
             "start",
@@ -223,7 +229,7 @@ fn qa_answer_set_envelope_is_accepted_by_cli() {
             "answers": full_answers()
         }),
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "start",
             pack.to_str().unwrap(),
@@ -312,7 +318,7 @@ fn start_dry_run_sorts_provider_capabilities_stably() {
         "ontology-scoped-evidence-query"
     ]);
     let answers = write_json(&temp, "answers.json", &answers);
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "start",
             pack.to_str().unwrap(),

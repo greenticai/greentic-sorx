@@ -7,9 +7,15 @@ use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+fn greentic_sorx_command() -> Command {
+    // Test-only helper invokes Cargo's compiled test binary path.
+    // foxguard: ignore[rs/no-command-injection]
+    Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+}
+
 #[test]
 fn binary_help_contains_command_surface() {
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .arg("--help")
         .output()
         .expect("greentic-sorx binary should run");
@@ -24,7 +30,7 @@ fn binary_help_contains_command_surface() {
 
 #[test]
 fn binary_placeholder_command_fails_clearly() {
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args(["routes", "--deployment", "missing"])
         .output()
         .expect("greentic-sorx binary should run");
@@ -38,7 +44,7 @@ fn binary_placeholder_command_fails_clearly() {
 #[test]
 fn binary_start_schema_emits_pack_schema() {
     let fixture = PackFixture::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args(["start", fixture.pack.to_str().unwrap(), "--schema"])
         .output()
         .expect("greentic-sorx binary should run");
@@ -64,7 +70,7 @@ fn binary_start_dry_run_emits_plan() {
   "ghcr": {}
 }"#,
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "start",
             fixture.pack.to_str().unwrap(),
@@ -89,7 +95,7 @@ fn binary_start_dry_run_emits_plan() {
 fn binary_start_dry_run_reports_ontology_provider_compatibility() {
     let fixture = PackFixture::new_with_ontology();
     let answers = fixture.write_answers(ontology_answers());
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "start",
             fixture.pack.to_str().unwrap(),
@@ -121,7 +127,7 @@ fn binary_start_dry_run_reports_ontology_provider_compatibility() {
 #[test]
 fn binary_routes_json_is_stable() {
     let fixture = PackFixture::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args(["routes", fixture.pack.to_str().unwrap(), "--json"])
         .output()
         .expect("greentic-sorx binary should run");
@@ -136,7 +142,7 @@ fn binary_routes_json_is_stable() {
 #[test]
 fn binary_graph_paths_json_is_stable() {
     let fixture = PackFixture::new_with_ontology();
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "graph",
             "paths",
@@ -163,7 +169,7 @@ fn binary_graph_paths_json_is_stable() {
 #[test]
 fn binary_graph_unknown_concept_fails_clearly() {
     let fixture = PackFixture::new_with_ontology();
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "graph",
             "paths",
@@ -185,7 +191,7 @@ fn binary_graph_unknown_concept_fails_clearly() {
 #[test]
 fn binary_graph_relationship_policy_denies_traversal() {
     let fixture = PackFixture::new_with_denied_relationship();
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "graph",
             "paths",
@@ -208,7 +214,7 @@ fn binary_graph_relationship_policy_denies_traversal() {
 fn binary_evidence_query_json_is_stable() {
     let fixture = PackFixture::new_with_ontology();
     let answers = fixture.write_answers(ontology_answers());
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "evidence",
             "query",
@@ -435,7 +441,7 @@ fn binary_artifact_json_rejects_hash_mismatch() {
         None,
         None,
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "artifact",
             "validate",
@@ -461,7 +467,7 @@ fn binary_artifact_json_rejects_wrong_media_type_and_kind() {
         None,
         None,
     );
-    let media_output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let media_output = greentic_sorx_command()
         .args([
             "artifact",
             "validate",
@@ -476,7 +482,7 @@ fn binary_artifact_json_rejects_wrong_media_type_and_kind() {
     assert!(media_stderr.contains("artifact media_type must be"));
 
     let bad_kind = fixture.write_artifact_json("bad-kind.json", None, None, Some("bundle"), None);
-    let kind_output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let kind_output = greentic_sorx_command()
         .args([
             "artifact",
             "validate",
@@ -495,7 +501,7 @@ fn binary_artifact_json_rejects_wrong_media_type_and_kind() {
 fn binary_artifact_json_rejects_malformed_base64() {
     let fixture = PackFixture::new();
     let artifact = fixture.write_artifact_json("bad-base64.json", None, None, None, Some("@@"));
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "artifact",
             "validate",
@@ -526,7 +532,7 @@ fn binary_evidence_query_missing_provider_fails() {
   "ghcr": {}
 }"#,
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "evidence",
             "query",
@@ -564,7 +570,7 @@ fn binary_start_emit_answers_applies_defaults() {
   "ghcr": {}
 }"#,
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "start",
             fixture.pack.to_str().unwrap(),
@@ -589,7 +595,7 @@ fn binary_start_emit_answers_applies_defaults() {
 fn binary_start_non_interactive_missing_answers_fails_clearly() {
     let fixture = PackFixture::new();
     let answers = fixture.write_answers(r#"{"tenant":{},"server":{},"providers":{},"policy":{},"audit":{},"deployment":{},"exposure":{},"ghcr":{}}"#);
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "--non-interactive",
             "start",
@@ -611,7 +617,7 @@ fn binary_start_non_interactive_missing_answers_fails_clearly() {
 fn binary_doctor_pack_failure_uses_stable_exit_code() {
     let temp = TempDir::new().unwrap();
     let missing = temp.path().join("missing.gtpack");
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args(["doctor", missing.to_str().unwrap(), "--json"])
         .output()
         .expect("greentic-sorx binary should run");
@@ -625,7 +631,7 @@ fn binary_doctor_pack_failure_uses_stable_exit_code() {
 #[test]
 fn binary_mcp_tools_lists_pack_tools() {
     let fixture = PackFixture::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args(["mcp-tools", fixture.pack.to_str().unwrap()])
         .output()
         .expect("greentic-sorx binary should run");
@@ -653,7 +659,7 @@ fn binary_validate_runs_pack_embedded_suite() {
   "ghcr": {}
 }"#,
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args([
             "validate",
             fixture.pack.to_str().unwrap(),
@@ -686,7 +692,7 @@ fn binary_validate_runs_pack_embedded_suite() {
 fn binary_deployment_registry_create_validate_alias_and_routes() {
     let fixture = PackFixture::new();
     let registry = fixture._temp.path().join("registry.json");
-    let create = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let create = greentic_sorx_command()
         .args([
             "--registry",
             registry.to_str().unwrap(),
@@ -715,7 +721,7 @@ fn binary_deployment_registry_create_validate_alias_and_routes() {
     assert_eq!(created["status"], "pending");
     assert!(registry.exists());
 
-    let validate = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let validate = greentic_sorx_command()
         .args([
             "--registry",
             registry.to_str().unwrap(),
@@ -729,7 +735,7 @@ fn binary_deployment_registry_create_validate_alias_and_routes() {
     let validated: serde_json::Value = serde_json::from_slice(&validate.stdout).unwrap();
     assert_eq!(validated["status"], "validated");
 
-    let alias = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let alias = greentic_sorx_command()
         .args([
             "--registry",
             registry.to_str().unwrap(),
@@ -750,7 +756,7 @@ fn binary_deployment_registry_create_validate_alias_and_routes() {
     let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
     assert_eq!(alias["target_deployment_id"], deployment_id);
 
-    let routes = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let routes = greentic_sorx_command()
         .args([
             "--registry",
             registry.to_str().unwrap(),
@@ -790,7 +796,7 @@ fn binary_deployment_registry_create_validate_alias_and_routes() {
     )
     .unwrap();
 
-    let promote = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let promote = greentic_sorx_command()
         .args([
             "--registry",
             registry.to_str().unwrap(),
@@ -808,7 +814,7 @@ fn binary_deployment_registry_create_validate_alias_and_routes() {
     assert_eq!(promoted_alias["alias"], "latest");
     assert_eq!(promoted_alias["target_deployment_id"], deployment_id);
 
-    let public_routes = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let public_routes = greentic_sorx_command()
         .args([
             "--registry",
             registry.to_str().unwrap(),
@@ -846,7 +852,7 @@ fn binary_webhook_fixture_replay_creates_pending_deployment() {
         "api_version_label": "v1.1",
         "promotion_policy": "validate_then_private"
     });
-    let secret = "fixture-secret";
+    let secret = "fixture-value";
     std::fs::write(
         &fixture,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -862,7 +868,7 @@ fn binary_webhook_fixture_replay_creates_pending_deployment() {
     let body = serde_json::to_vec(&payload).unwrap();
     let signature = greentic_sorx_core::github_signature(secret.as_bytes(), &body);
 
-    let replay = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let replay = greentic_sorx_command()
         .args([
             "--registry",
             registry.to_str().unwrap(),
@@ -970,7 +976,7 @@ impl PackFixture {
 }
 
 fn run_json<const N: usize>(args: [&str; N]) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let output = greentic_sorx_command()
         .args(args)
         .output()
         .expect("greentic-sorx binary should run");

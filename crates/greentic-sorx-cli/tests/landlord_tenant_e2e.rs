@@ -4,7 +4,11 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use greentic_sorx_core::default_start_schema;
-use greentic_sorx_pack::{PackIdentity, PackManifest};
+use greentic_sorx_pack::{
+    BusinessAction, BusinessActionCatalog, BusinessActionExecution, BusinessActionIdempotency,
+    BusinessActionLock, BusinessActionLockEntry, BusinessActionRisk, PackIdentity, PackManifest,
+    contract_hash,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
@@ -18,17 +22,33 @@ const ANSWERS_FOUNDATIONDB: &str =
 const EXPECTED_ROUTES: &str = include_str!("e2e/fixtures/landlord_tenant/expected-routes.json");
 const SEED_DATA: &str = include_str!("e2e/fixtures/landlord_tenant/seed-data.json");
 
+fn greentic_sorx_command() -> Command {
+    // Test-only helper invokes Cargo's compiled test binary path.
+    // foxguard: ignore[rs/no-command-injection]
+    Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+}
+
 #[test]
 fn landlord_tenant_memory_e2e_runs_from_gtpack() {
     let fixture = LandlordTenantFixture::new();
 
-    let doctor = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let doctor = greentic_sorx_command()
         .args(["doctor", fixture.pack.to_str().unwrap()])
         .output()
         .expect("doctor should run");
     assert!(doctor.status.success(), "{doctor:?}");
 
-    let mcp_tools = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+    let inspect = greentic_sorx_command()
+        .args(["inspect", fixture.pack.to_str().unwrap(), "--json"])
+        .output()
+        .expect("inspect should run");
+    assert!(inspect.status.success(), "{inspect:?}");
+    let inspect_json: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert_eq!(inspect_json["business_actions"]["present"], true);
+    assert_eq!(inspect_json["business_actions"]["count"], 1);
+    assert_eq!(inspect_json["business_actions"]["lock_present"], true);
+
+    let mcp_tools = greentic_sorx_command()
         .args(["mcp-tools", fixture.pack.to_str().unwrap()])
         .output()
         .expect("mcp-tools should run");
@@ -137,7 +157,65 @@ fn landlord_tenant_memory_e2e_runs_from_gtpack() {
     let refund = client.post_json_raw("/v1/agent/payments/payment-1/refund", &json!({}), None);
     assert_eq!(refund.status, 202);
     assert_eq!(refund.body["status"], "approval_required");
+
+    let business_actions = client.get_json("/v1/sorx/business-actions");
+    assert_eq!(business_actions["actions"][0]["id"], "record_rent_payment");
+
+    let action = client.get_json("/v1/sorx/business-actions/record_rent_payment/versions/0.1.0");
+    let contract_hash = action["contract_hash"]
+        .as_str()
+        .or_else(|| business_actions["actions"][0]["contract_hash"].as_str())
+        .unwrap_or(BUSINESS_ACTION_HASH_SENTINEL);
+    assert_ne!(contract_hash, BUSINESS_ACTION_HASH_SENTINEL);
+
+    let business_payment = json!({
+        "action_ref": { "contract_hash": contract_hash },
+        "values": {
+            "id": "payment-business-1",
+            "tenancy_id": "tenancy-1",
+            "amount_cents": 125000,
+            "status": "recorded"
+        },
+        "options": { "idempotency_key": "business-payment-once" }
+    });
+    let dry_run = client.post_json_raw(
+        "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/dry-run",
+        &business_payment,
+        None,
+    );
+    assert_eq!(dry_run.status, 200);
+    assert_eq!(dry_run.body["valid"], true);
+    let missing_after_dry_run = client.get_json("/v1/agent/payments/payment-business-1");
+    assert!(missing_after_dry_run["result"].is_null());
+
+    let invoked = client.post_json(
+        "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+        &business_payment,
+        None,
+    );
+    assert_eq!(invoked["action_ref"]["id"], "record_rent_payment");
+    assert_eq!(invoked["result"]["id"], "payment-business-1");
+    assert_eq!(invoked["audit"]["validation_result"], "passed");
+
+    let wrong_hash = client.post_json_raw(
+        "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+        &json!({
+            "action_ref": { "contract_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+            "values": {
+                "id": "payment-business-2",
+                "tenancy_id": "tenancy-1",
+                "amount_cents": 125000,
+                "status": "recorded"
+            },
+            "options": { "idempotency_key": "business-payment-wrong-hash" }
+        }),
+        None,
+    );
+    assert_eq!(wrong_hash.status, 409);
+    assert_eq!(wrong_hash.body["error"]["code"], "contract_hash_mismatch");
 }
+
+const BUSINESS_ACTION_HASH_SENTINEL: &str = "missing";
 
 struct LandlordTenantFixture {
     temp: TempDir,
@@ -172,6 +250,15 @@ impl LandlordTenantFixture {
 }
 
 fn pack_entries() -> Vec<(String, Vec<u8>)> {
+    let business_action = business_action();
+    let business_action_lock = BusinessActionLock {
+        schema: "greentic.sorla.business-actions.lock.v1".to_string(),
+        entries: vec![BusinessActionLockEntry {
+            id: business_action.id.clone(),
+            version: business_action.version.clone(),
+            contract_hash: contract_hash(&business_action),
+        }],
+    };
     let manifest = PackManifest {
         schema: "greentic.gtpack.manifest.sorla.v1".to_string(),
         pack: PackIdentity {
@@ -184,7 +271,9 @@ fn pack_entries() -> Vec<(String, Vec<u8>)> {
             "sorla": {
                 "model": "assets/sorla/model.cbor",
                 "agent_gateway": "assets/sorla/agent-gateway.json",
-                "mcp_tools": "assets/sorla/mcp-tools.json"
+                "mcp_tools": "assets/sorla/mcp-tools.json",
+                "business_actions": "assets/sorla/business-actions.json",
+                "business_actions_lock": "assets/sorla/business-actions.lock.json"
             },
             "sorx": {
                 "start_schema": "assets/sorx/start.schema.json"
@@ -195,6 +284,8 @@ fn pack_entries() -> Vec<(String, Vec<u8>)> {
             "assets/sorla/model.cbor".to_string(),
             "assets/sorla/agent-gateway.json".to_string(),
             "assets/sorla/mcp-tools.json".to_string(),
+            "assets/sorla/business-actions.json".to_string(),
+            "assets/sorla/business-actions.lock.json".to_string(),
             "assets/sorx/start.schema.json".to_string(),
         ],
     };
@@ -215,10 +306,55 @@ fn pack_entries() -> Vec<(String, Vec<u8>)> {
             MCP_TOOLS.as_bytes().to_vec(),
         ),
         (
+            "assets/sorla/business-actions.json".to_string(),
+            serde_json::to_vec_pretty(&BusinessActionCatalog {
+                schema: "greentic.sorla.business-actions.v1".to_string(),
+                actions: vec![business_action],
+            })
+            .unwrap(),
+        ),
+        (
+            "assets/sorla/business-actions.lock.json".to_string(),
+            serde_json::to_vec_pretty(&business_action_lock).unwrap(),
+        ),
+        (
             "assets/sorx/start.schema.json".to_string(),
             serde_json::to_vec_pretty(&default_start_schema()).unwrap(),
         ),
     ]
+}
+
+fn business_action() -> BusinessAction {
+    BusinessAction {
+        id: "record_rent_payment".to_string(),
+        version: "0.1.0".to_string(),
+        label: Some("Record rent payment".to_string()),
+        description: None,
+        aliases: vec!["rent paid".to_string()],
+        execution: BusinessActionExecution {
+            endpoint_id: Some("payment.record".to_string()),
+            operation_id: Some("payment.record".to_string()),
+            tool_name: None,
+        },
+        input_schema: Some(json!({
+            "type": "object",
+            "required": ["id", "tenancy_id", "amount_cents", "status"],
+            "properties": {
+                "id": { "type": "string" },
+                "tenancy_id": { "type": "string" },
+                "amount_cents": { "type": "integer" },
+                "status": { "type": "string" }
+            },
+            "additionalProperties": false
+        })),
+        output_schema: Some(json!({ "type": "object" })),
+        input_bindings: Vec::new(),
+        risk: Some(BusinessActionRisk::Medium),
+        approval: None,
+        idempotency: Some(BusinessActionIdempotency { required: true }),
+        designer: Some(json!({ "category": "payments" })),
+        metadata: None,
+    }
 }
 
 struct ServerProcess {
@@ -227,7 +363,7 @@ struct ServerProcess {
 
 impl ServerProcess {
     fn start(pack: &std::path::Path, answers: &std::path::Path, port: u16) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+        let child = greentic_sorx_command()
             .args([
                 "start",
                 pack.to_str().unwrap(),

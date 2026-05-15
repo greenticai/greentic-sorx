@@ -35,6 +35,14 @@ deployment registry and public rollout work.
   `X-Greentic-Caller-Id`.
 - Generated routes use the endpoint input schema from `agent-gateway.json` for
   required-field and scalar validation.
+- Locked business action invocation uses explicit URL action id/version plus
+  the request contract hash. Labels, aliases, and descriptions are discovery
+  metadata only and are not used for runtime action selection.
+- Locked business action contract drift fails closed before provider invocation.
+  Missing, malformed, and mismatched contract hashes have distinct stable error
+  codes.
+- Business action dry-runs validate the payload, policy, provider binding, and
+  execution target without mutating provider state or writing idempotency state.
 - Mutating operations should use `Idempotency-Key`. SORX scopes create
   idempotency by operation so one key cannot cross operation boundaries.
 - Request bodies are not included in audit events by default.

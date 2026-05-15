@@ -77,6 +77,21 @@ relationship IDs, relationship endpoints, optional record metadata references,
 retrieval binding references, ontology IR hashes, secret-like values, and
 absolute local paths.
 
+Pack doctor validation also checks optional SoRLa business action assets when
+present:
+
+- `assets/sorla/business-actions.json`
+- `assets/sorla/business-actions.lock.json`
+
+Business action validation is static. It checks supported schemas, action
+id/version uniqueness, required lock coverage, lock-to-catalog consistency,
+contract hash recomputation, generated endpoint/MCP tool references, schema
+object shape, and secret-like values.
+
+Business action doctor issues use stable codes for lock coverage, unknown lock
+entries, contract hash mismatches, missing execution targets, unsupported
+business action schemas, and secret-like values.
+
 Validation reports for ontology-enabled packs can include an `ontology` object
 with gate statuses used by public promotion. These gates are intentionally
 public-exposure gates; private activation still follows the base validation
