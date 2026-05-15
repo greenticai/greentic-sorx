@@ -50,6 +50,12 @@ ensure_translator() {
     return
   fi
 
+  local cargo_bin="${CARGO_HOME:-${HOME:-}/.cargo}/bin/greentic-i18n-translator"
+  if [[ -x "$cargo_bin" ]]; then
+    TRANSLATOR_BIN="$cargo_bin"
+    return
+  fi
+
   command -v cargo-binstall >/dev/null 2>&1 \
     || fail "${TRANSLATOR_BIN} not found and cargo-binstall is unavailable"
 
@@ -57,9 +63,13 @@ ensure_translator() {
   cargo binstall -y greentic-i18n-translator \
     || fail "failed to install greentic-i18n-translator via cargo-binstall"
 
-  command -v greentic-i18n-translator >/dev/null 2>&1 \
-    || fail "greentic-i18n-translator is still not on PATH after cargo-binstall"
-  TRANSLATOR_BIN="greentic-i18n-translator"
+  if command -v greentic-i18n-translator >/dev/null 2>&1; then
+    TRANSLATOR_BIN="greentic-i18n-translator"
+  elif [[ -x "$cargo_bin" ]]; then
+    TRANSLATOR_BIN="$cargo_bin"
+  else
+    fail "greentic-i18n-translator is still unavailable after cargo-binstall"
+  fi
 }
 
 require_locale_list() {
