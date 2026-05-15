@@ -40,19 +40,45 @@ fail() {
   exit 1
 }
 
-ensure_translator() {
+find_translator_bin() {
   if command -v "$TRANSLATOR_BIN" >/dev/null 2>&1; then
+    command -v "$TRANSLATOR_BIN"
     return
   fi
 
   if command -v greentic-i18n-translator >/dev/null 2>&1; then
-    TRANSLATOR_BIN="greentic-i18n-translator"
+    command -v greentic-i18n-translator
     return
   fi
 
-  local cargo_bin="${CARGO_HOME:-${HOME:-}/.cargo}/bin/greentic-i18n-translator"
-  if [[ -x "$cargo_bin" ]]; then
-    TRANSLATOR_BIN="$cargo_bin"
+  local candidates=()
+  if [[ -n "${CARGO_INSTALL_ROOT:-}" ]]; then
+    candidates+=("${CARGO_INSTALL_ROOT}/bin/greentic-i18n-translator")
+  fi
+  if [[ -n "${CARGO_HOME:-}" ]]; then
+    candidates+=("${CARGO_HOME}/bin/greentic-i18n-translator")
+  fi
+  if [[ -n "${HOME:-}" ]]; then
+    candidates+=("${HOME}/.cargo/bin/greentic-i18n-translator")
+  fi
+  if command -v cargo >/dev/null 2>&1; then
+    candidates+=("$(dirname "$(command -v cargo)")/greentic-i18n-translator")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+}
+
+ensure_translator() {
+  local resolved
+  resolved="$(find_translator_bin || true)"
+  if [[ -n "$resolved" ]]; then
+    TRANSLATOR_BIN="$resolved"
     return
   fi
 
@@ -63,10 +89,9 @@ ensure_translator() {
   cargo binstall -y greentic-i18n-translator \
     || fail "failed to install greentic-i18n-translator via cargo-binstall"
 
-  if command -v greentic-i18n-translator >/dev/null 2>&1; then
-    TRANSLATOR_BIN="greentic-i18n-translator"
-  elif [[ -x "$cargo_bin" ]]; then
-    TRANSLATOR_BIN="$cargo_bin"
+  resolved="$(find_translator_bin || true)"
+  if [[ -n "$resolved" ]]; then
+    TRANSLATOR_BIN="$resolved"
   else
     fail "greentic-i18n-translator is still unavailable after cargo-binstall"
   fi
