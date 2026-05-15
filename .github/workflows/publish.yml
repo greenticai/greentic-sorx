@@ -92,7 +92,7 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          gh workflow run release-binaries.yml --ref "${RELEASE_TAG}"
+          gh workflow run release-binaries.yml --repo "${GITHUB_REPOSITORY}" --ref "${RELEASE_TAG}"
 
           run_id=""
           for _ in $(seq 1 60); do
@@ -109,7 +109,7 @@ jobs:
             exit 1
           fi
 
-          gh run watch "$run_id" --exit-status
+          gh run watch "$run_id" --repo "${GITHUB_REPOSITORY}" --exit-status
 
   publish-crates:
     runs-on: ubuntu-latest
