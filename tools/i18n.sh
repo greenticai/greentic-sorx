@@ -83,18 +83,24 @@ ensure_translator() {
   fi
 
   command -v cargo-binstall >/dev/null 2>&1 \
-    || fail "${TRANSLATOR_BIN} not found and cargo-binstall is unavailable"
+    || return 1
 
   log "installing greentic-i18n-translator via cargo-binstall"
   cargo binstall -y greentic-i18n-translator \
-    || fail "failed to install greentic-i18n-translator via cargo-binstall"
+    || return 1
 
   resolved="$(find_translator_bin || true)"
   if [[ -n "$resolved" ]]; then
     TRANSLATOR_BIN="$resolved"
   else
-    fail "greentic-i18n-translator is still unavailable after cargo-binstall"
+    log "greentic-i18n-translator is still unavailable after cargo-binstall; using local checks when possible"
+    return 1
   fi
+}
+
+require_translator() {
+  ensure_translator \
+    || fail "${TRANSLATOR_BIN} not found and cargo-binstall could not make it available"
 }
 
 require_locale_list() {
@@ -116,6 +122,7 @@ translator_supports_batch_size() {
 }
 
 run_translate() {
+  require_translator
   require_locale_list
   local langs
   langs="$(locale_csv)"
@@ -132,26 +139,75 @@ run_translate() {
   bash tools/sync_cli_i18n.sh
 }
 
+run_local_catalog_check() {
+  local label="$1"
+  python3 - "$label" "$LOCALES_PATH" "$EN_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+label, locales_path, en_path = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
+with locales_path.open("r", encoding="utf-8") as f:
+    locales = json.load(f)
+if not isinstance(locales, list) or not all(isinstance(locale, str) for locale in locales):
+    raise SystemExit(f"{locales_path} must contain a JSON list of locale strings")
+
+with en_path.open("r", encoding="utf-8") as f:
+    en_catalog = json.load(f)
+if not isinstance(en_catalog, dict):
+    raise SystemExit(f"{en_path} must contain a JSON object")
+
+expected_keys = set(en_catalog)
+base_dir = en_path.parent
+print(f"{label}: {len(locales)} language(s)")
+for locale in locales:
+    path = en_path if locale == "en" else base_dir / f"{locale}.json"
+    if not path.exists():
+        raise SystemExit(f"{locale}: missing catalog: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        catalog = json.load(f)
+    if not isinstance(catalog, dict):
+        raise SystemExit(f"{locale}: catalog must contain a JSON object")
+    keys = set(catalog)
+    missing = sorted(expected_keys - keys)
+    extra = sorted(keys - expected_keys)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing keys: " + ", ".join(missing))
+        if extra:
+            details.append("extra keys: " + ", ".join(extra))
+        raise SystemExit(f"{locale}: {'; '.join(details)}")
+    print(f"{locale}: ok")
+PY
+}
+
 run_validate() {
   require_locale_list
-  "$TRANSLATOR_BIN" \
-    --locale "$LOCALE" \
-    validate --langs "$(locale_csv)" --en "$EN_PATH"
+  if ensure_translator; then
+    "$TRANSLATOR_BIN" \
+      --locale "$LOCALE" \
+      validate --langs "$(locale_csv)" --en "$EN_PATH"
+  else
+    run_local_catalog_check validate
+  fi
 }
 
 run_status() {
   require_locale_list
-  "$TRANSLATOR_BIN" \
-    --locale "$LOCALE" \
-    status --langs "$(locale_csv)" --en "$EN_PATH"
+  if ensure_translator; then
+    "$TRANSLATOR_BIN" \
+      --locale "$LOCALE" \
+      status --langs "$(locale_csv)" --en "$EN_PATH"
+  else
+    run_local_catalog_check status
+  fi
 }
 
 if [[ "${MODE}" == "-h" || "${MODE}" == "--help" ]]; then
   usage
   exit 0
 fi
-
-ensure_translator
 
 case "$MODE" in
   translate) run_translate ;;
