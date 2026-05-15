@@ -1,9 +1,16 @@
+mod business_actions;
 mod doctor;
 mod inspect;
 mod loader;
 mod manifest;
 mod ontology;
 
+pub use business_actions::{
+    BusinessAction, BusinessActionApproval, BusinessActionAssets, BusinessActionCatalog,
+    BusinessActionContract, BusinessActionExecution, BusinessActionIdempotency,
+    BusinessActionInputBinding, BusinessActionInspectSummary, BusinessActionLock,
+    BusinessActionLockEntry, BusinessActionRef, BusinessActionRisk, contract_hash,
+};
 pub use doctor::{
     SorxDoctorIssue, SorxDoctorIssueLevel, SorxDoctorReport, doctor_sorla_loaded_pack,
     doctor_sorla_pack, doctor_sorla_pack_from_bytes,

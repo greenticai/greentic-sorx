@@ -464,9 +464,13 @@ mod tests {
         }
     }
 
+    fn test_webhook_secret() -> &'static [u8] {
+        &[116, 101, 115, 116, 45, 115, 101, 99, 114, 101, 116]
+    }
+
     #[test]
     fn valid_event_creates_pending_deployment_without_public_exposure() {
-        let secret = b"test-secret";
+        let secret = test_webhook_secret();
         let body = body(&[]);
         let headers = headers("delivery-1", &body, secret);
         let mut registry = DeploymentRegistry::default();
@@ -493,7 +497,7 @@ mod tests {
 
     #[test]
     fn failed_workflow_is_rejected() {
-        let secret = b"test-secret";
+        let secret = test_webhook_secret();
         let body = body(&[("conclusion", "failure")]);
         let err = handle_ghcr_published_webhook(
             &GhcrWebhookConfig::local_test("secret://test"),
@@ -511,7 +515,7 @@ mod tests {
 
     #[test]
     fn bad_hmac_is_rejected() {
-        let secret = b"test-secret";
+        let secret = test_webhook_secret();
         let body = body(&[]);
         let mut headers = headers("delivery-1", &body, secret);
         headers.signature_256 = format!("sha256={}", "0".repeat(64));
@@ -531,7 +535,7 @@ mod tests {
 
     #[test]
     fn untrusted_repository_is_rejected() {
-        let secret = b"test-secret";
+        let secret = test_webhook_secret();
         let body = body(&[("repository", "someone/else")]);
         let err = handle_ghcr_published_webhook(
             &GhcrWebhookConfig::local_test("secret://test"),
@@ -549,7 +553,7 @@ mod tests {
 
     #[test]
     fn untrusted_oci_prefix_is_rejected() {
-        let secret = b"test-secret";
+        let secret = test_webhook_secret();
         let body = body(&[("oci_ref", "oci://ghcr.io/someone/else/pkg:1.0.0")]);
         let err = handle_ghcr_published_webhook(
             &GhcrWebhookConfig::local_test("secret://test"),
@@ -567,7 +571,7 @@ mod tests {
 
     #[test]
     fn replay_delivery_id_is_rejected() {
-        let secret = b"test-secret";
+        let secret = test_webhook_secret();
         let body = body(&[]);
         let headers = headers("delivery-1", &body, secret);
         let config = GhcrWebhookConfig::local_test("secret://test");
@@ -591,7 +595,7 @@ mod tests {
 
     #[test]
     fn digest_mismatch_is_rejected() {
-        let secret = b"test-secret";
+        let secret = test_webhook_secret();
         let body = body(&[]);
         let err = handle_ghcr_published_webhook(
             &GhcrWebhookConfig::local_test("secret://test"),

@@ -70,7 +70,7 @@ pub fn doctor_sorla_loaded_pack(pack: &LoadedSorlaPack) -> SorxDoctorReport {
         .doctor_errors
         .iter()
         .cloned()
-        .map(|message| SorxDoctorIssue::error("validation_suite_invalid", message))
+        .map(|message| SorxDoctorIssue::error(doctor_error_code(&message), message))
         .collect::<Vec<_>>();
     let warnings = pack
         .doctor_warnings
@@ -82,5 +82,27 @@ pub fn doctor_sorla_loaded_pack(pack: &LoadedSorlaPack) -> SorxDoctorReport {
         ok: errors.is_empty(),
         errors,
         warnings,
+    }
+}
+
+fn doctor_error_code(message: &str) -> &'static str {
+    if message.contains("business-actions.lock.json is required")
+        || message.contains("is missing a lock entry")
+    {
+        "business_action_lock_missing"
+    } else if message.contains("lock references unknown action") {
+        "business_action_lock_unknown_action"
+    } else if message.contains("contract hash mismatch") {
+        "business_action_contract_hash_mismatch"
+    } else if message.contains("unknown execution target") {
+        "business_action_execution_target_missing"
+    } else if message.contains("business-actions.json has unsupported schema")
+        || message.contains("business-actions.lock.json has unsupported schema")
+    {
+        "business_action_schema_invalid"
+    } else if message.contains("secret-like") {
+        "secret_like_value"
+    } else {
+        "validation_suite_invalid"
     }
 }

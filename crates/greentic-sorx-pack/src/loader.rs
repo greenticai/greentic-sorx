@@ -8,6 +8,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
+use crate::business_actions::{
+    BusinessActionAssets, BusinessActionCatalog, BusinessActionInspectSummary, BusinessActionLock,
+    BusinessActionValidationContext, validate_business_actions,
+};
 use crate::inspect::{
     SorxInspectOntology, SorxInspectPack, SorxInspectReport, SorxInspectSorla, SorxInspectSorx,
 };
@@ -47,6 +51,7 @@ pub struct SorlaAssets {
     pub mcp_tools_json: Option<Value>,
     pub llms_txt_fragment: Option<String>,
     pub ontology: Option<OntologyAssets>,
+    pub business_actions: Option<BusinessActionAssets>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,12 +161,14 @@ fn load_sorla_pack_archive<R: Read + Seek>(
 
     validate_extension_references(&manifest, &entries)?;
 
-    let sorla_assets = read_sorla_assets(&mut archive, &entries)?;
+    let (sorla_assets, business_action_errors) =
+        read_sorla_assets(&mut archive, &entries, &manifest)?;
     let (sorx_assets, validation_suite_status, validation_errors) =
         read_sorx_assets(&mut archive, &entries)?;
 
     let mut doctor_errors = validation_errors;
     doctor_errors.extend(validate_mcp_tools(&sorla_assets));
+    doctor_errors.extend(business_action_errors);
     if let Some(ontology) = &sorla_assets.ontology {
         doctor_errors.extend(validate_ontology_assets(ontology));
     }
@@ -246,6 +253,18 @@ fn inspect_loaded_sorla_pack(pack: LoadedSorlaPack) -> Result<SorxInspectReport,
                 concept_count: 0,
                 relationship_count: 0,
                 retrieval_bindings_present: false,
+            }),
+        business_actions: pack
+            .sorla_assets
+            .business_actions
+            .as_ref()
+            .map(BusinessActionAssets::inspect_summary)
+            .unwrap_or(BusinessActionInspectSummary {
+                present: false,
+                count: 0,
+                lock_present: false,
+                hashes_valid: true,
+                execution_targets_valid: true,
             }),
     })
 }
@@ -505,7 +524,8 @@ fn validate_lock<R: Read + Seek>(
 fn read_sorla_assets<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     entries: &BTreeSet<String>,
-) -> Result<SorlaAssets, SorxPackError> {
+    manifest: &PackManifest,
+) -> Result<(SorlaAssets, Vec<String>), SorxPackError> {
     let model_cbor = zip_bytes(archive, "assets/sorla/model.cbor")?;
     let agent_gateway_json = parse_json(archive, "assets/sorla/agent-gateway.json")?;
     let openapi_overlay_yaml = optional_zip_text(
@@ -528,16 +548,27 @@ fn read_sorla_assets<R: Read + Seek>(
     };
     let llms_txt_fragment = optional_zip_text(archive, entries, "assets/sorla/llms.txt.fragment")?;
     let ontology = read_ontology_assets(archive, entries)?;
+    let (business_actions, business_action_errors) = read_business_action_assets(
+        archive,
+        entries,
+        manifest,
+        &agent_gateway_json,
+        mcp_tools_json.as_ref(),
+    )?;
 
-    Ok(SorlaAssets {
-        model_cbor,
-        agent_gateway_json,
-        openapi_overlay_yaml,
-        arazzo_yaml,
-        mcp_tools_json,
-        llms_txt_fragment,
-        ontology,
-    })
+    Ok((
+        SorlaAssets {
+            model_cbor,
+            agent_gateway_json,
+            openapi_overlay_yaml,
+            arazzo_yaml,
+            mcp_tools_json,
+            llms_txt_fragment,
+            ontology,
+            business_actions,
+        },
+        business_action_errors,
+    ))
 }
 
 fn read_ontology_assets<R: Read + Seek>(
@@ -579,6 +610,71 @@ fn read_ontology_assets<R: Read + Seek>(
         retrieval_bindings_json,
         retrieval_bindings,
     }))
+}
+
+fn read_business_action_assets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    entries: &BTreeSet<String>,
+    manifest: &PackManifest,
+    agent_gateway_json: &Value,
+    mcp_tools_json: Option<&Value>,
+) -> Result<(Option<BusinessActionAssets>, Vec<String>), SorxPackError> {
+    let catalog_path = extension_asset_path(manifest, "sorla", "business_actions").or_else(|| {
+        entries
+            .contains("assets/sorla/business-actions.json")
+            .then_some("assets/sorla/business-actions.json")
+    });
+    let lock_path =
+        extension_asset_path(manifest, "sorla", "business_actions_lock").or_else(|| {
+            entries
+                .contains("assets/sorla/business-actions.lock.json")
+                .then_some("assets/sorla/business-actions.lock.json")
+        });
+
+    let Some(catalog_path) = catalog_path else {
+        return Ok((None, Vec::new()));
+    };
+
+    let catalog_json = parse_json(archive, catalog_path)?;
+    let catalog =
+        serde_json::from_value::<BusinessActionCatalog>(catalog_json.clone()).map_err(|err| {
+            SorxPackError::new(
+                "invalid_business_actions",
+                format!("{catalog_path} does not match expected shape: {err}"),
+            )
+        })?;
+    let lock = if let Some(lock_path) = lock_path {
+        let lock_json = parse_json(archive, lock_path)?;
+        Some(
+            serde_json::from_value::<BusinessActionLock>(lock_json.clone()).map_err(|err| {
+                SorxPackError::new(
+                    "invalid_business_actions_lock",
+                    format!("{lock_path} does not match expected shape: {err}"),
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    let context = BusinessActionValidationContext::from_agent_gateway_and_mcp_tools(
+        agent_gateway_json,
+        mcp_tools_json,
+    );
+    let (assets, errors) = validate_business_actions(catalog, lock, &context);
+    Ok((Some(assets), errors))
+}
+
+fn extension_asset_path<'a>(
+    manifest: &'a PackManifest,
+    section: &str,
+    key: &str,
+) -> Option<&'a str> {
+    manifest
+        .extension
+        .get(section)?
+        .as_object()?
+        .get(key)?
+        .as_str()
 }
 
 fn read_sorx_assets<R: Read + Seek>(
@@ -857,6 +953,10 @@ mod tests {
     use zip::{CompressionMethod, ZipWriter};
 
     use super::*;
+    use crate::business_actions::{
+        BusinessAction, BusinessActionCatalog, BusinessActionExecution, BusinessActionLock,
+        BusinessActionLockEntry, contract_hash,
+    };
     use crate::doctor::doctor_sorla_pack;
 
     fn valid_entries() -> BTreeMap<String, Vec<u8>> {
@@ -985,6 +1085,96 @@ mod tests {
         sorla.insert(
             "retrieval_bindings".to_string(),
             Value::String("assets/sorla/retrieval-bindings.json".to_string()),
+        );
+        entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert(
+            "manifest.json".to_string(),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+        refresh_lock(entries);
+    }
+
+    fn add_valid_business_actions(entries: &mut BTreeMap<String, Vec<u8>>) {
+        entries.insert(
+            "assets/sorla/agent-gateway.json".to_string(),
+            br#"{"schema":"greentic.sorla.agent-gateway.v1","endpoints":[{"endpoint_id":"payment.record","operation_id":"payment.record","method":"POST","path":"/v1/payments","operation":"create"}]}"#.to_vec(),
+        );
+        entries.insert(
+            "assets/sorla/mcp-tools.json".to_string(),
+            br#"{"schema":"greentic.sorla.mcp-tools.v1","tools":[{"name":"payment.record","endpoint_id":"payment.record"}]}"#.to_vec(),
+        );
+        let action = BusinessAction {
+            id: "record_rent_payment".to_string(),
+            version: "0.1.0".to_string(),
+            label: Some("Record rent payment".to_string()),
+            description: None,
+            aliases: vec!["rent paid".to_string()],
+            execution: BusinessActionExecution {
+                endpoint_id: Some("payment.record".to_string()),
+                operation_id: Some("payment.record".to_string()),
+                tool_name: None,
+            },
+            input_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["tenant_id", "amount"],
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "amount": { "type": "number" }
+                },
+                "additionalProperties": false
+            })),
+            output_schema: Some(serde_json::json!({ "type": "object" })),
+            input_bindings: Vec::new(),
+            risk: Some(crate::business_actions::BusinessActionRisk::Medium),
+            approval: None,
+            idempotency: Some(crate::business_actions::BusinessActionIdempotency {
+                required: true,
+            }),
+            designer: Some(serde_json::json!({ "category": "payments" })),
+            metadata: None,
+        };
+        let lock = BusinessActionLock {
+            schema: "greentic.sorla.business-actions.lock.v1".to_string(),
+            entries: vec![BusinessActionLockEntry {
+                id: action.id.clone(),
+                version: action.version.clone(),
+                contract_hash: contract_hash(&action),
+            }],
+        };
+        entries.insert(
+            "assets/sorla/business-actions.json".to_string(),
+            serde_json::to_vec_pretty(&BusinessActionCatalog {
+                schema: "greentic.sorla.business-actions.v1".to_string(),
+                actions: vec![action],
+            })
+            .unwrap(),
+        );
+        entries.insert(
+            "assets/sorla/business-actions.lock.json".to_string(),
+            serde_json::to_vec_pretty(&lock).unwrap(),
+        );
+        let mut manifest: PackManifest =
+            ciborium::de::from_reader(Cursor::new(entries.get("pack.cbor").unwrap().clone()))
+                .unwrap();
+        manifest
+            .assets
+            .push("assets/sorla/business-actions.json".to_string());
+        manifest
+            .assets
+            .push("assets/sorla/business-actions.lock.json".to_string());
+        let sorla = manifest
+            .extension
+            .get_mut("sorla")
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        sorla.insert(
+            "business_actions".to_string(),
+            Value::String("assets/sorla/business-actions.json".to_string()),
+        );
+        sorla.insert(
+            "business_actions_lock".to_string(),
+            Value::String("assets/sorla/business-actions.lock.json".to_string()),
         );
         entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
         entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
@@ -1284,6 +1474,107 @@ mod tests {
         let report = doctor_sorla_pack(&path);
         assert!(!report.ok);
         assert!(report.errors[0].message.contains("unknown endpoint"));
+    }
+
+    #[test]
+    fn valid_business_action_catalog_passes_doctor_and_inspect() {
+        let mut entries = valid_entries();
+        add_valid_business_actions(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(doctor.ok, "{doctor:?}");
+        let report = inspect_sorla_pack(&path).unwrap();
+        assert!(report.business_actions.present);
+        assert_eq!(report.business_actions.count, 1);
+        assert!(report.business_actions.lock_present);
+        assert!(report.business_actions.hashes_valid);
+        assert!(report.business_actions.execution_targets_valid);
+    }
+
+    #[test]
+    fn missing_business_action_lock_fails_doctor() {
+        let mut entries = valid_entries();
+        add_valid_business_actions(&mut entries);
+        entries.remove("assets/sorla/business-actions.lock.json");
+        let mut manifest: PackManifest =
+            ciborium::de::from_reader(Cursor::new(entries.get("pack.cbor").unwrap().clone()))
+                .unwrap();
+        manifest
+            .assets
+            .retain(|path| path != "assets/sorla/business-actions.lock.json");
+        manifest
+            .extension
+            .get_mut("sorla")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("business_actions_lock");
+        entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        assert!(
+            doctor
+                .errors
+                .iter()
+                .any(|issue| issue.message.contains("business-actions.lock.json"))
+        );
+        assert!(
+            doctor
+                .errors
+                .iter()
+                .any(|issue| issue.code == "business_action_lock_missing")
+        );
+    }
+
+    #[test]
+    fn business_action_hash_mismatch_fails_doctor() {
+        let mut entries = valid_entries();
+        add_valid_business_actions(&mut entries);
+        entries.insert(
+            "assets/sorla/business-actions.lock.json".to_string(),
+            br#"{"schema":"greentic.sorla.business-actions.lock.v1","entries":[{"id":"record_rent_payment","version":"0.1.0","contract_hash":"sha256:deadbeef"}]}"#.to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        assert!(
+            doctor
+                .errors
+                .iter()
+                .any(|issue| issue.message.contains("contract hash mismatch"))
+        );
+        assert!(
+            doctor
+                .errors
+                .iter()
+                .any(|issue| issue.code == "business_action_contract_hash_mismatch")
+        );
+    }
+
+    #[test]
+    fn invalid_business_action_endpoint_reference_fails_doctor() {
+        let mut entries = valid_entries();
+        add_valid_business_actions(&mut entries);
+        entries.insert(
+            "assets/sorla/business-actions.json".to_string(),
+            br#"{"schema":"greentic.sorla.business-actions.v1","actions":[{"id":"record_rent_payment","version":"0.1.0","execution":{"endpoint_id":"missing.endpoint"}}]}"#.to_vec(),
+        );
+        entries.insert(
+            "assets/sorla/business-actions.lock.json".to_string(),
+            br#"{"schema":"greentic.sorla.business-actions.lock.v1","entries":[{"id":"record_rent_payment","version":"0.1.0","contract_hash":"sha256:deadbeef"}]}"#.to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        assert!(
+            doctor
+                .errors
+                .iter()
+                .any(|issue| issue.message.contains("unknown execution target"))
+        );
     }
 
     #[test]

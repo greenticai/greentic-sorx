@@ -33,6 +33,17 @@ Runtime event sequence for an executed provider operation:
 4. `sorx.provider.operation.completed`
 5. `sorx.endpoint.completed`
 
+Locked business action `invoke` calls the same endpoint runtime path after
+id/version/hash and payload validation. The response includes the action ref and
+runtime events returned by the underlying endpoint invocation. Locked business
+action `dry-run` does not emit provider-operation events because it does not
+mutate provider state.
+
+Locked business action invoke responses include audit metadata for the selected
+action id, version, expected contract hash, validation result, result status,
+and underlying runtime events. Payload values are not copied into audit
+metadata.
+
 Additional event names used by current flows:
 
 - `sorx.approval.requested`

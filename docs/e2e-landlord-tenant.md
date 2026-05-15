@@ -11,8 +11,9 @@ bash scripts/e2e/run-landlord-tenant.sh --provider memory
 ```
 
 The test builds a deterministic `.gtpack` in a temp directory, runs
-`greentic-sorx doctor`, starts `greentic-sorx start --answers` on a local port,
-and drives the generated HTTP routes for:
+`greentic-sorx doctor`, runs `greentic-sorx inspect --json`, starts
+`greentic-sorx start --answers` on a local port, and drives the generated HTTP
+routes for:
 
 - landlord, property, unit, tenant, tenancy, payment, and maintenance creation
 - active tenant query
@@ -21,6 +22,24 @@ and drives the generated HTTP routes for:
 - mutating idempotency
 - high-risk approval-required policy behavior
 - MCP tool metadata listing
+- locked business action listing, id/version lookup, dry-run, invoke, audit
+  metadata, and contract-hash rejection
+
+The embedded business action fixture uses:
+
+```text
+record_rent_payment@0.1.0 -> payment.record
+```
+
+The runtime call uses:
+
+```http
+POST /v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke
+```
+
+The e2e proves that dry-run does not create the payment record, while invoke
+uses the generated endpoint runtime path after id/version/hash and payload
+validation pass.
 
 The checked-in FoundationDB answers fixture is present for manual expansion:
 
