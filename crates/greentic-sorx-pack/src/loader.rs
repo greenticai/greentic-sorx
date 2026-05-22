@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Cursor, Read, Seek};
 use std::path::{Component, Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
@@ -19,6 +19,8 @@ use crate::manifest::{PackLock, PackManifest};
 use crate::ontology::{OntologyAssets, OntologyGraph, RetrievalBindings, validate_ontology_assets};
 
 const SORX_RUNTIME_EXTENSION_ID: &str = "greentic.sorx.runtime.v1";
+const VALIDATION_SUITE_JSON_PATH: &str = "assets/sorx/validation-suite.json";
+const LEGACY_VALIDATION_MANIFEST_JSON_PATH: &str = "assets/sorx/tests/test-manifest.json";
 const REQUIRED_ENTRIES: &[&str] = &[
     "pack.cbor",
     "assets/sorla/model.cbor",
@@ -701,12 +703,29 @@ fn read_sorx_assets<R: Read + Seek>(
     let validation_suite_cbor =
         optional_zip_bytes(archive, entries, "assets/sorx/validation-suite.cbor")?;
     let mut validation_errors = Vec::new();
-    let validation_suite_json = if entries.contains("assets/sorx/validation-suite.json") {
-        match parse_json(archive, "assets/sorx/validation-suite.json") {
+    let validation_suite_json = if entries.contains(VALIDATION_SUITE_JSON_PATH) {
+        match parse_json(archive, VALIDATION_SUITE_JSON_PATH) {
             Ok(value) => {
                 validation_errors.extend(validate_validation_suite_json(&value));
                 Some(value)
             }
+            Err(err) => {
+                validation_errors.push(err.to_string());
+                None
+            }
+        }
+    } else if entries.contains(LEGACY_VALIDATION_MANIFEST_JSON_PATH) {
+        match parse_json(archive, LEGACY_VALIDATION_MANIFEST_JSON_PATH) {
+            Ok(value) => match normalize_legacy_validation_manifest(&value) {
+                Ok(value) => {
+                    validation_errors.extend(validate_validation_suite_json(&value));
+                    Some(value)
+                }
+                Err(err) => {
+                    validation_errors.push(err);
+                    None
+                }
+            },
             Err(err) => {
                 validation_errors.push(err.to_string());
                 None
@@ -797,6 +816,71 @@ fn validate_validation_suite_json(value: &Value) -> Vec<String> {
         }
     }
     errors
+}
+
+fn normalize_legacy_validation_manifest(value: &Value) -> Result<Value, String> {
+    if value.get("schema").and_then(Value::as_str) != Some("greentic.sorx.validation.v1") {
+        return Err(format!(
+            "{LEGACY_VALIDATION_MANIFEST_JSON_PATH} has unsupported or missing schema"
+        ));
+    }
+    let suites = value
+        .get("suites")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!("{LEGACY_VALIDATION_MANIFEST_JSON_PATH} must contain a suites array")
+        })?;
+    let mut tests = Vec::new();
+    for suite in suites {
+        let suite_id = suite.get("id").and_then(Value::as_str).unwrap_or("legacy");
+        let Some(suite_tests) = suite.get("tests").and_then(Value::as_array) else {
+            continue;
+        };
+        for test in suite_tests {
+            let id = test
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("{suite_id}-{}", tests.len() + 1));
+            let kind = test.get("kind").and_then(Value::as_str).unwrap_or("doctor");
+            tests.push(normalize_legacy_validation_test(&id, kind));
+        }
+    }
+    let package = value.get("package").and_then(Value::as_object);
+    Ok(json!({
+        "schema": "greentic.sorx.validation-suite.v1",
+        "suite_id": value.get("suite_version").and_then(Value::as_str).unwrap_or("legacy-sorla"),
+        "pack_name": package.and_then(|package| package.get("name")).and_then(Value::as_str).unwrap_or_default(),
+        "pack_version": package.and_then(|package| package.get("version")).and_then(Value::as_str).unwrap_or_default(),
+        "gates": {
+            "required_for_private_activation": true,
+            "required_for_public_exposure": value.get("promotion_requires").is_some_and(Value::is_array),
+            "minimum_pass_level": "required"
+        },
+        "tests": tests
+    }))
+}
+
+fn normalize_legacy_validation_test(id: &str, kind: &str) -> Value {
+    match kind {
+        "healthcheck" => {
+            let path = match id {
+                "provider-bindings-template-present" => {
+                    "assets/sorx/provider-bindings.template.yaml"
+                }
+                "runtime-template-present" => "assets/sorx/runtime.template.yaml",
+                "start-schema-present" | "runtime-startup-assets-present" => {
+                    "assets/sorx/start.schema.json"
+                }
+                _ => "assets/sorx/start.schema.json",
+            };
+            json!({ "id": id, "kind": "artifact_exists", "path": path })
+        }
+        "provider-capability" => json!({ "id": id, "kind": "provider_contract" }),
+        "agent-endpoint" => json!({ "id": id, "kind": "route_generation" }),
+        "policy-enforced" => json!({ "id": id, "kind": "doctor" }),
+        _ => json!({ "id": id, "kind": "doctor" }),
+    }
 }
 
 fn validate_mcp_tools(sorla_assets: &SorlaAssets) -> Vec<String> {
@@ -1374,6 +1458,35 @@ mod tests {
         let report = inspect_sorla_pack(&path).unwrap();
         assert_eq!(report.sorx.validation_suite_status, "present");
         assert!(report.sorx.has_validation_suite_json);
+    }
+
+    #[test]
+    fn legacy_validation_manifest_is_loaded_as_validation_suite() {
+        let mut entries = valid_entries();
+        entries.insert(
+            "assets/sorx/tests/test-manifest.json".to_string(),
+            br#"{
+                "schema":"greentic.sorx.validation.v1",
+                "suite_version":"1.0.0",
+                "package":{"name":"landlord-tenant-sor","version":"0.1.0"},
+                "promotion_requires":["smoke","contract"],
+                "suites":[
+                    {"id":"smoke","tests":[{"kind":"healthcheck","id":"start-schema-present"}]},
+                    {"id":"contract","tests":[{"kind":"agent-endpoint","id":"tenant-create","endpoint":"create_tenant"}]}
+                ]
+            }"#
+            .to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let loaded = load_sorla_pack(&path).unwrap();
+        assert_eq!(
+            loaded.validation_suite_status,
+            ValidationSuiteStatus::Present
+        );
+        let suite = loaded.sorx_assets.validation_suite_json.unwrap();
+        assert_eq!(suite["schema"], "greentic.sorx.validation-suite.v1");
+        assert_eq!(suite["tests"].as_array().unwrap().len(), 2);
     }
 
     #[test]

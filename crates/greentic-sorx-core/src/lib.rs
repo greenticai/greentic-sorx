@@ -45,8 +45,8 @@ pub use ghcr_webhook::{
 pub use mcp::{McpRuntime, McpToolDefinition, McpToolList, mcp_tools_from_metadata};
 pub use model::{
     ApprovalRequirement, CallerContext, EndpointDefinition, EndpointInvocation, EndpointMethod,
-    EndpointResult, EndpointStatus, InvocationSource, OperationKind, RiskLevel, RuntimePack,
-    SorxEvent,
+    EndpointResult, EndpointStatus, IndexRequirement, InvocationSource, OperationKind, QueryPlan,
+    RiskLevel, RuntimePack, SorxEvent, TraversalRequirement, ViewTransform,
 };
 pub use ontology_graph::{
     OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,
@@ -58,9 +58,11 @@ pub use policy::{
     SensitivityContext,
 };
 pub use provider::{
-    BindingResolver, CreateOp, DeleteOp, DeleteResult, EntityRecord, GetOp, ProviderBinding,
-    ProviderNamespace, ProviderRegistry, QueryOp, QueryResult, SorStoreProvider, StoreProviderKind,
-    UpdateOp, default_collection_name,
+    AppendEventOp, BindingResolver, CreateOp, DeleteOp, DeleteResult, EntityRecord, EventRecord,
+    EvidenceResult, ExternalRef, ExternalRefsOp, ExternalRefsResult, GetOp, IndexQueryOp,
+    IndexQueryResult, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, QueryResult,
+    SorStoreProvider, SorxCanonicalStore, StoreEvidenceOp, StoreProviderKind, TraverseOp,
+    TraverseResult, UpdateOp, default_collection_name,
 };
 pub use provider_compatibility::{
     ProviderCapabilityRequirement, ProviderCompatibilityInput, ProviderCompatibilityIssue,

@@ -42,17 +42,15 @@ pub struct ProviderBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderNamespace {
     pub tenant_id: String,
-    pub pack_name: String,
-    pub pack_version: String,
+    pub sor_name: String,
 }
 
 impl ProviderNamespace {
     pub fn key_prefix(&self) -> String {
         format!(
-            "sorx/{}/{}/{}",
+            "sorx/{}/{}",
             clean_segment(&self.tenant_id),
-            clean_segment(&self.pack_name),
-            clean_segment(&self.pack_version)
+            clean_segment(&self.sor_name)
         )
     }
 }
@@ -197,6 +195,91 @@ pub struct DeleteResult {
     pub deleted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppendEventOp {
+    pub namespace: ProviderNamespace,
+    pub stream: String,
+    pub event_type: String,
+    pub subject_entity: String,
+    pub subject_id: String,
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub event_id: String,
+    pub stream: String,
+    pub event_type: String,
+    pub subject_entity: String,
+    pub subject_id: String,
+    pub data: Value,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexQueryOp {
+    pub namespace: ProviderNamespace,
+    pub entity: String,
+    pub collection: String,
+    pub index: String,
+    pub filter: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexQueryResult {
+    pub records: Vec<EntityRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraverseOp {
+    pub namespace: ProviderNamespace,
+    pub root_entity: String,
+    pub root_collection: String,
+    pub root_id: String,
+    pub max_depth: u8,
+    pub relationships: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraverseResult {
+    pub records: Vec<EntityRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalRef {
+    pub entity: String,
+    pub id: String,
+    pub system: String,
+    pub external_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalRefsOp {
+    pub namespace: ProviderNamespace,
+    pub entity: String,
+    pub collection: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalRefsResult {
+    pub refs: Vec<ExternalRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoreEvidenceOp {
+    pub namespace: ProviderNamespace,
+    pub entity: String,
+    pub collection: String,
+    pub id: String,
+    pub evidence: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceResult {
+    pub evidence: Vec<Value>,
+}
+
 pub trait SorStoreProvider: Send + Sync {
     fn create(&self, op: CreateOp) -> SorxResult<EntityRecord>;
     fn get(&self, op: GetOp) -> SorxResult<Option<EntityRecord>>;
@@ -205,9 +288,19 @@ pub trait SorStoreProvider: Send + Sync {
     fn delete(&self, op: DeleteOp) -> SorxResult<DeleteResult>;
 }
 
+pub trait SorxCanonicalStore: SorStoreProvider {
+    fn append_event(&self, op: AppendEventOp) -> SorxResult<EventRecord>;
+    fn query_index(&self, op: IndexQueryOp) -> SorxResult<IndexQueryResult>;
+    fn traverse(&self, op: TraverseOp) -> SorxResult<TraverseResult>;
+    fn get_external_refs(&self, op: ExternalRefsOp) -> SorxResult<ExternalRefsResult>;
+    fn store_evidence(&self, op: StoreEvidenceOp) -> SorxResult<()>;
+    fn get_evidence(&self, op: ExternalRefsOp) -> SorxResult<EvidenceResult>;
+}
+
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     stores: BTreeMap<String, Arc<dyn SorStoreProvider>>,
+    canonical_stores: BTreeMap<String, Arc<dyn SorxCanonicalStore>>,
 }
 
 impl ProviderRegistry {
@@ -223,11 +316,29 @@ impl ProviderRegistry {
         self.stores.insert(binding.into(), provider);
     }
 
+    pub fn register_canonical_store<P>(&mut self, binding: impl Into<String>, provider: Arc<P>)
+    where
+        P: SorxCanonicalStore + 'static,
+    {
+        let binding = binding.into();
+        self.stores.insert(binding.clone(), provider.clone());
+        self.canonical_stores.insert(binding, provider);
+    }
+
     pub fn store(&self, binding: &str) -> SorxResult<Arc<dyn SorStoreProvider>> {
         self.stores.get(binding).cloned().ok_or_else(|| {
             SorxError::new(
                 "provider_missing",
                 format!("missing store provider binding `{binding}`"),
+            )
+        })
+    }
+
+    pub fn canonical_store(&self, binding: &str) -> SorxResult<Arc<dyn SorxCanonicalStore>> {
+        self.canonical_stores.get(binding).cloned().ok_or_else(|| {
+            SorxError::new(
+                "provider_capability_missing",
+                format!("store provider binding `{binding}` does not support canonical operations"),
             )
         })
     }

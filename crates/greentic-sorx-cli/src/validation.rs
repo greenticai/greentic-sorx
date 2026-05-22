@@ -289,7 +289,7 @@ fn validation_runtime(
         .map_err(|err| ValidationError::new(err.code, err.message))?;
     let mut providers = ProviderRegistry::new();
     for provider_id in config.providers.keys() {
-        providers.register_store(provider_id, Arc::new(MemoryStoreProvider::new()));
+        providers.register_canonical_store(provider_id, Arc::new(MemoryStoreProvider::new()));
     }
     Ok(SorxRuntime::new(
         RuntimePack {

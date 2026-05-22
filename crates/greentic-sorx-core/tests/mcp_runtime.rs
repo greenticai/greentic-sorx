@@ -83,7 +83,7 @@ fn runtime(audit: Option<MemoryAuditSink>) -> (McpRuntime, Option<MemoryAuditSin
     let router = EndpointRouter::from_agent_gateway(&gateway()).unwrap();
     let tool_list = mcp_tools_from_metadata(Some(&tools()), &router).unwrap();
     let mut providers = ProviderRegistry::new();
-    providers.register_store("store", Arc::new(MemoryStoreProvider::new()));
+    providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
     let mut sorx = SorxRuntime::new(runtime_pack("landlord", "0.1.0"), config, router, providers);
     if let Some(audit) = &audit {
         sorx = sorx.with_audit_sink(Arc::new(audit.clone()));

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use greentic_sorx_core::{
     CallerContext, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter,
     EndpointStatus, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
-    McpToolList, MemoryStoreProvider, PolicyAction, ProviderRegistry, RuntimePack, SorxError,
-    SorxResult, SorxRuntime, SorxRuntimeConfig, StdoutAuditSink, StoreProviderKind,
+    McpToolList, MemoryStoreProvider, PolicyAction, ProviderRegistry, RuntimePack, SorxDeployment,
+    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StdoutAuditSink, StoreProviderKind,
 };
 use greentic_sorx_pack::{BusinessAction, BusinessActionAssets, LoadedSorlaPack, contract_hash};
 use serde::Serialize;
@@ -30,7 +30,43 @@ pub struct RouteInfo {
     pub pack_name: String,
     pub pack_version: String,
     pub pack_digest: Option<String>,
+    pub api_version_label: String,
+    pub view_version: String,
+    pub canonical_version: String,
+    pub state_namespace: String,
     pub exposure: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteVersionMetadata {
+    pub api_version_label: String,
+    pub view_version: String,
+    pub canonical_version: String,
+    pub state_namespace: String,
+}
+
+impl RouteVersionMetadata {
+    pub fn local(config: &SorxRuntimeConfig, pack: &LoadedSorlaPack) -> Self {
+        Self {
+            api_version_label: config.deployment.api_version_label.clone(),
+            view_version: config.deployment.api_version_label.clone(),
+            canonical_version: pack.pack_version.clone(),
+            state_namespace: format!(
+                "sorx/{}/{}",
+                clean_route_segment(&config.deployment.tenant_id),
+                clean_route_segment(&config.deployment.sor_name)
+            ),
+        }
+    }
+
+    pub fn from_deployment(deployment: &SorxDeployment) -> Self {
+        Self {
+            api_version_label: deployment.api_version_label.clone(),
+            view_version: deployment.view_version.clone(),
+            canonical_version: deployment.canonical_version.clone(),
+            state_namespace: deployment.state_namespace.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -66,7 +102,14 @@ impl HttpRuntime {
         );
         let deployment_id = deployment_id.into();
         let exposure = config.exposure.default_visibility.clone();
-        let routes = route_list(&deployment_id, &exposure, pack, &runtime.router);
+        let route_versions = RouteVersionMetadata::local(&config, pack);
+        let routes = route_list(
+            &deployment_id,
+            &exposure,
+            pack,
+            &runtime.router,
+            &route_versions,
+        );
         let tools = greentic_sorx_core::mcp_tools_from_metadata(
             pack.sorla_assets.mcp_tools_json.as_ref(),
             &runtime.router,
@@ -229,7 +272,7 @@ impl HttpRuntime {
             .filter(|roles| !roles.is_empty())
             .unwrap_or_else(|| vec!["local".to_string()]);
 
-        let input = match request_json(&request, &path_params) {
+        let input = match request_json(&request, &path_params, Some(&endpoint)) {
             Ok(value) => value,
             Err(err) => return error_response(400, "SORX_INVALID_JSON", &err),
         };
@@ -409,7 +452,7 @@ impl HttpRuntime {
                 "business action not found",
             );
         };
-        let body = match request_json(request, &BTreeMap::new()) {
+        let body = match request_json(request, &BTreeMap::new(), None) {
             Ok(value) => value,
             Err(err) => return business_action_error(400, "invalid_payload", &err),
         };
@@ -665,18 +708,15 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
     for (binding, provider) in &config.providers {
         match StoreProviderKind::parse(&provider.kind) {
             StoreProviderKind::Memory => {
-                registry.register_store(binding, Arc::new(MemoryStoreProvider::new()))
+                registry.register_canonical_store(binding, Arc::new(MemoryStoreProvider::new()))
             }
             StoreProviderKind::FoundationDb => {
-                registry.register_store(
-                    binding,
-                    Arc::new(FoundationDbProviderAdapter::unavailable(
-                        FoundationDbProviderConfig::from_parts(
-                            provider.config_ref.clone(),
-                            provider.config.clone(),
-                        ),
-                    )),
-                );
+                let adapter =
+                    FoundationDbProviderAdapter::new(FoundationDbProviderConfig::from_parts(
+                        provider.config_ref.clone(),
+                        provider.config.clone(),
+                    ))?;
+                registry.register_canonical_store(binding, Arc::new(adapter));
             }
             StoreProviderKind::External(other) => {
                 return Err(SorxError::new(
@@ -694,6 +734,7 @@ pub fn route_list(
     exposure: &str,
     pack: &LoadedSorlaPack,
     router: &EndpointRouter,
+    versions: &RouteVersionMetadata,
 ) -> RouteList {
     RouteList {
         schema: "greentic.sorx.routes.v1".to_string(),
@@ -710,9 +751,33 @@ pub fn route_list(
                 pack_name: pack.pack_name.clone(),
                 pack_version: pack.pack_version.clone(),
                 pack_digest: pack.pack_digest.clone(),
+                api_version_label: versions.api_version_label.clone(),
+                view_version: versions.view_version.clone(),
+                canonical_version: versions.canonical_version.clone(),
+                state_namespace: versions.state_namespace.clone(),
                 exposure: exposure.to_string(),
             })
             .collect(),
+    }
+}
+
+fn clean_route_segment(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if cleaned.is_empty() {
+        "unnamed".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -921,6 +986,7 @@ fn header_or_local(
 fn request_json(
     request: &HttpRequest,
     path_params: &BTreeMap<String, String>,
+    endpoint: Option<&EndpointDefinition>,
 ) -> Result<Value, String> {
     let mut object = if request.body.trim().is_empty() {
         Map::new()
@@ -932,15 +998,48 @@ fn request_json(
             .ok_or_else(|| "request body must be a JSON object".to_string())?
     };
     for (key, value) in path_params {
-        object.insert(key.clone(), Value::String(value.clone()));
+        object.insert(key.clone(), coerce_path_param(endpoint, key, value));
     }
     if path_params.len() == 1
         && !object.contains_key("id")
         && let Some((_, value)) = path_params.iter().next()
     {
-        object.insert("id".to_string(), Value::String(value.clone()));
+        object.insert("id".to_string(), coerce_path_param(endpoint, "id", value));
     }
     Ok(Value::Object(object))
+}
+
+fn coerce_path_param(endpoint: Option<&EndpointDefinition>, key: &str, value: &str) -> Value {
+    let Some(schema) = endpoint.and_then(|endpoint| endpoint.input_schema.as_ref()) else {
+        return Value::String(value.to_string());
+    };
+    let Some(type_name) = schema
+        .get("properties")
+        .and_then(|properties| properties.get(key))
+        .and_then(|property| property.get("type"))
+        .and_then(Value::as_str)
+    else {
+        return Value::String(value.to_string());
+    };
+    match type_name {
+        "boolean" => match value {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            _ => Value::String(value.to_string()),
+        },
+        "integer" => value
+            .parse::<i64>()
+            .ok()
+            .map(|number| Value::Number(number.into()))
+            .unwrap_or_else(|| Value::String(value.to_string())),
+        "number" => value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::String(value.to_string())),
+        _ => Value::String(value.to_string()),
+    }
 }
 
 #[derive(Debug)]
@@ -1155,6 +1254,23 @@ mod tests {
                     "entity": "Tenant",
                     "collection": "tenants",
                     "provider_binding": "store"
+                },
+                {
+                    "endpoint_id": "tenant.active_by_landlord",
+                    "operation_id": "tenant.active_by_landlord",
+                    "operation": "query",
+                    "method": "GET",
+                    "path": "/v1/agent/landlords/{landlord_id}/active-tenants/{active}",
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "provider_binding": "store",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "landlord_id": { "type": "string" },
+                            "active": { "type": "boolean" }
+                        }
+                    }
                 }
             ]
         })
@@ -1344,6 +1460,10 @@ mod tests {
         assert_eq!(route.pack_name, "landlord-tenant-sor");
         assert_eq!(route.pack_version, "0.1.0");
         assert_eq!(route.pack_digest.as_deref(), Some("sha256:test"));
+        assert_eq!(route.api_version_label, "local");
+        assert_eq!(route.view_version, "local");
+        assert_eq!(route.canonical_version, "0.1.0");
+        assert_eq!(route.state_namespace, "sorx/tenant-a/landlord");
     }
 
     #[test]
@@ -1360,6 +1480,8 @@ mod tests {
         let routes = request(&runtime, "GET", "/v1/sorx/routes", &[], "");
         assert_eq!(routes["schema"], "greentic.sorx.routes.v1");
         assert_eq!(routes["routes"][0]["deployment_id"], "local");
+        assert_eq!(routes["routes"][0]["api_version_label"], "local");
+        assert_eq!(routes["routes"][0]["canonical_version"], "0.1.0");
         let public_routes = request(&runtime, "GET", "/v1/sorx/public-routes", &[], "");
         assert_eq!(public_routes["schema"], "greentic.sorx.public-routes.v1");
         assert_eq!(public_routes["routes"].as_array().unwrap().len(), 0);
@@ -1531,7 +1653,7 @@ mod tests {
             "POST",
             "/v1/agent/tenants/create",
             &tenant_headers(),
-            r#"{"id":"tenant-1","name":"Acme","active":true}"#,
+            r#"{"id":"tenant-1","name":"Acme","active":true,"landlord_id":"landlord-1"}"#,
         );
         assert_eq!(created["ok"], true);
         assert_eq!(created["result"]["id"], "tenant-1");
@@ -1563,6 +1685,22 @@ mod tests {
         );
         assert_eq!(queried["result"]["records"].as_array().unwrap().len(), 1);
         assert_eq!(queried["result"]["records"][0]["id"], "tenant-1");
+
+        let active_by_landlord = request(
+            &runtime,
+            "GET",
+            "/v1/agent/landlords/landlord-1/active-tenants/false",
+            &tenant_headers(),
+            "",
+        );
+        assert_eq!(
+            active_by_landlord["result"]["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(active_by_landlord["result"]["records"][0]["id"], "tenant-1");
     }
 
     #[test]

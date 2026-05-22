@@ -6,9 +6,10 @@ use serde_json::{Value, json};
 use crate::{
     ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, CreateOp, DeleteOp,
     DisabledAuditSink, EndpointDefinition, EndpointInvocation, EndpointResult, EndpointRouter,
-    EndpointStatus, GetOp, LocalPendingBroker, OperationKind, PolicyAction, PolicyConfig,
-    PolicyDecision, PolicyEngine, ProviderNamespace, ProviderRegistry, QueryOp, RuntimePack,
-    SorxAuditEvent, SorxError, SorxEvent, SorxResult, SorxRuntimeConfig, UpdateOp,
+    EndpointStatus, GetOp, IndexQueryOp, LocalPendingBroker, OperationKind, PolicyAction,
+    PolicyConfig, PolicyDecision, PolicyEngine, ProviderNamespace, ProviderRegistry, QueryOp,
+    RuntimePack, SorxAuditEvent, SorxError, SorxEvent, SorxResult, SorxRuntimeConfig, TraverseOp,
+    UpdateOp, ViewTransform,
 };
 
 #[derive(Clone)]
@@ -56,7 +57,7 @@ impl SorxRuntime {
         self
     }
 
-    pub fn invoke(&self, invocation: EndpointInvocation) -> SorxResult<EndpointResult> {
+    pub fn invoke(&self, mut invocation: EndpointInvocation) -> SorxResult<EndpointResult> {
         let started = Instant::now();
         let endpoint = self.router.endpoint(&invocation.endpoint_id)?;
         self.audit(endpoint, &invocation, "sorx.endpoint.invoked", None, None)?;
@@ -71,6 +72,18 @@ impl SorxRuntime {
             self.audit(endpoint, &invocation, "sorx.endpoint.failed", None, None)?;
             return Err(err);
         }
+        if endpoint.view.read_only && endpoint.operation.is_mutating() {
+            let err = SorxError::new(
+                "view_read_only",
+                format!(
+                    "endpoint `{}` is read-only in this view",
+                    endpoint.endpoint_id
+                ),
+            );
+            self.audit(endpoint, &invocation, "sorx.endpoint.failed", None, None)?;
+            return Err(err);
+        }
+        invocation.input = view_to_canonical(&endpoint.view, invocation.input);
         if let Err(err) = validate_input(endpoint, &invocation.input) {
             self.audit(endpoint, &invocation, "sorx.endpoint.failed", None, None)?;
             return Err(err);
@@ -171,8 +184,7 @@ impl SorxRuntime {
         let provider = self.providers.store(&binding.provider_id)?;
         let namespace = ProviderNamespace {
             tenant_id: invocation.tenant_id.clone(),
-            pack_name: self.pack.name.clone(),
-            pack_version: self.pack.version.clone(),
+            sor_name: self.config.deployment.sor_name.clone(),
         };
 
         self.audit(
@@ -196,8 +208,11 @@ impl SorxRuntime {
                 })?;
                 EndpointResult {
                     status: EndpointStatus::Created,
-                    output: serde_json::to_value(record)
-                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    output: canonical_to_view(
+                        &endpoint.view,
+                        serde_json::to_value(record)
+                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    ),
                     events: vec![event(endpoint, &invocation, "entity.created")],
                 }
             }
@@ -215,8 +230,11 @@ impl SorxRuntime {
                     } else {
                         EndpointStatus::NotFound
                     },
-                    output: serde_json::to_value(record)
-                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    output: canonical_to_view(
+                        &endpoint.view,
+                        serde_json::to_value(record)
+                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    ),
                     events: vec![event(endpoint, &invocation, "entity.get")],
                 }
             }
@@ -236,8 +254,11 @@ impl SorxRuntime {
                 })?;
                 EndpointResult {
                     status: EndpointStatus::Ok,
-                    output: serde_json::to_value(record)
-                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    output: canonical_to_view(
+                        &endpoint.view,
+                        serde_json::to_value(record)
+                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    ),
                     events: vec![event(endpoint, &invocation, "entity.updated")],
                 }
             }
@@ -247,16 +268,40 @@ impl SorxRuntime {
                     .get("filter")
                     .cloned()
                     .unwrap_or_else(|| invocation.input.clone());
-                let query = provider.query(QueryOp {
-                    namespace: namespace.clone(),
-                    entity: binding.entity.clone(),
-                    collection: binding.collection.clone(),
-                    filter,
-                })?;
+                let output = if let Some(index) = &endpoint.query_plan.index {
+                    let canonical = self.providers.canonical_store(&binding.provider_id)?;
+                    serde_json::to_value(canonical.query_index(IndexQueryOp {
+                        namespace: namespace.clone(),
+                        entity: binding.entity.clone(),
+                        collection: binding.collection.clone(),
+                        index: index.name.clone(),
+                        filter,
+                    })?)
+                    .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
+                } else if let Some(traversal) = &endpoint.query_plan.traversal {
+                    let canonical = self.providers.canonical_store(&binding.provider_id)?;
+                    let root_id = required_string(&invocation.input, "id")?;
+                    serde_json::to_value(canonical.traverse(TraverseOp {
+                        namespace: namespace.clone(),
+                        root_entity: binding.entity.clone(),
+                        root_collection: binding.collection.clone(),
+                        root_id,
+                        max_depth: traversal.max_depth,
+                        relationships: traversal.relationships.clone(),
+                    })?)
+                    .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
+                } else {
+                    serde_json::to_value(provider.query(QueryOp {
+                        namespace: namespace.clone(),
+                        entity: binding.entity.clone(),
+                        collection: binding.collection.clone(),
+                        filter,
+                    })?)
+                    .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
+                };
                 EndpointResult {
                     status: EndpointStatus::Ok,
-                    output: serde_json::to_value(query)
-                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    output: canonical_to_view(&endpoint.view, output),
                     events: vec![event(endpoint, &invocation, "entity.queried")],
                 }
             }
@@ -330,6 +375,58 @@ fn validate_input(endpoint: &EndpointDefinition, input: &Value) -> SorxResult<()
         return Ok(());
     };
     validate_schema(schema, input, "")
+}
+
+fn view_to_canonical(view: &ViewTransform, input: Value) -> Value {
+    rename_object_fields(input, &view.input_field_map)
+}
+
+fn canonical_to_view(view: &ViewTransform, output: Value) -> Value {
+    if view.output_field_map.is_empty() {
+        return output;
+    }
+    match output {
+        Value::Object(mut object) => {
+            if let Some(data) = object.remove("data") {
+                object.insert(
+                    "data".to_string(),
+                    rename_object_fields(data, &view.output_field_map),
+                );
+            }
+            if let Some(Value::Array(records)) = object.get_mut("records") {
+                for record in records {
+                    if let Value::Object(record_object) = record
+                        && let Some(data) = record_object.remove("data")
+                    {
+                        record_object.insert(
+                            "data".to_string(),
+                            rename_object_fields(data, &view.output_field_map),
+                        );
+                    }
+                }
+            }
+            Value::Object(object)
+        }
+        other => other,
+    }
+}
+
+fn rename_object_fields(
+    value: Value,
+    mapping: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    if mapping.is_empty() {
+        return value;
+    }
+    let Value::Object(object) = value else {
+        return value;
+    };
+    let mut renamed = serde_json::Map::new();
+    for (key, value) in object {
+        let mapped = mapping.get(&key).cloned().unwrap_or(key);
+        renamed.insert(mapped, value);
+    }
+    Value::Object(renamed)
 }
 
 fn validate_schema(schema: &Value, value: &Value, path: &str) -> SorxResult<()> {

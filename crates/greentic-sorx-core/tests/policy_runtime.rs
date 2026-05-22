@@ -66,7 +66,7 @@ fn runtime_with_policy(policy: PolicyEngine) -> SorxRuntime {
     let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
     let router = EndpointRouter::from_agent_gateway(&gateway()).unwrap();
     let mut providers = ProviderRegistry::new();
-    providers.register_store("store", Arc::new(MemoryStoreProvider::new()));
+    providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
     SorxRuntime::new(runtime_pack("landlord", "0.1.0"), config, router, providers)
         .with_policy(policy)
 }

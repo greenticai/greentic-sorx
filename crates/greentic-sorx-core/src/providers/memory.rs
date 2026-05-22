@@ -1,27 +1,88 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    CreateOp, DeleteOp, DeleteResult, EntityRecord, GetOp, QueryOp, QueryResult, SorStoreProvider,
-    SorxError, SorxResult, UpdateOp,
+    AppendEventOp, CreateOp, DeleteOp, DeleteResult, EntityRecord, EventRecord, EvidenceResult,
+    ExternalRef, ExternalRefsOp, ExternalRefsResult, GetOp, IndexQueryOp, IndexQueryResult,
+    QueryOp, QueryResult, SorStoreProvider, SorxCanonicalStore, SorxError, SorxResult,
+    StoreEvidenceOp, TraverseOp, TraverseResult, UpdateOp,
 };
 
 #[derive(Debug, Default)]
 pub struct MemoryStoreProvider {
     state: Mutex<MemoryState>,
+    persistence_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct MemoryState {
     collections: BTreeMap<String, BTreeMap<String, EntityRecord>>,
     idempotency: BTreeMap<String, EntityRecord>,
+    events: BTreeMap<String, Vec<EventRecord>>,
+    external_refs: BTreeMap<String, Vec<ExternalRef>>,
+    evidence: BTreeMap<String, Vec<Value>>,
 }
 
 impl MemoryStoreProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn persistent(path: impl Into<PathBuf>) -> SorxResult<Self> {
+        let path = path.into();
+        let state = if path.exists() {
+            let raw = fs::read_to_string(&path).map_err(|err| {
+                SorxError::new(
+                    "provider_read_failed",
+                    format!("failed to read persistent store {}: {err}", path.display()),
+                )
+            })?;
+            serde_json::from_str(&raw).map_err(|err| {
+                SorxError::new(
+                    "provider_decode_failed",
+                    format!(
+                        "failed to decode persistent store {}: {err}",
+                        path.display()
+                    ),
+                )
+            })?
+        } else {
+            MemoryState::default()
+        };
+        Ok(Self {
+            state: Mutex::new(state),
+            persistence_path: Some(path),
+        })
+    }
+
+    fn persist(&self, state: &MemoryState) -> SorxResult<()> {
+        let Some(path) = &self.persistence_path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                SorxError::new(
+                    "provider_write_failed",
+                    format!(
+                        "failed to create persistent store dir {}: {err}",
+                        parent.display()
+                    ),
+                )
+            })?;
+        }
+        let encoded = serde_json::to_string_pretty(state)
+            .map_err(|err| SorxError::new("provider_encode_failed", err.to_string()))?;
+        fs::write(path, format!("{encoded}\n")).map_err(|err| {
+            SorxError::new(
+                "provider_write_failed",
+                format!("failed to write persistent store {}: {err}", path.display()),
+            )
+        })
     }
 }
 
@@ -64,6 +125,7 @@ impl SorStoreProvider for MemoryStoreProvider {
         if let Some(key) = idempotency_key {
             state.idempotency.insert(key, record.clone());
         }
+        self.persist(&state)?;
         Ok(record)
     }
 
@@ -100,7 +162,9 @@ impl SorStoreProvider for MemoryStoreProvider {
         data.insert("id".to_string(), Value::String(op.id));
         record.data = Value::Object(data);
         record.version += 1;
-        Ok(record.clone())
+        let record = record.clone();
+        self.persist(&state)?;
+        Ok(record)
     }
 
     fn query(&self, op: QueryOp) -> SorxResult<QueryResult> {
@@ -128,12 +192,126 @@ impl SorStoreProvider for MemoryStoreProvider {
             .get_mut(&collection_key(&op.namespace, &op.collection))
             .and_then(|collection| collection.remove(&op.id))
             .is_some();
+        self.persist(&state)?;
         Ok(DeleteResult { deleted })
+    }
+}
+
+impl SorxCanonicalStore for MemoryStoreProvider {
+    fn append_event(&self, op: AppendEventOp) -> SorxResult<EventRecord> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        let stream_key = format!(
+            "{}/events/{}",
+            op.namespace.key_prefix(),
+            clean_key(&op.stream)
+        );
+        let stream = state.events.entry(stream_key).or_default();
+        let sequence = stream.len() as u64 + 1;
+        let record = EventRecord {
+            event_id: format!("{}-{}", clean_key(&op.stream), sequence),
+            stream: op.stream,
+            event_type: op.event_type,
+            subject_entity: op.subject_entity,
+            subject_id: op.subject_id,
+            data: op.data,
+            sequence,
+        };
+        stream.push(record.clone());
+        self.persist(&state)?;
+        Ok(record)
+    }
+
+    fn query_index(&self, op: IndexQueryOp) -> SorxResult<IndexQueryResult> {
+        let query = self.query(QueryOp {
+            namespace: op.namespace,
+            entity: op.entity,
+            collection: op.collection,
+            filter: op.filter,
+        })?;
+        Ok(IndexQueryResult {
+            records: query.records,
+        })
+    }
+
+    fn traverse(&self, op: TraverseOp) -> SorxResult<TraverseResult> {
+        let record = self.get(GetOp {
+            namespace: op.namespace,
+            entity: op.root_entity,
+            collection: op.root_collection,
+            id: op.root_id,
+        })?;
+        Ok(TraverseResult {
+            records: record.into_iter().collect(),
+        })
+    }
+
+    fn get_external_refs(&self, op: ExternalRefsOp) -> SorxResult<ExternalRefsResult> {
+        let state = self.state.lock().map_err(lock_error)?;
+        Ok(ExternalRefsResult {
+            refs: state
+                .external_refs
+                .get(&subject_key(
+                    &op.namespace,
+                    &op.collection,
+                    &op.entity,
+                    &op.id,
+                ))
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+
+    fn store_evidence(&self, op: StoreEvidenceOp) -> SorxResult<()> {
+        let mut state = self.state.lock().map_err(lock_error)?;
+        let key = subject_key(&op.namespace, &op.collection, &op.entity, &op.id);
+        state.evidence.entry(key).or_default().push(op.evidence);
+        self.persist(&state)?;
+        Ok(())
+    }
+
+    fn get_evidence(&self, op: ExternalRefsOp) -> SorxResult<EvidenceResult> {
+        let state = self.state.lock().map_err(lock_error)?;
+        Ok(EvidenceResult {
+            evidence: state
+                .evidence
+                .get(&subject_key(
+                    &op.namespace,
+                    &op.collection,
+                    &op.entity,
+                    &op.id,
+                ))
+                .cloned()
+                .unwrap_or_default(),
+        })
     }
 }
 
 fn collection_key(namespace: &crate::ProviderNamespace, collection: &str) -> String {
     format!("{}/{collection}", namespace.key_prefix())
+}
+
+fn subject_key(
+    namespace: &crate::ProviderNamespace,
+    collection: &str,
+    entity: &str,
+    id: &str,
+) -> String {
+    format!(
+        "{}/{}/{}/{}",
+        namespace.key_prefix(),
+        clean_key(collection),
+        clean_key(entity),
+        clean_key(id)
+    )
+}
+
+fn clean_key(value: &str) -> String {
+    value
+        .trim_matches('/')
+        .replace(['/', '\\'], "_")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect()
 }
 
 fn value_id(value: &Value) -> Option<String> {

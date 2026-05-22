@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use greentic_sorx_core::{
-    BindingResolver, CreateOp, DeleteOp, DeleteResult, EndpointRouter, EntityRecord,
-    FoundationDbProviderAdapter, FoundationDbProviderConfig, GetOp, MemoryStoreProvider,
-    ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, QueryResult, SorStoreProvider,
-    SorxRuntime, StoreProviderKind, UpdateOp, default_start_schema, invocation,
-    runtime_config_from_answers, runtime_pack,
+    AppendEventOp, BindingResolver, CreateOp, DeleteOp, DeleteResult, EndpointRouter, EntityRecord,
+    ExternalRefsOp, FoundationDbProviderAdapter, FoundationDbProviderConfig, GetOp, IndexQueryOp,
+    MemoryStoreProvider, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp,
+    QueryResult, SorStoreProvider, SorxCanonicalStore, SorxRuntime, StoreEvidenceOp,
+    StoreProviderKind, UpdateOp, default_start_schema, invocation, runtime_config_from_answers,
+    runtime_pack,
 };
 use serde_json::{Value, json};
 
@@ -177,20 +178,18 @@ fn runtime_applies_binding_collection_and_tenant_namespace_to_provider_ops() {
         op.namespace,
         ProviderNamespace {
             tenant_id: "tenant-a".to_string(),
-            pack_name: "landlord".to_string(),
-            pack_version: "0.1.0".to_string()
+            sor_name: "landlord".to_string()
         }
     );
 }
 
 #[test]
-fn memory_provider_namespaces_records_by_tenant_and_pack() {
+fn memory_provider_namespaces_records_by_tenant_and_sor() {
     let provider = MemoryStoreProvider::new();
     let mut create = CreateOp {
         namespace: ProviderNamespace {
             tenant_id: "tenant-a".to_string(),
-            pack_name: "landlord".to_string(),
-            pack_version: "0.1.0".to_string(),
+            sor_name: "landlord".to_string(),
         },
         entity: "Tenant".to_string(),
         collection: "tenants".to_string(),
@@ -206,8 +205,7 @@ fn memory_provider_namespaces_records_by_tenant_and_pack() {
         .get(GetOp {
             namespace: ProviderNamespace {
                 tenant_id: "tenant-a".to_string(),
-                pack_name: "landlord".to_string(),
-                pack_version: "0.1.0".to_string(),
+                sor_name: "landlord".to_string(),
             },
             entity: "Tenant".to_string(),
             collection: "tenants".to_string(),
@@ -219,8 +217,7 @@ fn memory_provider_namespaces_records_by_tenant_and_pack() {
         .get(GetOp {
             namespace: ProviderNamespace {
                 tenant_id: "tenant-b".to_string(),
-                pack_name: "landlord".to_string(),
-                pack_version: "0.1.0".to_string(),
+                sor_name: "landlord".to_string(),
             },
             entity: "Tenant".to_string(),
             collection: "tenants".to_string(),
@@ -230,6 +227,66 @@ fn memory_provider_namespaces_records_by_tenant_and_pack() {
         .unwrap();
     assert_eq!(tenant_a.data["name"], "A");
     assert_eq!(tenant_b.data["name"], "B");
+}
+
+#[test]
+fn memory_provider_implements_canonical_store_contract() {
+    let provider = MemoryStoreProvider::new();
+    let namespace = ProviderNamespace {
+        tenant_id: "tenant-a".to_string(),
+        sor_name: "landlord".to_string(),
+    };
+    provider
+        .create(CreateOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            input: json!({ "id": "tenant-1", "property_id": "property-1" }),
+            idempotency_key: None,
+        })
+        .unwrap();
+
+    let event = provider
+        .append_event(AppendEventOp {
+            namespace: namespace.clone(),
+            stream: "tenant-1".to_string(),
+            event_type: "tenant.created".to_string(),
+            subject_entity: "Tenant".to_string(),
+            subject_id: "tenant-1".to_string(),
+            data: json!({ "source": "test" }),
+        })
+        .unwrap();
+    assert_eq!(event.sequence, 1);
+
+    let indexed = provider
+        .query_index(IndexQueryOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            index: "by_property".to_string(),
+            filter: json!({ "property_id": "property-1" }),
+        })
+        .unwrap();
+    assert_eq!(indexed.records[0].id, "tenant-1");
+
+    provider
+        .store_evidence(StoreEvidenceOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+            evidence: json!({ "evidence_id": "ev-1" }),
+        })
+        .unwrap();
+    let evidence = provider
+        .get_evidence(ExternalRefsOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(evidence.evidence[0]["evidence_id"], "ev-1");
 }
 
 #[test]
@@ -249,26 +306,27 @@ fn provider_kind_parses_memory_foundationdb_and_external() {
 }
 
 #[test]
-fn foundationdb_adapter_fails_with_clear_unavailable_error() {
-    let provider = FoundationDbProviderAdapter::unavailable(FoundationDbProviderConfig {
+fn foundationdb_adapter_returns_not_found_before_writes() {
+    let path = unique_store_path("empty");
+    let provider = FoundationDbProviderAdapter::new(FoundationDbProviderConfig {
         cluster_file: None,
-        database: None,
+        database: Some(path.display().to_string()),
         config_ref: Some("providers.foundationdb.local".to_string()),
-    });
-    let err = provider
+    })
+    .unwrap();
+    let record = provider
         .get(GetOp {
             namespace: ProviderNamespace {
                 tenant_id: "tenant-a".to_string(),
-                pack_name: "landlord".to_string(),
-                pack_version: "0.1.0".to_string(),
+                sor_name: "landlord".to_string(),
             },
             entity: "Tenant".to_string(),
             collection: "tenants".to_string(),
             id: "tenant-1".to_string(),
         })
-        .unwrap_err();
-    assert_eq!(err.code, "provider_unavailable");
-    assert!(err.message.contains("SORX store provider"));
+        .unwrap();
+    assert!(record.is_none());
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -298,53 +356,71 @@ fn foundationdb_config_parses_direct_fields_and_config_ref() {
 }
 
 #[test]
-fn foundationdb_adapter_rejects_all_store_operations_until_wired() {
-    let provider = FoundationDbProviderAdapter::unavailable(FoundationDbProviderConfig {
+fn foundationdb_adapter_persists_store_operations() {
+    let path = unique_store_path("persistent");
+    let provider = FoundationDbProviderAdapter::new(FoundationDbProviderConfig {
         cluster_file: Some("./fdb.cluster".to_string()),
-        database: Some("DB".to_string()),
+        database: Some(path.display().to_string()),
         config_ref: None,
-    });
+    })
+    .unwrap();
     let namespace = ProviderNamespace {
         tenant_id: "tenant-a".to_string(),
-        pack_name: "landlord".to_string(),
-        pack_version: "0.1.0".to_string(),
+        sor_name: "landlord".to_string(),
     };
-    let create = provider.create(CreateOp {
-        namespace: namespace.clone(),
-        entity: "Tenant".to_string(),
-        collection: "tenants".to_string(),
-        input: json!({"id": "tenant-1"}),
-        idempotency_key: None,
-    });
-    let update = provider.update(UpdateOp {
-        namespace: namespace.clone(),
-        entity: "Tenant".to_string(),
-        collection: "tenants".to_string(),
-        id: "tenant-1".to_string(),
-        patch: json!({"active": true}),
-    });
-    let query = provider.query(QueryOp {
-        namespace: namespace.clone(),
-        entity: "Tenant".to_string(),
-        collection: "tenants".to_string(),
-        filter: json!({"active": true}),
-    });
-    let delete = provider.delete(DeleteOp {
-        namespace,
-        entity: "Tenant".to_string(),
-        collection: "tenants".to_string(),
-        id: "tenant-1".to_string(),
-    });
+    provider
+        .create(CreateOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            input: json!({"id": "tenant-1"}),
+            idempotency_key: None,
+        })
+        .unwrap();
+    provider
+        .update(UpdateOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+            patch: json!({"active": true}),
+        })
+        .unwrap();
+    provider
+        .append_event(AppendEventOp {
+            namespace: namespace.clone(),
+            stream: "tenant-1".to_string(),
+            event_type: "tenant.updated".to_string(),
+            subject_entity: "Tenant".to_string(),
+            subject_id: "tenant-1".to_string(),
+            data: json!({"active": true}),
+        })
+        .unwrap();
 
-    for err in [
-        create.unwrap_err(),
-        update.unwrap_err(),
-        query.unwrap_err(),
-        delete.unwrap_err(),
-    ] {
-        assert_eq!(err.code, "provider_unavailable");
-        assert!(err.message.contains("direct local/test config"));
-    }
+    let restarted = FoundationDbProviderAdapter::new(FoundationDbProviderConfig {
+        cluster_file: Some("./fdb.cluster".to_string()),
+        database: Some(path.display().to_string()),
+        config_ref: None,
+    })
+    .unwrap();
+    let query = restarted
+        .query(QueryOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            filter: json!({"active": true}),
+        })
+        .unwrap();
+    assert_eq!(query.records[0].id, "tenant-1");
+    let _ = std::fs::remove_file(path);
+}
+
+fn unique_store_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "greentic-sorx-test-{name}-{}-{}.json",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("thread")
+    ))
 }
 
 #[test]

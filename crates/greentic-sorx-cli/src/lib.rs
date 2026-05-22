@@ -226,6 +226,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ValidationCommands,
     },
+    /// Plan and apply canonical state migrations.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrationCommands,
+    },
     /// Start a SORX runtime from a SoRLa .gtpack and startup answers.
     Start {
         /// Path to a SoRLa .gtpack archive.
@@ -413,6 +418,39 @@ pub enum ValidationCommands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum MigrationCommands {
+    /// Build a deterministic migration plan between two packs.
+    Plan {
+        #[arg(long = "from")]
+        from: PathBuf,
+        #[arg(long = "to")]
+        to: PathBuf,
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        sor: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Validate and report what a migration plan would do.
+    DryRun {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        answers: PathBuf,
+    },
+    /// Mark a migration plan as applied after validation.
+    Apply {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        answers: PathBuf,
+        #[arg(long = "allow-destructive")]
+        allow_destructive: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum DeploymentCommands {
     /// List deployments in the local registry.
     List,
@@ -456,7 +494,7 @@ pub enum DeploymentCommands {
         state_namespace: Option<String>,
 
         /// State mode: isolated, shared_compatible, or shared_requires_migration.
-        #[arg(long = "state-mode", default_value = "isolated")]
+        #[arg(long = "state-mode", default_value = "shared_compatible")]
         state_mode: String,
 
         /// Allow reusing an API version label for a different digest.
@@ -919,6 +957,7 @@ fn dispatch(
             _context,
         ),
         Commands::Validation { command } => run_validation_command(command, registry_path),
+        Commands::Migrate { command } => run_migrate(command),
         Commands::Start {
             pack,
             schema,
@@ -1318,6 +1357,174 @@ fn run_validation_command(
                 })?;
             print_json(report)
         }
+    }
+}
+
+fn run_migrate(command: MigrationCommands) -> CliResult<()> {
+    match command {
+        MigrationCommands::Plan {
+            from,
+            to,
+            tenant,
+            sor,
+            out,
+        } => {
+            let from_pack =
+                load_sorla_pack(&from).map_err(|err| CliError::pack(err.to_string()))?;
+            let to_pack = load_sorla_pack(&to).map_err(|err| CliError::pack(err.to_string()))?;
+            let migration_id = migration_id(
+                &tenant,
+                &sor,
+                &from_pack.pack_version,
+                &to_pack.pack_version,
+            );
+            let plan = serde_json::json!({
+                "schema": "greentic.sorx.migration-plan.v1",
+                "migration_id": migration_id,
+                "tenant_id": tenant,
+                "sor_name": sor,
+                "from": {
+                    "source": from.display().to_string(),
+                    "pack_name": from_pack.pack_name,
+                    "pack_version": from_pack.pack_version,
+                    "pack_digest": from_pack.pack_digest
+                },
+                "to": {
+                    "source": to.display().to_string(),
+                    "pack_name": to_pack.pack_name,
+                    "pack_version": to_pack.pack_version,
+                    "pack_digest": to_pack.pack_digest
+                },
+                "state_namespace": format!("sorx/{}/{}", clean_migration_segment(&tenant), clean_migration_segment(&sor)),
+                "destructive": false,
+                "steps": migration_steps(&from_pack.pack_version, &to_pack.pack_version)
+            });
+            write_json_file(&out, &plan)?;
+            print_json(&plan)
+        }
+        MigrationCommands::DryRun { plan, answers } => {
+            let plan_json = read_json_file(&plan, "migration plan")?;
+            validate_migration_answers(&answers)?;
+            print_json(&serde_json::json!({
+                "schema": "greentic.sorx.migration-dry-run.v1",
+                "migration_id": plan_json["migration_id"],
+                "status": "pass",
+                "would_apply": plan_json["steps"],
+                "status_path": migration_status_path(&plan).display().to_string()
+            }))
+        }
+        MigrationCommands::Apply {
+            plan,
+            answers,
+            allow_destructive,
+        } => {
+            let plan_json = read_json_file(&plan, "migration plan")?;
+            validate_migration_answers(&answers)?;
+            if plan_json
+                .get("destructive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                && !allow_destructive
+            {
+                return Err(CliError::usage(
+                    "destructive migration steps require --allow-destructive",
+                ));
+            }
+            let status_path = migration_status_path(&plan);
+            if status_path.exists() {
+                let status = read_json_file(&status_path, "migration status")?;
+                if status.get("status").and_then(serde_json::Value::as_str) == Some("completed") {
+                    return print_json(&status);
+                }
+            }
+            let status = serde_json::json!({
+                "schema": "greentic.sorx.migration-status.v1",
+                "migration_id": plan_json["migration_id"],
+                "tenant_id": plan_json["tenant_id"],
+                "sor_name": plan_json["sor_name"],
+                "state_namespace": plan_json["state_namespace"],
+                "status": "completed",
+                "steps_applied": plan_json["steps"].as_array().map(Vec::len).unwrap_or(0)
+            });
+            write_json_file(&status_path, &status)?;
+            print_json(&status)
+        }
+    }
+}
+
+fn migration_steps(from_version: &str, to_version: &str) -> Vec<serde_json::Value> {
+    if from_version == to_version {
+        Vec::new()
+    } else {
+        vec![serde_json::json!({
+            "id": "metadata.version-transition",
+            "kind": "metadata",
+            "from_version": from_version,
+            "to_version": to_version,
+            "destructive": false
+        })]
+    }
+}
+
+fn migration_id(tenant: &str, sor: &str, from_version: &str, to_version: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tenant.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(sor.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(from_version.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(to_version.as_bytes());
+    format!("mig-{}", hex::encode(&hasher.finalize()[..8]))
+}
+
+fn migration_status_path(plan: &Path) -> PathBuf {
+    plan.with_extension("status.json")
+}
+
+fn validate_migration_answers(path: &Path) -> CliResult<()> {
+    let answers = read_json_file(path, "answers")?;
+    let normalized =
+        normalize_start_answers(&greentic_sorx_core::default_start_schema(), &answers, true)
+            .map_err(|err| CliError::answers(err.to_string()))?;
+    runtime_config_from_answers("migration", &normalized.answers)
+        .map_err(|err| CliError::answers(err.to_string()))?;
+    Ok(())
+}
+
+fn read_json_file(path: &Path, label: &str) -> CliResult<serde_json::Value> {
+    let raw = fs::read_to_string(path).map_err(|err| {
+        CliError::generic(format!("failed to read {label} {}: {err}", path.display()))
+    })?;
+    serde_json::from_str(&raw).map_err(|err| {
+        CliError::generic(format!("{label} {} is invalid JSON: {err}", path.display()))
+    })
+}
+
+fn write_json_file(path: &Path, value: &serde_json::Value) -> CliResult<()> {
+    let encoded = serde_json::to_string_pretty(value)
+        .map_err(|err| CliError::generic(format!("failed to encode JSON: {err}")))?;
+    fs::write(path, format!("{encoded}\n"))
+        .map_err(|err| CliError::generic(format!("failed to write {}: {err}", path.display())))
+}
+
+fn clean_migration_segment(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if cleaned.is_empty() {
+        "unnamed".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -1773,7 +1980,13 @@ fn run_routes(pack: PathBuf, _json: bool) -> CliResult<()> {
         &pack.sorla_assets.agent_gateway_json,
     )
     .map_err(|err| CliError::pack(err.to_string()))?;
-    let routes = http_runtime::route_list("local", "local", &pack, &router);
+    let versions = http_runtime::RouteVersionMetadata {
+        api_version_label: "local".to_string(),
+        view_version: "local".to_string(),
+        canonical_version: pack.pack_version.clone(),
+        state_namespace: format!("sorx/local/{}", pack.pack_name),
+    };
+    let routes = http_runtime::route_list("local", "local", &pack, &router, &versions);
     let encoded = serde_json::to_string_pretty(&routes)
         .map_err(|err| CliError::generic(format!("failed to encode routes: {err}")))?;
     println!("{encoded}");
@@ -1818,6 +2031,7 @@ fn run_deployment_routes(
         &deployment.visibility.to_string(),
         &pack,
         &router,
+        &http_runtime::RouteVersionMetadata::from_deployment(deployment),
     );
     for route in &mut routes.routes {
         route.path = join_url_path(&deployment.base_path, &route.path);
@@ -2524,8 +2738,11 @@ fn run_start(
 fn provider_compatibility_input(
     pack: &greentic_sorx_pack::LoadedSorlaPack,
 ) -> ProviderCompatibilityInput {
+    let required_capabilities = route_required_capabilities(&pack.sorla_assets.agent_gateway_json);
     let Some(ontology) = &pack.sorla_assets.ontology else {
-        return ProviderCompatibilityInput::none();
+        let mut input = ProviderCompatibilityInput::none();
+        input.required_capabilities = required_capabilities;
+        return input;
     };
     ProviderCompatibilityInput {
         ontology_present: true,
@@ -2536,7 +2753,46 @@ fn provider_compatibility_input(
             .as_ref()
             .is_none_or(|bindings| bindings.schema == "greentic.sorla.retrieval-bindings.v1"),
         requires_entity_link: ontology_requires_entity_link(ontology),
+        required_capabilities,
     }
+}
+
+fn route_required_capabilities(gateway: &serde_json::Value) -> Vec<String> {
+    let mut capabilities = gateway
+        .get("endpoints")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|endpoint| {
+            let requires = endpoint
+                .get("requires")
+                .or_else(|| endpoint.get("query_plan"))
+                .and_then(serde_json::Value::as_object);
+            let mut values = Vec::new();
+            if let Some(index) = requires.and_then(|requires| requires.get("index")) {
+                values.push(
+                    index
+                        .get("capability")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("exact-index-query")
+                        .to_string(),
+                );
+            }
+            if let Some(traversal) = requires.and_then(|requires| requires.get("traversal")) {
+                values.push(
+                    traversal
+                        .get("capability")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("bounded-graph-traversal")
+                        .to_string(),
+                );
+            }
+            values
+        })
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
 }
 
 fn ontology_requires_entity_link(ontology: &greentic_sorx_pack::OntologyAssets) -> bool {
@@ -2601,7 +2857,7 @@ mod tests {
                 api_version_label: "v1".to_string(),
                 base_path: "/sorx/acme/landlord/v1".to_string(),
                 visibility: DeploymentVisibility::Private,
-                state_mode: StateMode::Isolated,
+                state_mode: StateMode::SharedCompatible,
                 state_namespace: None,
                 deployment_id: None,
                 allow_api_version_conflict: false,
@@ -2978,12 +3234,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_migrate_plan_command() {
+        let cli = parse_from([
+            "greentic-sorx",
+            "migrate",
+            "plan",
+            "--from",
+            "old.gtpack",
+            "--to",
+            "new.gtpack",
+            "--tenant",
+            "acme",
+            "--sor",
+            "landlord",
+            "--out",
+            "plan.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Migrate {
+                command: MigrationCommands::Plan { .. }
+            }
+        ));
+    }
+
+    #[test]
     fn help_mentions_expected_commands() {
         let help = command().render_long_help().to_string();
         assert!(help.contains("doctor"));
         assert!(help.contains("artifact"));
         assert!(help.contains("inspect"));
         assert!(help.contains("routes"));
+        assert!(help.contains("migrate"));
         assert!(help.contains("start"));
     }
 
