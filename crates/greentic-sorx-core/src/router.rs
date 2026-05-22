@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::{
-    ApprovalRequirement, EndpointDefinition, EndpointMethod, OperationKind, RiskLevel, SorxError,
-    SorxResult,
+    ApprovalRequirement, EndpointDefinition, EndpointMethod, IndexRequirement, OperationKind,
+    QueryPlan, RiskLevel, SorxError, SorxResult, TraversalRequirement, ViewTransform,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -122,6 +122,8 @@ fn parse_endpoint(
             }
         });
     let approval = parse_approval(value.get("approval"));
+    let view = parse_view_transform(value.get("view"));
+    let query_plan = parse_query_plan(value.get("requires").or_else(|| value.get("query_plan")));
 
     Ok(EndpointDefinition {
         endpoint_id,
@@ -136,6 +138,8 @@ fn parse_endpoint(
         approval,
         input_schema: object.get("input_schema").cloned(),
         output_schema: object.get("output_schema").cloned(),
+        view,
+        query_plan,
     })
 }
 
@@ -162,6 +166,100 @@ fn parse_approval(value: Option<&Value>) -> Option<ApprovalRequirement> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     })
+}
+
+fn parse_view_transform(value: Option<&Value>) -> ViewTransform {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return ViewTransform::default();
+    };
+    ViewTransform {
+        read_only: object
+            .get("read_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        input_field_map: string_map(object.get("view_to_canonical")),
+        output_field_map: string_map(object.get("canonical_to_view")),
+    }
+}
+
+fn parse_query_plan(value: Option<&Value>) -> QueryPlan {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return QueryPlan::default();
+    };
+    QueryPlan {
+        index: object.get("index").and_then(parse_index_requirement),
+        traversal: object
+            .get("traversal")
+            .and_then(parse_traversal_requirement),
+    }
+}
+
+fn parse_index_requirement(value: &Value) -> Option<IndexRequirement> {
+    if let Some(name) = value.as_str() {
+        return Some(IndexRequirement {
+            name: name.to_string(),
+            capability: "exact-index-query".to_string(),
+        });
+    }
+    let object = value.as_object()?;
+    Some(IndexRequirement {
+        name: object.get("name")?.as_str()?.to_string(),
+        capability: object
+            .get("capability")
+            .and_then(Value::as_str)
+            .unwrap_or("exact-index-query")
+            .to_string(),
+    })
+}
+
+fn parse_traversal_requirement(value: &Value) -> Option<TraversalRequirement> {
+    if let Some(name) = value.as_str() {
+        return Some(TraversalRequirement {
+            name: name.to_string(),
+            capability: "bounded-graph-traversal".to_string(),
+            max_depth: 2,
+            relationships: Vec::new(),
+        });
+    }
+    let object = value.as_object()?;
+    Some(TraversalRequirement {
+        name: object.get("name")?.as_str()?.to_string(),
+        capability: object
+            .get("capability")
+            .and_then(Value::as_str)
+            .unwrap_or("bounded-graph-traversal")
+            .to_string(),
+        max_depth: object
+            .get("max_depth")
+            .and_then(Value::as_u64)
+            .unwrap_or(2)
+            .min(u8::MAX as u64) as u8,
+        relationships: object
+            .get("relationships")
+            .and_then(Value::as_array)
+            .map(|relationships| {
+                relationships
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {
+    value
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {

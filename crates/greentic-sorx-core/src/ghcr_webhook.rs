@@ -216,7 +216,7 @@ pub fn handle_ghcr_published_webhook(
             api_version_label: metadata.api_version_label.clone(),
             base_path,
             visibility: DeploymentVisibility::Private,
-            state_mode: StateMode::Isolated,
+            state_mode: StateMode::SharedCompatible,
             state_namespace: None,
             deployment_id: None,
             allow_api_version_conflict: false,

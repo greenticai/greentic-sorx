@@ -65,6 +65,7 @@ pub struct ProviderCompatibilityInput {
     pub retrieval_bindings_present: bool,
     pub retrieval_bindings_schema_supported: bool,
     pub requires_entity_link: bool,
+    pub required_capabilities: Vec<String>,
 }
 
 impl ProviderCompatibilityInput {
@@ -75,6 +76,7 @@ impl ProviderCompatibilityInput {
             retrieval_bindings_present: false,
             retrieval_bindings_schema_supported: true,
             requires_entity_link: false,
+            required_capabilities: Vec::new(),
         }
     }
 }
@@ -112,6 +114,13 @@ pub fn resolve_provider_compatibility(
         requirements.push(ProviderCapabilityRequirement {
             id: "entity.link".to_string(),
             capability: "entity-link".to_string(),
+            provider_id: None,
+        });
+    }
+    for capability in &input.required_capabilities {
+        requirements.push(ProviderCapabilityRequirement {
+            id: capability.clone(),
+            capability: capability.clone(),
             provider_id: None,
         });
     }
@@ -305,6 +314,7 @@ mod tests {
             retrieval_bindings_present: true,
             retrieval_bindings_schema_supported: true,
             requires_entity_link: false,
+            required_capabilities: Vec::new(),
         }
     }
 
@@ -407,6 +417,7 @@ mod tests {
             retrieval_bindings_present: true,
             retrieval_bindings_schema_supported: false,
             requires_entity_link: false,
+            required_capabilities: Vec::new(),
         };
         let report =
             resolve_provider_compatibility(&config, &input, ProviderResolutionMode::DryRun);

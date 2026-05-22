@@ -31,6 +31,10 @@ pub struct SorxDeployment {
     pub pack_digest: String,
     pub environment: String,
     pub api_version_label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub view_version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub canonical_version: String,
     pub base_path: String,
     pub state_namespace: String,
     pub visibility: DeploymentVisibility,
@@ -293,16 +297,19 @@ impl DeploymentRegistry {
                 format!("deployment `{deployment_id}` already exists"),
             ));
         }
+        if request.state_mode == StateMode::Isolated
+            && is_production_environment(&request.environment)
+        {
+            return Err(DeploymentRegistryError::new(
+                "isolated_state_not_production",
+                "production deployments must use shared canonical state",
+            ));
+        }
 
-        let state_namespace = request.state_namespace.clone().unwrap_or_else(|| {
-            format!(
-                "sorx/{}/{}/{}/{}",
-                clean_segment(&request.tenant_id),
-                clean_segment(&request.sor_name),
-                clean_segment(&request.artifact.version),
-                digest_suffix(&request.artifact.digest)
-            )
-        });
+        let state_namespace = request
+            .state_namespace
+            .clone()
+            .unwrap_or_else(|| default_state_namespace(&request));
 
         self.check_api_version_conflict(&request)?;
         self.check_base_path_conflict(&deployment_id, &request.base_path)?;
@@ -321,7 +328,9 @@ impl DeploymentRegistry {
             pack_version: request.artifact.version.clone(),
             pack_digest: request.artifact.digest.clone(),
             environment: request.environment,
-            api_version_label: request.api_version_label,
+            api_version_label: request.api_version_label.clone(),
+            view_version: request.api_version_label,
+            canonical_version: request.artifact.version.clone(),
             base_path: normalize_base_path(&request.base_path),
             state_namespace,
             visibility: request.visibility,
@@ -990,6 +999,10 @@ pub struct DeploymentRouteTable {
     pub schema: String,
     pub deployment_id: String,
     pub base_path: String,
+    pub api_version_label: String,
+    pub view_version: String,
+    pub canonical_version: String,
+    pub state_namespace: String,
     pub routes: Vec<DeploymentRoute>,
 }
 
@@ -1010,6 +1023,10 @@ impl DeploymentRouteTable {
             schema: DEPLOYMENT_ROUTE_TABLE_SCHEMA.to_string(),
             deployment_id: deployment.deployment_id.clone(),
             base_path: deployment.base_path.clone(),
+            api_version_label: deployment.api_version_label.clone(),
+            view_version: deployment.view_version.clone(),
+            canonical_version: deployment.canonical_version.clone(),
+            state_namespace: deployment.state_namespace.clone(),
             routes: routes.into_iter().collect(),
         }
     }
@@ -1118,6 +1135,23 @@ fn deployment_id(
     )
 }
 
+fn default_state_namespace(request: &CreateDeploymentRequest) -> String {
+    match request.state_mode {
+        StateMode::Isolated => format!(
+            "sorx/{}/{}/{}/{}",
+            clean_segment(&request.tenant_id),
+            clean_segment(&request.sor_name),
+            clean_segment(&request.artifact.version),
+            digest_suffix(&request.artifact.digest)
+        ),
+        StateMode::SharedCompatible | StateMode::SharedRequiresMigration => format!(
+            "sorx/{}/{}",
+            clean_segment(&request.tenant_id),
+            clean_segment(&request.sor_name)
+        ),
+    }
+}
+
 fn digest_suffix(digest: &str) -> String {
     digest
         .strip_prefix("sha256:")
@@ -1180,6 +1214,13 @@ fn clean_segment(value: &str) -> String {
     }
 }
 
+fn is_production_environment(environment: &str) -> bool {
+    matches!(
+        environment.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
 fn normalize_base_path(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed == "/" {
@@ -1212,7 +1253,7 @@ mod tests {
             api_version_label: api_version_label.to_string(),
             base_path: format!("/sorx/acme/landlord/{api_version_label}"),
             visibility: DeploymentVisibility::Private,
-            state_mode: StateMode::Isolated,
+            state_mode: StateMode::SharedCompatible,
             state_namespace: None,
             deployment_id: None,
             allow_api_version_conflict: false,
@@ -1237,6 +1278,15 @@ mod tests {
     }
 
     #[test]
+    fn production_deployments_reject_isolated_state() {
+        let mut registry = DeploymentRegistry::default();
+        let mut request = request("1.0.0", "sha256:111", "v1");
+        request.state_mode = StateMode::Isolated;
+        let err = registry.create_deployment(request).unwrap_err();
+        assert_eq!(err.code, "isolated_state_not_production");
+    }
+
+    #[test]
     fn creates_two_deployments_for_same_sor_with_different_versions() {
         let mut registry = DeploymentRegistry::default();
         let one = registry
@@ -1247,6 +1297,10 @@ mod tests {
             .unwrap();
         assert_ne!(one.deployment_id, two.deployment_id);
         assert_eq!(registry.deployments.len(), 2);
+        assert_eq!(one.state_namespace, "sorx/acme/landlord");
+        assert_eq!(two.state_namespace, "sorx/acme/landlord");
+        assert_eq!(one.view_version, "v1");
+        assert_eq!(one.canonical_version, "1.0.0");
     }
 
     #[test]
@@ -1549,13 +1603,26 @@ mod tests {
     #[test]
     fn state_namespace_conflicts_are_rejected_by_default() {
         let mut registry = DeploymentRegistry::default();
+        let mut first = request("1.0.0", "sha256:111", "v1");
+        first.state_mode = StateMode::SharedRequiresMigration;
+        let first = registry.create_deployment(first).unwrap();
+        let mut second = request("1.1.0", "sha256:222", "v1-1");
+        second.state_mode = StateMode::SharedRequiresMigration;
+        second.state_namespace = Some(first.state_namespace);
+        let err = registry.create_deployment(second).unwrap_err();
+        assert_eq!(err.code, "state_namespace_conflict");
+    }
+
+    #[test]
+    fn shared_compatible_state_namespace_can_be_reused() {
+        let mut registry = DeploymentRegistry::default();
         let first = registry
             .create_deployment(request("1.0.0", "sha256:111", "v1"))
             .unwrap();
         let mut second = request("1.1.0", "sha256:222", "v1-1");
-        second.state_namespace = Some(first.state_namespace);
-        let err = registry.create_deployment(second).unwrap_err();
-        assert_eq!(err.code, "state_namespace_conflict");
+        second.state_namespace = Some(first.state_namespace.clone());
+        let second = registry.create_deployment(second).unwrap();
+        assert_eq!(second.state_namespace, first.state_namespace);
     }
 
     #[test]

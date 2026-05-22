@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -86,6 +88,35 @@ pub struct EndpointDefinition {
     pub approval: Option<ApprovalRequirement>,
     pub input_schema: Option<Value>,
     pub output_schema: Option<Value>,
+    pub view: ViewTransform,
+    pub query_plan: QueryPlan,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewTransform {
+    pub read_only: bool,
+    pub input_field_map: BTreeMap<String, String>,
+    pub output_field_map: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryPlan {
+    pub index: Option<IndexRequirement>,
+    pub traversal: Option<TraversalRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexRequirement {
+    pub name: String,
+    pub capability: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraversalRequirement {
+    pub name: String,
+    pub capability: String,
+    pub max_depth: u8,
+    pub relationships: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

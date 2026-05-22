@@ -100,8 +100,26 @@ fn runtime() -> SorxRuntime {
     let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
     let router = EndpointRouter::from_agent_gateway(&gateway()).unwrap();
     let mut providers = ProviderRegistry::new();
-    providers.register_store("store", Arc::new(MemoryStoreProvider::new()));
+    providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
     SorxRuntime::new(runtime_pack("landlord", "0.1.0"), config, router, providers)
+}
+
+fn runtime_with_gateway(
+    pack_version: &str,
+    gateway: Value,
+    provider: Arc<MemoryStoreProvider>,
+) -> SorxRuntime {
+    let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
+    let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
+    let router = EndpointRouter::from_agent_gateway(&gateway).unwrap();
+    let mut providers = ProviderRegistry::new();
+    providers.register_canonical_store("store", provider);
+    SorxRuntime::new(
+        runtime_pack("landlord", pack_version),
+        config,
+        router,
+        providers,
+    )
 }
 
 #[test]
@@ -246,4 +264,201 @@ fn idempotency_key_prevents_duplicate_create() {
     assert_eq!(created.output["id"], "tenant-1");
     assert_eq!(repeated.output["id"], "tenant-1");
     assert_eq!(repeated.output["data"]["name"], "Acme");
+}
+
+#[test]
+fn versioned_views_share_canonical_state_with_field_mapping() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let v1 = runtime_with_gateway(
+        "1.1.0",
+        json!({
+            "schema": "greentic.sorla.agent-gateway.v1",
+            "endpoints": [{
+                "endpoint_id": "tenant.create",
+                "operation_id": "tenant.create",
+                "operation": "create",
+                "method": "POST",
+                "path": "/v1.1/tenants",
+                "entity": "Tenant",
+                "collection": "tenants",
+                "provider_binding": "store",
+                "risk": "low",
+                "view": {
+                    "view_to_canonical": { "fullName": "name" },
+                    "canonical_to_view": { "name": "fullName" }
+                }
+            }]
+        }),
+        provider.clone(),
+    );
+    let v2 = runtime_with_gateway("2.0.0", gateway(), provider);
+
+    v1.invoke(invocation(
+        "tenant-a",
+        "tenant.create",
+        "tenant.create",
+        json!({ "id": "tenant-1", "fullName": "Acme", "active": true }),
+    ))
+    .unwrap();
+
+    let fetched = v2
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.get",
+            "tenant.get",
+            json!({ "id": "tenant-1" }),
+        ))
+        .unwrap();
+    assert_eq!(fetched.output["data"]["name"], "Acme");
+}
+
+#[test]
+fn read_only_view_rejects_mutations() {
+    let runtime = runtime_with_gateway(
+        "1.0.0",
+        json!({
+            "schema": "greentic.sorla.agent-gateway.v1",
+            "endpoints": [{
+                "endpoint_id": "tenant.create",
+                "operation_id": "tenant.create",
+                "operation": "create",
+                "method": "POST",
+                "path": "/v1.0/tenants",
+                "entity": "Tenant",
+                "collection": "tenants",
+                "provider_binding": "store",
+                "risk": "low",
+                "view": { "read_only": true }
+            }]
+        }),
+        Arc::new(MemoryStoreProvider::new()),
+    );
+
+    let err = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-1", "name": "Acme" }),
+        ))
+        .unwrap_err();
+    assert_eq!(err.code, "view_read_only");
+}
+
+#[test]
+fn query_endpoint_can_use_index_requirement() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway(
+        "2.0.0",
+        json!({
+            "schema": "greentic.sorla.agent-gateway.v1",
+            "endpoints": [
+                {
+                    "endpoint_id": "tenant.create",
+                    "operation_id": "tenant.create",
+                    "operation": "create",
+                    "method": "POST",
+                    "path": "/v2/tenants",
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "provider_binding": "store",
+                    "risk": "low"
+                },
+                {
+                    "endpoint_id": "tenant.by_property",
+                    "operation_id": "tenant.by_property",
+                    "operation": "query",
+                    "method": "POST",
+                    "path": "/v2/tenants/by-property",
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "provider_binding": "store",
+                    "requires": {
+                        "index": {
+                            "name": "tenants_by_property",
+                            "capability": "exact-index-query"
+                        }
+                    }
+                }
+            ]
+        }),
+        provider,
+    );
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-1", "name": "Acme", "property_id": "property-1" }),
+        ))
+        .unwrap();
+    let queried = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.by_property",
+            "tenant.by_property",
+            json!({ "filter": { "property_id": "property-1" } }),
+        ))
+        .unwrap();
+    assert_eq!(queried.output["records"][0]["id"], "tenant-1");
+}
+
+#[test]
+fn query_endpoint_can_use_traversal_requirement() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway(
+        "2.0.0",
+        json!({
+            "schema": "greentic.sorla.agent-gateway.v1",
+            "endpoints": [
+                {
+                    "endpoint_id": "tenant.create",
+                    "operation_id": "tenant.create",
+                    "operation": "create",
+                    "method": "POST",
+                    "path": "/v2/tenants",
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "provider_binding": "store",
+                    "risk": "low"
+                },
+                {
+                    "endpoint_id": "tenant.reachable",
+                    "operation_id": "tenant.reachable",
+                    "operation": "query",
+                    "method": "POST",
+                    "path": "/v2/tenants/reachable",
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "provider_binding": "store",
+                    "requires": {
+                        "traversal": {
+                            "name": "tenant_graph",
+                            "capability": "bounded-graph-traversal",
+                            "max_depth": 2,
+                            "relationships": ["tenant_has_lease"]
+                        }
+                    }
+                }
+            ]
+        }),
+        provider,
+    );
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-1", "name": "Acme" }),
+        ))
+        .unwrap();
+    let traversed = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.reachable",
+            "tenant.reachable",
+            json!({ "id": "tenant-1" }),
+        ))
+        .unwrap();
+    assert_eq!(traversed.output["records"][0]["id"], "tenant-1");
 }
