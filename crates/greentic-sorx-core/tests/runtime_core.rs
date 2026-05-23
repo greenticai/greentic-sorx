@@ -200,6 +200,475 @@ fn update_and_query_active_tenants() {
 }
 
 #[test]
+fn command_delete_where_removes_matching_records() {
+    let gateway = json!({
+        "schema": "greentic.sorla.agent-gateway.v1",
+        "endpoints": [
+            {
+                "endpoint_id": "record.create",
+                "operation_id": "record.create",
+                "operation": "create",
+                "method": "POST",
+                "path": "/v1/records",
+                "entity": "Record",
+                "collection": "records",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["id", "name"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "name": { "type": "string" }
+                    }
+                }
+            },
+            {
+                "endpoint_id": "record.get",
+                "operation_id": "record.get",
+                "operation": "get",
+                "method": "GET",
+                "path": "/v1/records/{id}",
+                "entity": "Record",
+                "collection": "records",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "string" }
+                    }
+                }
+            },
+            {
+        "endpoint_id": "record.archive",
+        "operation_id": "record.archive",
+        "operation": "command",
+        "method": "POST",
+        "path": "/v1/records/archive",
+        "entity": "Record",
+        "collection": "records",
+        "provider_binding": "store",
+        "risk": "low",
+        "input_schema": {
+            "type": "object",
+            "required": ["record_id"],
+            "properties": {
+                "record_id": { "type": "string" }
+            }
+        },
+        "command": {
+            "kind": "state_transition",
+            "action": "archive_record",
+            "idempotency": "required",
+            "steps": [
+                {
+                    "op": "delete_where",
+                    "where": {
+                        "id": "$input.record_id"
+                    }
+                }
+            ]
+        }
+            }
+        ]
+    });
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway("0.1.0", gateway, provider);
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.create",
+            "record.create",
+            json!({ "id": "record-1", "name": "Example" }),
+        ))
+        .unwrap();
+
+    let mut leave = invocation(
+        "tenant-a",
+        "record.archive",
+        "record.archive",
+        json!({ "record_id": "record-1" }),
+    );
+    let err = runtime.invoke(leave.clone()).unwrap_err();
+    assert_eq!(err.code, "idempotency_key_required");
+
+    leave.idempotency_key = Some("archive-record-1".to_string());
+    let archived = runtime.invoke(leave).unwrap();
+    assert_eq!(archived.status, EndpointStatus::Ok);
+    assert_eq!(archived.output["action"], "archive_record");
+    assert_eq!(archived.output["result"]["deleted_count"], 1);
+
+    let fetched = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.get",
+            "record.get",
+            json!({ "id": "record-1" }),
+        ))
+        .unwrap();
+    assert_eq!(fetched.status, EndpointStatus::NotFound);
+}
+
+#[test]
+fn command_create_uses_resolved_input_values() {
+    let gateway = json!({
+        "schema": "greentic.sorla.agent-gateway.v1",
+        "endpoints": [
+            {
+                "endpoint_id": "record.materialize",
+                "operation_id": "record.materialize",
+                "operation": "command",
+                "method": "POST",
+                "path": "/v1/records/materialize",
+                "entity": "Record",
+                "collection": "records",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["record_id", "name"],
+                    "properties": {
+                        "record_id": { "type": "string" },
+                        "name": { "type": "string" }
+                    }
+                },
+                "command": {
+                    "kind": "state_transition",
+                    "action": "materialize_record",
+                    "steps": [
+                        {
+                            "op": "create",
+                            "input": {
+                                "id": "$input.record_id",
+                                "name": "$input.name",
+                                "active": true
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "endpoint_id": "record.get",
+                "operation_id": "record.get",
+                "operation": "get",
+                "method": "GET",
+                "path": "/v1/records/{id}",
+                "entity": "Record",
+                "collection": "records",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "string" }
+                    }
+                }
+            }
+        ]
+    });
+    let runtime = runtime_with_gateway("0.1.0", gateway, Arc::new(MemoryStoreProvider::new()));
+
+    let created = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.materialize",
+            "record.materialize",
+            json!({ "record_id": "record-1", "name": "Example" }),
+        ))
+        .unwrap();
+    assert_eq!(created.status, EndpointStatus::Ok);
+    assert_eq!(created.output["result"]["created_count"], 1);
+
+    let fetched = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.get",
+            "record.get",
+            json!({ "id": "record-1" }),
+        ))
+        .unwrap();
+    assert_eq!(fetched.output["data"]["name"], "Example");
+    assert_eq!(fetched.output["data"]["active"], true);
+}
+
+#[test]
+fn command_update_where_supports_generated_values_step_refs_and_return_shape() {
+    let gateway = json!({
+        "schema": "greentic.sorla.agent-gateway.v1",
+        "endpoints": [
+            {
+                "endpoint_id": "record.create",
+                "operation_id": "record.create",
+                "operation": "create",
+                "method": "POST",
+                "path": "/v1/records",
+                "entity": "Record",
+                "collection": "records",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["id", "name"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "name": { "type": "string" }
+                    }
+                }
+            },
+            {
+                "endpoint_id": "record.generate_code",
+                "operation_id": "record.generate_code",
+                "operation": "command",
+                "method": "POST",
+                "path": "/v1/records/generate-code",
+                "entity": "Record",
+                "collection": "records",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["record_id"],
+                    "properties": {
+                        "record_id": { "type": "string" }
+                    }
+                },
+                "command": {
+                    "kind": "record_mutation",
+                    "action": "generate_code",
+                    "steps": [
+                        {
+                            "op": "find_one",
+                            "as": "record",
+                            "where": { "id": "$input.record_id" },
+                            "required": true
+                        },
+                        {
+                            "op": "update_where",
+                            "as": "update",
+                            "where": { "id": "$input.record_id" },
+                            "set": {
+                                "code": {
+                                    "coalesce": [
+                                        "$steps.record.data.code",
+                                        "$generated.short_code"
+                                    ]
+                                },
+                                "updated_at": "$now"
+                            }
+                        }
+                    ],
+                    "return": {
+                        "record_id": "$input.record_id",
+                        "code": "$steps.update.records.0.data.code",
+                        "updated_count": "$steps.update.updated_count"
+                    }
+                }
+            },
+            {
+                "endpoint_id": "record.query",
+                "operation_id": "record.query",
+                "operation": "query",
+                "method": "POST",
+                "path": "/v1/records/query",
+                "entity": "Record",
+                "collection": "records",
+                "provider_binding": "store",
+                "risk": "low"
+            }
+        ]
+    });
+    let runtime = runtime_with_gateway("0.1.0", gateway, Arc::new(MemoryStoreProvider::new()));
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.create",
+            "record.create",
+            json!({ "id": "record-1", "name": "Example" }),
+        ))
+        .unwrap();
+
+    let first = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.generate_code",
+            "record.generate_code",
+            json!({ "record_id": "record-1" }),
+        ))
+        .unwrap();
+    assert_eq!(first.status, EndpointStatus::Ok);
+    assert_eq!(first.output["result"]["record_id"], "record-1");
+    assert_eq!(first.output["result"]["updated_count"], 1);
+    let code = first.output["result"]["code"].as_str().unwrap().to_string();
+    assert!(!code.is_empty());
+
+    let second = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.generate_code",
+            "record.generate_code",
+            json!({ "record_id": "record-1" }),
+        ))
+        .unwrap();
+    assert_eq!(second.output["result"]["code"], code);
+
+    let queried = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.query",
+            "record.query",
+            json!({ "filter": { "id": "record-1" } }),
+        ))
+        .unwrap();
+    assert_eq!(queried.output["records"][0]["data"]["code"], code);
+}
+
+#[test]
+fn command_foreach_runs_nested_steps_with_item_refs_and_rollups() {
+    let gateway = json!({
+        "schema": "greentic.sorla.agent-gateway.v1",
+        "endpoints": [
+            {
+                "endpoint_id": "bulk.import",
+                "operation_id": "bulk.import",
+                "operation": "command",
+                "method": "POST",
+                "path": "/v1/bulk/import",
+                "entity": "BulkImport",
+                "collection": "bulk_imports",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["items", "performed_by"],
+                    "properties": {
+                        "items": { "type": "array" },
+                        "performed_by": { "type": "string" }
+                    }
+                },
+                "command": {
+                    "kind": "bulk_mutation",
+                    "action": "bulk_import",
+                    "steps": [
+                        {
+                            "op": "foreach",
+                            "as": "imported",
+                            "items": "$input.items",
+                            "do": [
+                                {
+                                    "op": "create",
+                                    "as": "created",
+                                    "entity": "$item.entity",
+                                    "collection": "$item.collection",
+                                    "input": "$item.data"
+                                },
+                                {
+                                    "op": "create",
+                                    "entity": "audit_record",
+                                    "collection": "audit_records",
+                                    "input": {
+                                        "record_type": "$item.entity",
+                                        "record_id": "$steps.created.record.id",
+                                        "action_type": "bulk_import",
+                                        "performed_by": "$input.performed_by",
+                                        "performed_at": "$now"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "return": {
+                        "imported_count": "$steps.imported.count",
+                        "created_count": "$steps.imported.created_count",
+                        "records": "$steps.imported.records"
+                    }
+                }
+            },
+            {
+                "endpoint_id": "entity_a.query",
+                "operation_id": "entity_a.query",
+                "operation": "query",
+                "method": "POST",
+                "path": "/v1/entity-as/query",
+                "entity": "entity_a",
+                "collection": "entity_as",
+                "provider_binding": "store",
+                "risk": "low"
+            },
+            {
+                "endpoint_id": "audit.query",
+                "operation_id": "audit.query",
+                "operation": "query",
+                "method": "POST",
+                "path": "/v1/audit-records/query",
+                "entity": "audit_record",
+                "collection": "audit_records",
+                "provider_binding": "store",
+                "risk": "low"
+            }
+        ]
+    });
+    let runtime = runtime_with_gateway("0.1.0", gateway, Arc::new(MemoryStoreProvider::new()));
+
+    let imported = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "bulk.import",
+            "bulk.import",
+            json!({
+                "performed_by": "tester",
+                "items": [
+                    {
+                        "entity": "entity_a",
+                        "collection": "entity_as",
+                        "data": {
+                            "id": "a-1",
+                            "a_string_attr": "Alpha"
+                        }
+                    }
+                ]
+            }),
+        ))
+        .unwrap();
+    assert_eq!(imported.status, EndpointStatus::Ok);
+    assert_eq!(imported.output["result"]["imported_count"], 1);
+    assert_eq!(imported.output["result"]["created_count"], 2);
+    assert_eq!(imported.output["result"]["records"][0]["id"], "a-1");
+
+    let entity_query = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "entity_a.query",
+            "entity_a.query",
+            json!({ "filter": { "id": "a-1" } }),
+        ))
+        .unwrap();
+    assert_eq!(
+        entity_query.output["records"][0]["data"]["a_string_attr"],
+        "Alpha"
+    );
+
+    let audit_query = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "audit.query",
+            "audit.query",
+            json!({ "filter": { "record_id": "a-1" } }),
+        ))
+        .unwrap();
+    assert_eq!(
+        audit_query.output["records"][0]["data"]["record_type"],
+        "entity_a"
+    );
+    assert_eq!(
+        audit_query.output["records"][0]["data"]["performed_by"],
+        "tester"
+    );
+}
+
+#[test]
 fn missing_provider_binding_fails_clearly() {
     let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
     let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();

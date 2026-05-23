@@ -6,8 +6,9 @@ use std::sync::Arc;
 use greentic_sorx_core::{
     CallerContext, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter,
     EndpointStatus, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
-    McpToolList, MemoryStoreProvider, PolicyAction, ProviderRegistry, RuntimePack, SorxDeployment,
-    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StdoutAuditSink, StoreProviderKind,
+    McpToolList, MemoryStoreProvider, OperationKind, PolicyAction, ProviderRegistry, RuntimePack,
+    SorxDeployment, SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StdoutAuditSink,
+    StoreProviderKind,
 };
 use greentic_sorx_pack::{BusinessAction, BusinessActionAssets, LoadedSorlaPack, contract_hash};
 use serde::Serialize;
@@ -73,10 +74,16 @@ impl RouteVersionMetadata {
 pub struct HttpRuntime {
     deployment_id: String,
     admin_api_enabled: bool,
+    auth: HttpAuth,
     runtime: Arc<SorxRuntime>,
     routes: Arc<RouteList>,
     tools: Arc<McpToolList>,
     business_actions: Arc<Option<BusinessActionAssets>>,
+}
+
+#[derive(Clone)]
+struct HttpAuth {
+    shared_secret: Option<String>,
 }
 
 impl HttpRuntime {
@@ -102,6 +109,7 @@ impl HttpRuntime {
         );
         let deployment_id = deployment_id.into();
         let exposure = config.exposure.default_visibility.clone();
+        let auth = http_auth_from_config(&config)?;
         let route_versions = RouteVersionMetadata::local(&config, pack);
         let routes = route_list(
             &deployment_id,
@@ -117,6 +125,7 @@ impl HttpRuntime {
         Ok(Self {
             deployment_id,
             admin_api_enabled: false,
+            auth,
             runtime: Arc::new(runtime),
             routes: Arc::new(routes),
             tools: Arc::new(tools),
@@ -167,6 +176,14 @@ impl HttpRuntime {
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/healthz") => return json_response(200, json!({ "ok": true })),
             ("GET", "/readyz") => return json_response(200, json!({ "ok": true })),
+            _ => {}
+        }
+
+        if let Err(response) = self.authorize(&request) {
+            return response;
+        }
+
+        match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/v1/sorx/routes") => {
                 return json_response(200, serde_json::to_value(&*self.routes).unwrap());
             }
@@ -309,6 +326,13 @@ impl HttpRuntime {
                     }
                 }),
             ),
+            Ok(result) if matches!(endpoint.operation, OperationKind::Command(_)) => {
+                let mut body = result.output;
+                if let Value::Object(object) = &mut body {
+                    object.insert("events".to_string(), json!(result.events));
+                }
+                json_response(200, body)
+            }
             Ok(result) => json_response(
                 200,
                 json!({
@@ -321,6 +345,25 @@ impl HttpRuntime {
             ),
             Err(err) => sorx_error_response(400, err),
         }
+    }
+
+    fn authorize(&self, request: &HttpRequest) -> Result<(), HttpResponse> {
+        let Some(secret) = self.auth.shared_secret.as_deref() else {
+            return Ok(());
+        };
+        if request_bearer_token(&request.headers).is_some_and(|token| token == secret)
+            || request
+                .headers
+                .get("x-greentic-sorx-secret")
+                .is_some_and(|token| token == secret)
+        {
+            return Ok(());
+        }
+        Err(error_response(
+            401,
+            "SORX_UNAUTHORIZED",
+            "valid HTTP ingest shared secret is required",
+        ))
     }
 
     fn list_business_actions(&self) -> HttpResponse {
@@ -686,6 +729,64 @@ impl HttpRuntime {
             }
             match_path(&endpoint.path, path).map(|params| (endpoint.clone(), params))
         })
+    }
+}
+
+fn http_auth_from_config(config: &SorxRuntimeConfig) -> SorxResult<HttpAuth> {
+    match config.server.auth.mode.as_str() {
+        "none" => Ok(HttpAuth {
+            shared_secret: None,
+        }),
+        "shared_secret" => {
+            let secret_ref = config
+                .server
+                .auth
+                .shared_secret_ref
+                .as_deref()
+                .ok_or_else(|| {
+                    SorxError::at_path(
+                        "invalid_startup_config",
+                        "server auth mode shared_secret requires shared_secret_ref",
+                        "server.auth.shared_secret_ref",
+                    )
+                })?;
+            let secret = resolve_shared_secret(secret_ref)?;
+            Ok(HttpAuth {
+                shared_secret: Some(secret),
+            })
+        }
+        other => Err(SorxError::at_path(
+            "invalid_startup_config",
+            format!("unsupported server auth mode {other:?}"),
+            "server.auth.mode",
+        )),
+    }
+}
+
+fn resolve_shared_secret(secret_ref: &str) -> SorxResult<String> {
+    let Some(env_name) = secret_ref.strip_prefix("env:") else {
+        return Err(SorxError::at_path(
+            "unsupported_secret_ref",
+            "HTTP ingest shared secret refs currently support env:<NAME>",
+            "server.auth.shared_secret_ref",
+        ));
+    };
+    std::env::var(env_name).map_err(|_| {
+        SorxError::at_path(
+            "secret_ref_unresolved",
+            format!("environment variable {env_name} is not set"),
+            "server.auth.shared_secret_ref",
+        )
+    })
+}
+
+fn request_bearer_token(headers: &BTreeMap<String, String>) -> Option<&str> {
+    let value = headers.get("authorization")?;
+    let (scheme, token) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty() {
+        Some(token.trim())
+    } else {
+        None
     }
 }
 
@@ -1256,6 +1357,53 @@ mod tests {
                     "provider_binding": "store"
                 },
                 {
+                    "endpoint_id": "tenant.generate_code",
+                    "operation_id": "tenant.generate_code",
+                    "operation": "command",
+                    "method": "POST",
+                    "path": "/v1/agent/tenants/generate-code",
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "provider_binding": "store",
+                    "risk": "low",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": { "type": "string" }
+                        }
+                    },
+                    "command": {
+                        "kind": "record_mutation",
+                        "action": "generate_code",
+                        "steps": [
+                            {
+                                "op": "find_one",
+                                "as": "record",
+                                "where": { "id": "$input.id" },
+                                "required": true
+                            },
+                            {
+                                "op": "update_where",
+                                "as": "update",
+                                "where": { "id": "$input.id" },
+                                "set": {
+                                    "code": {
+                                        "coalesce": [
+                                            "$steps.record.data.code",
+                                            "$generated.short_code"
+                                        ]
+                                    }
+                                }
+                            }
+                        ],
+                        "return": {
+                            "id": "$input.id",
+                            "code": "$steps.update.records.0.data.code"
+                        }
+                    }
+                },
+                {
                     "endpoint_id": "tenant.active_by_landlord",
                     "operation_id": "tenant.active_by_landlord",
                     "operation": "query",
@@ -1411,11 +1559,32 @@ mod tests {
     }
 
     fn runtime(environment: &str) -> HttpRuntime {
+        runtime_with_answers(answers(environment))
+    }
+
+    fn runtime_with_answers(answers: Value) -> HttpRuntime {
         let pack = pack();
-        let normalized =
-            normalize_start_answers(&default_start_schema(), &answers(environment), true).unwrap();
+        let normalized = normalize_start_answers(&default_start_schema(), &answers, true).unwrap();
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
         HttpRuntime::from_pack("local", &pack, config).unwrap()
+    }
+
+    fn response(
+        runtime: &HttpRuntime,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> HttpResponse {
+        runtime.handle_request(HttpRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            headers: headers
+                .iter()
+                .map(|(key, value)| (key.to_ascii_lowercase(), (*value).to_string()))
+                .collect(),
+            body: body.to_string(),
+        })
     }
 
     fn request(
@@ -1425,17 +1594,7 @@ mod tests {
         headers: &[(&str, &str)],
         body: &str,
     ) -> Value {
-        runtime
-            .handle_request(HttpRequest {
-                method: method.to_string(),
-                path: path.to_string(),
-                headers: headers
-                    .iter()
-                    .map(|(key, value)| (key.to_ascii_lowercase(), (*value).to_string()))
-                    .collect(),
-                body: body.to_string(),
-            })
-            .body
+        response(runtime, method, path, headers, body).body
     }
 
     fn tenant_headers() -> [(&'static str, &'static str); 2] {
@@ -1511,6 +1670,55 @@ mod tests {
             "greentic.sorx.promotion-status.v1"
         );
         assert_eq!(promotion_status["registry_backed"], false);
+    }
+
+    #[test]
+    fn shared_secret_auth_protects_http_surface() {
+        // SAFETY: this test sets a unique process env var before constructing the runtime
+        // and never mutates it again.
+        unsafe {
+            std::env::set_var("SORX_TEST_HTTP_INGEST_SECRET", "correct-secret");
+        }
+        let mut answers = answers("local");
+        answers["server"]["auth"] = json!({
+            "mode": "shared_secret",
+            "shared_secret_ref": "env:SORX_TEST_HTTP_INGEST_SECRET"
+        });
+        let runtime = runtime_with_answers(answers);
+
+        assert_eq!(
+            response(&runtime, "GET", "/healthz", &[], "").status,
+            200,
+            "healthz remains unauthenticated for probes"
+        );
+
+        let unauthorized = response(&runtime, "GET", "/v1/sorx/routes", &[], "");
+        assert_eq!(unauthorized.status, 401);
+        assert_eq!(unauthorized.body["error"]["code"], "SORX_UNAUTHORIZED");
+
+        let authorized = response(
+            &runtime,
+            "GET",
+            "/v1/sorx/routes",
+            &[("Authorization", "Bearer correct-secret")],
+            "",
+        );
+        assert_eq!(authorized.status, 200);
+        assert_eq!(authorized.body["schema"], "greentic.sorx.routes.v1");
+
+        let authorized_with_ingest_header = response(
+            &runtime,
+            "POST",
+            "/v1/agent/tenants/create",
+            &[
+                ("X-Greentic-Sorx-Secret", "correct-secret"),
+                ("X-Greentic-Tenant-Id", "tenant-a"),
+                ("X-Greentic-Caller-Id", "tester"),
+            ],
+            r#"{"id":"tenant-1","name":"Acme","active":true}"#,
+        );
+        assert_eq!(authorized_with_ingest_header.status, 200);
+        assert_eq!(authorized_with_ingest_header.body["ok"], true);
     }
 
     #[test]
@@ -1685,6 +1893,39 @@ mod tests {
         );
         assert_eq!(queried["result"]["records"].as_array().unwrap().len(), 1);
         assert_eq!(queried["result"]["records"][0]["id"], "tenant-1");
+
+        let first_code = request(
+            &runtime,
+            "POST",
+            "/v1/agent/tenants/generate-code",
+            &tenant_headers(),
+            r#"{"id":"tenant-1"}"#,
+        );
+        assert_eq!(first_code["ok"], true);
+        assert_eq!(first_code["endpoint_id"], "tenant.generate_code");
+        let code = first_code["result"]["code"].as_str().unwrap().to_string();
+        assert!(!code.is_empty());
+
+        let second_code = request(
+            &runtime,
+            "POST",
+            "/v1/agent/tenants/generate-code",
+            &tenant_headers(),
+            r#"{"id":"tenant-1"}"#,
+        );
+        assert_eq!(second_code["result"]["code"], code);
+
+        let queried_with_code = request(
+            &runtime,
+            "POST",
+            "/v1/agent/tenants/query",
+            &tenant_headers(),
+            r#"{"filter":{"id":"tenant-1"}}"#,
+        );
+        assert_eq!(
+            queried_with_code["result"]["records"][0]["data"]["code"],
+            code
+        );
 
         let active_by_landlord = request(
             &runtime,

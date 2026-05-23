@@ -41,6 +41,46 @@ fn gateway() -> Value {
                 "collection": "tenants",
                 "provider_binding": "store",
                 "risk": "high"
+            },
+            {
+                "endpoint_id": "tenant.generate_code",
+                "operation_id": "tenant.generate_code",
+                "operation": "command",
+                "method": "POST",
+                "path": "/v1/tenants/generate-code",
+                "entity": "Tenant",
+                "collection": "tenants",
+                "provider_binding": "store",
+                "risk": "low",
+                "command": {
+                    "kind": "record_mutation",
+                    "action": "generate_code",
+                    "steps": [
+                        {
+                            "op": "find_one",
+                            "as": "record",
+                            "where": { "id": "$input.id" },
+                            "required": true
+                        },
+                        {
+                            "op": "update_where",
+                            "as": "update",
+                            "where": { "id": "$input.id" },
+                            "set": {
+                                "code": {
+                                    "coalesce": [
+                                        "$steps.record.data.code",
+                                        "$generated.short_code"
+                                    ]
+                                }
+                            }
+                        }
+                    ],
+                    "return": {
+                        "id": "$input.id",
+                        "code": "$steps.update.records.0.data.code"
+                    }
+                }
             }
         ]
     })
@@ -59,6 +99,10 @@ fn tools() -> Value {
             {
                 "name": "sorla_terminate_tenant",
                 "endpoint_id": "tenant.terminate"
+            },
+            {
+                "name": "sorla_generate_code",
+                "endpoint_id": "tenant.generate_code"
             }
         ]
     })
@@ -126,6 +170,43 @@ fn mcp_create_tenant_uses_same_runtime_router() {
         .unwrap();
     assert_eq!(result.status, EndpointStatus::Created);
     assert_eq!(result.output["id"], "tenant-1");
+}
+
+#[test]
+fn mcp_command_tool_uses_command_executor() {
+    let (runtime, _) = runtime(None);
+    runtime
+        .call_tool(
+            "sorla_create_tenant",
+            "tenant-a",
+            caller(),
+            json!({ "id": "tenant-1", "name": "Acme", "active": true }),
+            None,
+        )
+        .unwrap();
+    let first = runtime
+        .call_tool(
+            "sorla_generate_code",
+            "tenant-a",
+            caller(),
+            json!({ "id": "tenant-1" }),
+            None,
+        )
+        .unwrap();
+    assert_eq!(first.status, EndpointStatus::Ok);
+    let code = first.output["result"]["code"].as_str().unwrap().to_string();
+    assert!(!code.is_empty());
+
+    let second = runtime
+        .call_tool(
+            "sorla_generate_code",
+            "tenant-a",
+            caller(),
+            json!({ "id": "tenant-1" }),
+            None,
+        )
+        .unwrap();
+    assert_eq!(second.output["result"]["code"], code);
 }
 
 #[test]

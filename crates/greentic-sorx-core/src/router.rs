@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::{
-    ApprovalRequirement, EndpointDefinition, EndpointMethod, IndexRequirement, OperationKind,
-    QueryPlan, RiskLevel, SorxError, SorxResult, TraversalRequirement, ViewTransform,
+    ApprovalRequirement, CommandSpec, CommandStep, EndpointDefinition, EndpointMethod,
+    IndexRequirement, OperationKind, QueryPlan, RiskLevel, SorxError, SorxResult,
+    TraversalRequirement, ViewTransform,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -84,7 +85,7 @@ fn parse_endpoint(
     let operation_id = string_field(value, "operation_id")
         .or_else(|| string_field(value, "operationId"))
         .unwrap_or_else(|| endpoint_id.clone());
-    let operation = string_field(value, "operation")
+    let mut operation = string_field(value, "operation")
         .and_then(|value| OperationKind::parse(&value))
         .or_else(|| infer_operation(&operation_id))
         .ok_or_else(|| {
@@ -94,6 +95,9 @@ fn parse_endpoint(
                 &path,
             )
         })?;
+    if matches!(operation, OperationKind::Command(_)) {
+        operation = OperationKind::Command(parse_command_spec(value.get("command"), &path)?);
+    }
     let method = string_field(value, "method")
         .and_then(|value| EndpointMethod::parse(&value))
         .ok_or_else(|| missing(&path, "method"))?;
@@ -191,6 +195,151 @@ fn parse_query_plan(value: Option<&Value>) -> QueryPlan {
         traversal: object
             .get("traversal")
             .and_then(parse_traversal_requirement),
+    }
+}
+
+fn parse_command_spec(value: Option<&Value>, path: &str) -> SorxResult<CommandSpec> {
+    let Some(value) = value else {
+        return Ok(CommandSpec::default());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| SorxError::at_path("invalid_gateway", "command must be an object", path))?;
+    let steps_value = object
+        .get("steps")
+        .or_else(|| object.get("effects"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut steps = Vec::new();
+    for (index, step) in steps_value.iter().enumerate() {
+        steps.push(parse_command_step(
+            step,
+            &format!("{path}.command.steps[{index}]"),
+        )?);
+    }
+    Ok(CommandSpec {
+        kind: string_field(value, "kind"),
+        action: string_field(value, "action"),
+        target: string_field(value, "target"),
+        idempotency: string_field(value, "idempotency"),
+        steps,
+        return_value: object
+            .get("return")
+            .or_else(|| object.get("output"))
+            .cloned(),
+    })
+}
+
+fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
+    let object = value.as_object().ok_or_else(|| {
+        SorxError::at_path("invalid_gateway", "command step must be an object", path)
+    })?;
+    let op = string_field(value, "op")
+        .or_else(|| string_field(value, "type"))
+        .ok_or_else(|| {
+            SorxError::at_path("invalid_gateway", "command step is missing op/type", path)
+        })?;
+    match op.as_str() {
+        "create" => Ok(CommandStep::Create {
+            as_name: string_field(value, "as"),
+            entity: string_field(value, "entity"),
+            collection: string_field(value, "collection"),
+            input: object
+                .get("input")
+                .or_else(|| object.get("values"))
+                .cloned(),
+        }),
+        "delete_where" => Ok(CommandStep::DeleteWhere {
+            as_name: string_field(value, "as"),
+            entity: string_field(value, "entity"),
+            collection: string_field(value, "collection"),
+            r#where: object
+                .get("where")
+                .or_else(|| object.get("filter"))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+        }),
+        "update_where" => Ok(CommandStep::UpdateWhere {
+            as_name: string_field(value, "as"),
+            entity: string_field(value, "entity"),
+            collection: string_field(value, "collection"),
+            r#where: object
+                .get("where")
+                .or_else(|| object.get("filter"))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+            set: object
+                .get("set")
+                .or_else(|| object.get("patch"))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+        }),
+        "query" => Ok(CommandStep::Query {
+            as_name: string_field(value, "as"),
+            entity: string_field(value, "entity"),
+            collection: string_field(value, "collection"),
+            r#where: object
+                .get("where")
+                .or_else(|| object.get("filter"))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+        }),
+        "find_one" | "query_one" => Ok(CommandStep::FindOne {
+            as_name: string_field(value, "as"),
+            entity: string_field(value, "entity"),
+            collection: string_field(value, "collection"),
+            r#where: object
+                .get("where")
+                .or_else(|| object.get("filter"))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+            required: object
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }),
+        "emit_event" => {
+            let event = string_field(value, "event").ok_or_else(|| {
+                SorxError::at_path("invalid_gateway", "emit_event step is missing event", path)
+            })?;
+            Ok(CommandStep::EmitEvent {
+                as_name: string_field(value, "as"),
+                event,
+                payload: object
+                    .get("payload")
+                    .or_else(|| object.get("data"))
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
+                stream: string_field(value, "stream"),
+            })
+        }
+        "foreach" => {
+            let items = object.get("items").cloned().ok_or_else(|| {
+                SorxError::at_path("invalid_gateway", "foreach step is missing items", path)
+            })?;
+            let nested = object
+                .get("do")
+                .or_else(|| object.get("steps"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    SorxError::at_path("invalid_gateway", "foreach step is missing do steps", path)
+                })?;
+            let mut steps = Vec::new();
+            for (index, step) in nested.iter().enumerate() {
+                steps.push(parse_command_step(step, &format!("{path}.do[{index}]"))?);
+            }
+            Ok(CommandStep::Foreach {
+                as_name: string_field(value, "as"),
+                items,
+                steps,
+            })
+        }
+        _ => Err(SorxError::at_path(
+            "invalid_gateway",
+            format!("unsupported command step `{op}`"),
+            path,
+        )),
     }
 }
 

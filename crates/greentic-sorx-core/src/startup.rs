@@ -37,6 +37,13 @@ pub struct SorxRuntimeConfig {
 pub struct ServerConfig {
     pub bind: String,
     pub public_base_url: Option<String>,
+    pub auth: ServerAuthConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerAuthConfig {
+    pub mode: String,
+    pub shared_secret_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,7 +177,14 @@ pub fn default_start_schema() -> Value {
                 "required": ["bind", "public_base_url"],
                 "properties": {
                     "bind": { "type": "string", "default": "127.0.0.1:8787" },
-                    "public_base_url": { "type": "string" }
+                    "public_base_url": { "type": "string" },
+                    "auth": {
+                        "type": "object",
+                        "properties": {
+                            "mode": { "type": "string", "enum": ["none", "shared_secret"], "default": "none" },
+                            "shared_secret_ref": { "type": "string" }
+                        }
+                    }
                 }
             },
             "mcp": {
@@ -384,6 +398,7 @@ pub fn runtime_config_from_answers(
     })?;
     let tenant = object_value(object, "tenant")?;
     let server = object_value(object, "server")?;
+    let server_auth = server.get("auth").and_then(Value::as_object);
     let mcp = object.get("mcp").and_then(Value::as_object);
     let providers = object_value(object, "providers")?;
     let bindings = object.get("bindings").and_then(Value::as_object);
@@ -400,6 +415,10 @@ pub fn runtime_config_from_answers(
         server: ServerConfig {
             bind: string_at(server, "bind").unwrap_or_else(|| "127.0.0.1:8787".to_string()),
             public_base_url: string_at(server, "public_base_url"),
+            auth: ServerAuthConfig {
+                mode: string_at_opt(server_auth, "mode").unwrap_or_else(|| "none".to_string()),
+                shared_secret_ref: string_at_opt(server_auth, "shared_secret_ref"),
+            },
         },
         mcp: McpConfig {
             enabled: bool_at(mcp, "enabled").unwrap_or(false),
@@ -524,7 +543,11 @@ pub fn build_startup_plan(
         },
         "server": {
             "bind": config.server.bind,
-            "public_base_url": config.server.public_base_url
+            "public_base_url": config.server.public_base_url,
+            "auth": {
+                "mode": config.server.auth.mode,
+                "shared_secret_configured": config.server.auth.shared_secret_ref.is_some()
+            }
         },
         "mcp": {
             "enabled": config.mcp.enabled,
@@ -786,6 +809,7 @@ fn is_secret_key(key: &str) -> bool {
 fn looks_like_secret_ref(value: &str) -> bool {
     value.starts_with("secret:")
         || value.starts_with("secrets.")
+        || value.starts_with("env:")
         || value.starts_with("ref:")
         || value.starts_with("vault:")
         || value.starts_with("${")
@@ -926,6 +950,7 @@ mod tests {
             normalize_start_answers(&default_start_schema(), &full_answers(), true).unwrap();
         assert_eq!(normalized.answers["tenant"]["environment"], "local");
         assert_eq!(normalized.answers["server"]["bind"], "127.0.0.1:8787");
+        assert_eq!(normalized.answers["server"]["auth"]["mode"], "none");
         assert_eq!(
             normalized.answers["policy"]["approvals"]["high"],
             "require_approval"
@@ -995,6 +1020,22 @@ mod tests {
             err.issues
                 .iter()
                 .any(|issue| issue.path == "providers.store.client_secret")
+        );
+    }
+
+    #[test]
+    fn env_secret_refs_are_allowed_for_http_auth() {
+        let mut answers = full_answers();
+        answers["server"]["auth"] = json!({
+            "mode": "shared_secret",
+            "shared_secret_ref": "env:SORX_HTTP_INGEST_SECRET"
+        });
+        let normalized = normalize_start_answers(&default_start_schema(), &answers, true).unwrap();
+        let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
+        assert_eq!(config.server.auth.mode, "shared_secret");
+        assert_eq!(
+            config.server.auth.shared_secret_ref.as_deref(),
+            Some("env:SORX_HTTP_INGEST_SECRET")
         );
     }
 

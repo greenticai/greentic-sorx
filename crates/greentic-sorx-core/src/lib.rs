@@ -44,9 +44,10 @@ pub use ghcr_webhook::{
 };
 pub use mcp::{McpRuntime, McpToolDefinition, McpToolList, mcp_tools_from_metadata};
 pub use model::{
-    ApprovalRequirement, CallerContext, EndpointDefinition, EndpointInvocation, EndpointMethod,
-    EndpointResult, EndpointStatus, IndexRequirement, InvocationSource, OperationKind, QueryPlan,
-    RiskLevel, RuntimePack, SorxEvent, TraversalRequirement, ViewTransform,
+    ApprovalRequirement, CallerContext, CommandSpec, CommandStep, EndpointDefinition,
+    EndpointInvocation, EndpointMethod, EndpointResult, EndpointStatus, IndexRequirement,
+    InvocationSource, OperationKind, QueryPlan, RiskLevel, RuntimePack, SorxEvent,
+    TraversalRequirement, ViewTransform,
 };
 pub use ontology_graph::{
     OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,

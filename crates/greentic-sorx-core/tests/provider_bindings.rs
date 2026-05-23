@@ -5,8 +5,8 @@ use greentic_sorx_core::{
     ExternalRefsOp, FoundationDbProviderAdapter, FoundationDbProviderConfig, GetOp, IndexQueryOp,
     MemoryStoreProvider, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp,
     QueryResult, SorStoreProvider, SorxCanonicalStore, SorxRuntime, StoreEvidenceOp,
-    StoreProviderKind, UpdateOp, default_start_schema, invocation, runtime_config_from_answers,
-    runtime_pack,
+    StoreProviderKind, TraverseOp, UpdateOp, default_start_schema, invocation,
+    runtime_config_from_answers, runtime_pack,
 };
 use serde_json::{Value, json};
 
@@ -413,6 +413,144 @@ fn foundationdb_adapter_persists_store_operations() {
         .unwrap();
     assert_eq!(query.records[0].id, "tenant-1");
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn foundationdb_adapter_delegates_canonical_store_operations() {
+    let path = unique_store_path("canonical");
+    let provider = FoundationDbProviderAdapter::new(FoundationDbProviderConfig {
+        cluster_file: None,
+        database: Some(path.display().to_string()),
+        config_ref: None,
+    })
+    .unwrap();
+    let namespace = ProviderNamespace {
+        tenant_id: "tenant-a".to_string(),
+        sor_name: "landlord".to_string(),
+    };
+    provider
+        .create(CreateOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            input: json!({ "id": "tenant-1", "property_id": "property-1" }),
+            idempotency_key: None,
+        })
+        .unwrap();
+
+    let indexed = provider
+        .query_index(IndexQueryOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            index: "by_property".to_string(),
+            filter: json!({ "property_id": "property-1" }),
+        })
+        .unwrap();
+    assert_eq!(indexed.records[0].id, "tenant-1");
+
+    let traversed = provider
+        .traverse(TraverseOp {
+            namespace: namespace.clone(),
+            root_entity: "Tenant".to_string(),
+            root_collection: "tenants".to_string(),
+            root_id: "tenant-1".to_string(),
+            max_depth: 1,
+            relationships: vec![],
+        })
+        .unwrap();
+    assert_eq!(traversed.records[0].id, "tenant-1");
+
+    let refs = provider
+        .get_external_refs(ExternalRefsOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap();
+    assert!(refs.refs.is_empty());
+
+    provider
+        .store_evidence(StoreEvidenceOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+            evidence: json!({ "evidence_id": "ev-1" }),
+        })
+        .unwrap();
+    let evidence = provider
+        .get_evidence(ExternalRefsOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(evidence.evidence[0]["evidence_id"], "ev-1");
+
+    let deleted = provider
+        .delete(DeleteOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap();
+    assert!(deleted.deleted);
+    let missing = provider
+        .get(GetOp {
+            namespace: ProviderNamespace {
+                tenant_id: "tenant-a".to_string(),
+                sor_name: "landlord".to_string(),
+            },
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap();
+    assert!(missing.is_none());
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn foundationdb_config_ref_uses_stable_persistence_path() {
+    let config = FoundationDbProviderConfig {
+        cluster_file: Some("cluster-a".to_string()),
+        database: Some("logical-db".to_string()),
+        config_ref: Some(format!(
+            "providers.foundationdb.coverage.{}",
+            std::process::id()
+        )),
+    };
+    let provider = FoundationDbProviderAdapter::new(config.clone()).unwrap();
+    let namespace = ProviderNamespace {
+        tenant_id: "tenant-a".to_string(),
+        sor_name: "landlord".to_string(),
+    };
+    provider
+        .create(CreateOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            input: json!({ "id": "tenant-stable", "name": "Stable" }),
+            idempotency_key: None,
+        })
+        .unwrap();
+
+    let restarted = FoundationDbProviderAdapter::new(config).unwrap();
+    let fetched = restarted
+        .get(GetOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-stable".to_string(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.data["name"], "Stable");
 }
 
 fn unique_store_path(name: &str) -> std::path::PathBuf {

@@ -23,7 +23,8 @@ deployment registry and public rollout work.
 - Unknown answer keys are rejected unless the embedded schema permits additional
   properties.
 - Secret-like keys such as `password`, `api_key`, `client_secret`, and token
-  fields must use references such as `secret:`, `vault:`, `ref:`, or `${...}`.
+  fields must use references such as `secret:`, `env:`, `vault:`, `ref:`, or
+  `${...}`.
 - Direct provider `config` is accepted only in `local` or `test`
   environments. Other environments must use `config_ref`.
 - Normalized answers and dry-run plans expose whether direct config exists, but
@@ -33,6 +34,12 @@ deployment registry and public rollout work.
 
 - Outside `local`, HTTP requests must include `X-Greentic-Tenant-Id` and
   `X-Greentic-Caller-Id`.
+- HTTP ingest can be protected with startup answers
+  `server.auth.mode = "shared_secret"` and
+  `server.auth.shared_secret_ref = "env:SORX_HTTP_INGEST_SECRET"`. When
+  enabled, SORX APIs and generated routes require either
+  `Authorization: Bearer <secret>` or `X-Greentic-Sorx-Secret: <secret>`;
+  health probes remain unauthenticated.
 - Generated routes use the endpoint input schema from `agent-gateway.json` for
   required-field and scalar validation.
 - Locked business action invocation uses explicit URL action id/version plus
