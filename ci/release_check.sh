@@ -104,6 +104,8 @@ if "Publish must run from the main branch" not in publish_text:
 binaries_text = BINARIES_WORKFLOW.read_text()
 if "workflow_dispatch:" not in binaries_text:
     fail("release-binaries workflow must be dispatchable by publish.yml")
+if "contents: write" not in binaries_text or "packages: write" not in binaries_text:
+    fail("release-binaries workflow must grant contents and packages write permissions to the reusable release workflow")
 if "\n  push:" in binaries_text or "\npush:" in binaries_text:
     fail("release-binaries workflow must not trigger directly from pushes; publish.yml orchestrates main releases")
 if "if: github.ref_type != 'tag'" not in binaries_text:
