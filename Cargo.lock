@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-sorx"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ciborium",
  "clap",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-sorx-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-sorx-pack"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ciborium",
  "hex",
