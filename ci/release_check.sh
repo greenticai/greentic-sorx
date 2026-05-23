@@ -88,6 +88,10 @@ if "branches:" not in publish_text or "      - main" not in publish_text:
     fail("publish workflow must trigger from main branch pushes")
 if "Create or verify release tag" not in publish_text:
     fail("publish workflow must create or verify the vX.Y.Z release tag before binary release")
+if "should_publish:" not in publish_text or "should_publish=false" not in publish_text:
+    fail("publish workflow must skip release jobs when the version tag already exists on another commit")
+if "already tagged" not in publish_text:
+    fail("publish workflow must explain skipped releases caused by an existing version tag")
 dispatches_binaries_on_ref = any(
     "gh workflow run release-binaries.yml" in line and re.search(r"(^|\s)--ref(\s|=)", line)
     for line in publish_text.splitlines()
@@ -98,6 +102,8 @@ if "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" not in publish_text:
     fail("publish workflow must pass secrets.GITHUB_TOKEN to gh when dispatching release-binaries.yml")
 if "gh run watch" not in publish_text:
     fail("publish workflow must wait for release-binaries.yml before publishing crates")
+if "if: needs.verify.outputs.should_publish == 'true'" not in publish_text:
+    fail("release jobs must be conditional on verify.should_publish")
 if "publish-crates:" not in publish_text or "release-binaries" not in publish_text.split("publish-crates:", 1)[1].split("environment:", 1)[0]:
     fail("publish-crates must depend on release-binaries")
 if "Publish must run from the main branch" not in publish_text:
