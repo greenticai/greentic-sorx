@@ -94,6 +94,8 @@ dispatches_binaries_on_ref = any(
 )
 if not dispatches_binaries_on_ref:
     fail("publish workflow must dispatch release-binaries.yml on the version tag")
+if "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" not in publish_text:
+    fail("publish workflow must pass secrets.GITHUB_TOKEN to gh when dispatching release-binaries.yml")
 if "gh run watch" not in publish_text:
     fail("publish workflow must wait for release-binaries.yml before publishing crates")
 if "publish-crates:" not in publish_text or "release-binaries" not in publish_text.split("publish-crates:", 1)[1].split("environment:", 1)[0]:
@@ -106,6 +108,8 @@ if "workflow_dispatch:" not in binaries_text:
     fail("release-binaries workflow must be dispatchable by publish.yml")
 if "contents: write" not in binaries_text or "packages: write" not in binaries_text:
     fail("release-binaries workflow must grant contents and packages write permissions to the reusable release workflow")
+if "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}" not in binaries_text:
+    fail("release-binaries workflow must pass secrets.GITHUB_TOKEN to gh when re-dispatching on the tag ref")
 if "\n  push:" in binaries_text or "\npush:" in binaries_text:
     fail("release-binaries workflow must not trigger directly from pushes; publish.yml orchestrates main releases")
 if "if: github.ref_type != 'tag'" not in binaries_text:
