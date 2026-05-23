@@ -1,9 +1,11 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use greentic_qa_lib::{I18nConfig, WizardDriver, WizardFrontend, WizardRunConfig};
 use greentic_sorx_core::{
     CreateDeploymentRequest, DeploymentVisibility, DeterministicEvidenceProvider, EndpointRouter,
     EvidenceProvider, EvidenceQueryFilter, EvidenceQueryResult, GhcrWebhookConfig,
@@ -28,6 +30,8 @@ use sha2::{Digest, Sha256};
 
 mod http_runtime;
 mod validation;
+
+const TRANSIENT_HTTP_INGEST_SECRET_ENV: &str = "GREENTIC_SORX_TRANSIENT_HTTP_INGEST_SECRET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SorxExitCode {
@@ -966,16 +970,18 @@ fn dispatch(
             emit_answers,
             json,
         } => {
-            if !schema && answers.is_none() {
+            if !schema && answers.is_none() && _context.non_interactive {
                 return Err(CliError::usage(
-                    "start requires --schema or --answers <FILE>",
+                    "start requires --schema or --answers <FILE> in non-interactive mode",
                 ));
             }
             run_start(pack, schema, answers, dry_run, emit_answers, json, _context)
         }
         Commands::Run { pack, answers } => {
-            if answers.is_none() {
-                return Err(CliError::usage("run requires --answers <FILE>"));
+            if answers.is_none() && _context.non_interactive {
+                return Err(CliError::usage(
+                    "run requires --answers <FILE> in non-interactive mode",
+                ));
             }
             run_start(pack, false, answers, false, false, false, _context)
         }
@@ -2469,6 +2475,812 @@ fn ontology_graph_hash(ontology: &greentic_sorx_pack::OntologyAssets) -> String 
     format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
 }
 
+fn normalize_or_prompt_start_answers(
+    pack_name: &str,
+    start_schema: &serde_json::Value,
+    answers: Option<PathBuf>,
+    context: &SorxCommandContext,
+) -> CliResult<greentic_sorx_core::SorxNormalizedAnswers> {
+    let effective_schema = effective_start_schema(start_schema);
+    let mut raw_answers = match answers {
+        Some(path) => {
+            let raw = fs::read_to_string(&path).map_err(|err| {
+                CliError::answers(format!("failed to read answers {}: {err}", path.display()))
+            })?;
+            serde_json::from_str(&raw).map_err(|err| {
+                CliError::answers(format!(
+                    "answers {} are invalid JSON: {err}",
+                    path.display()
+                ))
+            })?
+        }
+        None => serde_json::json!({}),
+    };
+    materialize_required_object_answers(&effective_schema, &mut raw_answers);
+
+    match normalize_start_answers(&effective_schema, &raw_answers, context.non_interactive) {
+        Ok(normalized) => Ok(normalized),
+        Err(err) if err.code == "missing_answers" && !context.non_interactive => {
+            eprintln!("Startup answers are incomplete; launching greentic-qa wizard.");
+            let prompted = run_greentic_qa_start_wizard(pack_name, start_schema, &raw_answers)?;
+            let mut prompted = prompted;
+            materialize_required_object_answers(&effective_schema, &mut prompted);
+            normalize_start_answers(&effective_schema, &prompted, context.non_interactive)
+                .map_err(|err| CliError::answers(err.to_string()))
+        }
+        Err(err) => Err(CliError::answers(err.to_string())),
+    }
+}
+
+fn run_greentic_qa_start_wizard(
+    pack_name: &str,
+    start_schema: &serde_json::Value,
+    initial_answers: &serde_json::Value,
+) -> CliResult<serde_json::Value> {
+    let spec = startup_schema_to_qa_form(pack_name, start_schema);
+    let flat_answers = flatten_answers(qa_answer_payload(initial_answers));
+
+    let config = WizardRunConfig {
+        spec_json: serde_json::to_string(&spec).map_err(|err| {
+            CliError::answers(format!("failed to encode greentic-qa form: {err}"))
+        })?,
+        initial_answers_json: Some(serde_json::to_string(&flat_answers).map_err(|err| {
+            CliError::answers(format!(
+                "failed to encode greentic-qa initial answers: {err}"
+            ))
+        })?),
+        frontend: WizardFrontend::JsonUi,
+        i18n: I18nConfig::default(),
+        verbose: false,
+    };
+    let mut driver = WizardDriver::new(config).map_err(|err| {
+        CliError::answers(format!("failed to initialize greentic-qa wizard: {err}"))
+    })?;
+
+    loop {
+        let _ = driver
+            .next_payload_json()
+            .map_err(|err| CliError::answers(format!("greentic-qa wizard failed: {err}")))?;
+        if driver.is_complete() {
+            break;
+        }
+        let ui = driver
+            .last_ui_json()
+            .ok_or_else(|| CliError::answers("greentic-qa wizard did not produce a UI payload"))?;
+        let ui: serde_json::Value = serde_json::from_str(ui).map_err(|err| {
+            CliError::answers(format!("greentic-qa wizard emitted invalid UI JSON: {err}"))
+        })?;
+        let question_id = ui
+            .get("next_question_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                CliError::answers("greentic-qa wizard did not select a next question")
+            })?;
+        let question = find_qa_question(&ui, question_id)?;
+        let answer = prompt_qa_question(&question)?;
+        let _submit = driver
+            .submit_patch_json(&serde_json::json!({ question_id: answer }).to_string())
+            .map_err(|err| {
+                CliError::answers(format!("greentic-qa wizard rejected answer: {err}"))
+            })?;
+    }
+
+    let result = driver
+        .finish()
+        .map_err(|err| CliError::answers(format!("greentic-qa wizard did not finish: {err}")))?;
+    let mut answers = unflatten_answers(
+        qa_answer_payload(initial_answers),
+        &result.answer_set.answers,
+    );
+    materialize_required_object_answers(&effective_start_schema(start_schema), &mut answers);
+    Ok(answers)
+}
+
+fn effective_start_schema(schema: &serde_json::Value) -> serde_json::Value {
+    if is_legacy_start_answers_schema(schema) {
+        legacy_start_schema_to_json_schema(schema)
+    } else {
+        schema.clone()
+    }
+}
+
+fn is_legacy_start_answers_schema(schema: &serde_json::Value) -> bool {
+    schema.get("schema").and_then(serde_json::Value::as_str)
+        == Some("greentic.sorx.start.answers.v1")
+        && schema.get("type").is_none()
+        && schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .is_some()
+}
+
+fn legacy_start_schema_to_json_schema(schema: &serde_json::Value) -> serde_json::Value {
+    let mut out = greentic_sorx_core::default_start_schema();
+    clear_required_fields(&mut out);
+    if let Some(title) = schema.get("title").cloned()
+        && let Some(object) = out.as_object_mut()
+    {
+        object.insert("title".to_string(), title);
+    }
+    set_schema_default(&mut out, "tenant.tenant_id", serde_json::json!("local"));
+    set_schema_default(
+        &mut out,
+        "server.public_base_url",
+        serde_json::json!("http://127.0.0.1:8787"),
+    );
+    for path in legacy_required_paths(schema) {
+        if path == "providers.store.config_ref" {
+            continue;
+        }
+        require_schema_path(&mut out, &path);
+    }
+    out
+}
+
+fn clear_required_fields(schema: &mut serde_json::Value) {
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("required");
+        if let Some(properties) = object
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for child in properties.values_mut() {
+                clear_required_fields(child);
+            }
+        }
+        if let Some(additional) = object.get_mut("additionalProperties")
+            && additional.is_object()
+        {
+            clear_required_fields(additional);
+        }
+        if let Some(items) = object.get_mut("items") {
+            clear_required_fields(items);
+        }
+    }
+}
+
+fn legacy_required_paths(schema: &serde_json::Value) -> Vec<String> {
+    schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn require_schema_path(schema: &mut serde_json::Value, path: &str) {
+    let mut current = schema;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        add_required_key(current, part);
+        if parts.peek().is_none() {
+            return;
+        }
+        let Some(next) = current
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|properties| properties.get_mut(part))
+        else {
+            return;
+        };
+        current = next;
+    }
+}
+
+fn add_required_key(schema: &mut serde_json::Value, key: &str) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    let required = object
+        .entry("required".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(values) = required.as_array_mut() else {
+        return;
+    };
+    if !values.iter().any(|value| value.as_str() == Some(key)) {
+        values.push(serde_json::Value::String(key.to_string()));
+    }
+}
+
+fn set_schema_default(schema: &mut serde_json::Value, path: &str, default: serde_json::Value) {
+    let Some(target) = schema_at_path_mut(schema, path) else {
+        return;
+    };
+    if let Some(object) = target.as_object_mut() {
+        object.insert("default".to_string(), default);
+    }
+}
+
+fn schema_at_path_mut<'a>(
+    schema: &'a mut serde_json::Value,
+    path: &str,
+) -> Option<&'a mut serde_json::Value> {
+    let mut current = schema;
+    for part in path.split('.') {
+        current = current
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|properties| properties.get_mut(part))?;
+    }
+    Some(current)
+}
+
+fn find_qa_question(ui: &serde_json::Value, question_id: &str) -> CliResult<serde_json::Value> {
+    ui.get("questions")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|questions| {
+            questions
+                .iter()
+                .find(|question| question["id"].as_str() == Some(question_id))
+                .cloned()
+        })
+        .ok_or_else(|| {
+            CliError::answers(format!(
+                "greentic-qa wizard referenced unknown question `{question_id}`"
+            ))
+        })
+}
+
+fn prompt_qa_question(question: &serde_json::Value) -> CliResult<serde_json::Value> {
+    loop {
+        print_qa_prompt(question)?;
+        let mut input = String::new();
+        let bytes_read = if is_secret_question(question) && std::io::stdin().is_terminal() {
+            input = read_masked_line()?;
+            input.len()
+        } else {
+            std::io::stdin()
+                .read_line(&mut input)
+                .map_err(|err| CliError::answers(format!("failed to read answer: {err}")))?
+        };
+        if bytes_read == 0 {
+            return Err(CliError::answers("greentic-qa wizard reached end of input"));
+        }
+        let trimmed = input.trim();
+        if trimmed.eq_ignore_ascii_case("exit") {
+            return Err(CliError::answers("greentic-qa wizard aborted"));
+        }
+        match parse_qa_answer(question, trimmed) {
+            Ok(value) => return Ok(value),
+            Err(message) => eprintln!("{message}"),
+        }
+    }
+}
+
+fn read_masked_line() -> CliResult<String> {
+    let echo_disabled = std::process::Command::new("stty")
+        .arg("-echo")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    let mut input = String::new();
+    let result = std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|err| CliError::answers(format!("failed to read answer: {err}")));
+    if echo_disabled {
+        let _ = std::process::Command::new("stty").arg("echo").status();
+        println!();
+    }
+    result.map(|_| input)
+}
+
+fn is_secret_question(question: &serde_json::Value) -> bool {
+    question
+        .get("secret")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn print_qa_prompt(question: &serde_json::Value) -> CliResult<()> {
+    let title = question
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| question.get("id").and_then(serde_json::Value::as_str))
+        .unwrap_or("answer");
+    let mut line = title.to_string();
+    if question
+        .get("required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        line.push_str(" *");
+    }
+    if let Some(default) = question
+        .get("default")
+        .and_then(default_answer_display_value)
+    {
+        line.push_str(&format!(" [{default}]"));
+    }
+    if let Some(hint) = qa_answer_hint(question) {
+        line.push(' ');
+        line.push_str(&hint);
+    }
+    println!("{line}");
+    if let Some(description) = question
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+    {
+        println!("{description}");
+    }
+    if question.get("type").and_then(serde_json::Value::as_str) == Some("enum") {
+        for (index, choice) in qa_choices(question).iter().enumerate() {
+            println!("  {}. {}", index + 1, choice);
+        }
+    }
+    print!("> ");
+    std::io::stdout()
+        .flush()
+        .map_err(|err| CliError::answers(format!("failed to flush prompt: {err}")))
+}
+
+fn default_answer_display_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Array(values) => Some(
+            values
+                .iter()
+                .filter_map(default_answer_display_value)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        _ => None,
+    }
+}
+
+fn qa_answer_hint(question: &serde_json::Value) -> Option<String> {
+    if question.get("id").and_then(serde_json::Value::as_str)
+        == Some("server.auth.shared_secret_ref")
+    {
+        return Some("(secret or env:NAME)".to_string());
+    }
+    match question
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("string")
+    {
+        "boolean" => Some("(y/n)".to_string()),
+        "integer" => Some("(integer)".to_string()),
+        "number" => Some("(number)".to_string()),
+        "enum" => Some("(choose a number)".to_string()),
+        "list" => Some("(comma-separated)".to_string()),
+        _ => None,
+    }
+}
+
+fn parse_qa_answer(question: &serde_json::Value, raw: &str) -> Result<serde_json::Value, String> {
+    let value = if raw.is_empty() {
+        question
+            .get("default")
+            .and_then(default_answer_display_value)
+            .unwrap_or_default()
+    } else {
+        raw.to_string()
+    };
+    if value.is_empty() {
+        if question
+            .get("required")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+        {
+            return Err("answer is required".to_string());
+        }
+        return Ok(serde_json::Value::Null);
+    }
+
+    match question
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("string")
+    {
+        "boolean" => parse_qa_bool(&value),
+        "integer" => value
+            .parse::<i64>()
+            .map(|value| serde_json::Value::Number(value.into()))
+            .map_err(|_| "expected integer".to_string()),
+        "number" => value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| "expected finite number".to_string()),
+        "enum" => parse_qa_enum(question, &value),
+        "list" => Ok(serde_json::Value::Array(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(|part| serde_json::Value::String(part.to_string()))
+                .collect(),
+        )),
+        _ if question.get("id").and_then(serde_json::Value::as_str)
+            == Some("server.auth.shared_secret_ref") =>
+        {
+            Ok(serde_json::Value::String(normalize_secret_ref_answer(
+                &value,
+            )))
+        }
+        _ => Ok(serde_json::Value::String(value)),
+    }
+}
+
+fn normalize_secret_ref_answer(value: &str) -> String {
+    if looks_like_secret_reference(value) {
+        value.to_string()
+    } else {
+        // SAFETY: the CLI is single-threaded while collecting startup answers, and the
+        // HTTP runtime resolves this variable immediately afterward in the same process.
+        unsafe {
+            std::env::set_var(TRANSIENT_HTTP_INGEST_SECRET_ENV, value);
+        }
+        format!("env:{TRANSIENT_HTTP_INGEST_SECRET_ENV}")
+    }
+}
+
+fn looks_like_secret_reference(value: &str) -> bool {
+    value.starts_with("env:")
+        || value.starts_with("secret:")
+        || value.starts_with("secrets.")
+        || value.starts_with("ref:")
+        || value.starts_with("vault:")
+        || value.starts_with("${")
+}
+
+fn parse_qa_bool(raw: &str) -> Result<serde_json::Value, String> {
+    match raw.to_lowercase().as_str() {
+        "true" | "t" | "yes" | "y" | "1" => Ok(serde_json::Value::Bool(true)),
+        "false" | "f" | "no" | "n" | "0" => Ok(serde_json::Value::Bool(false)),
+        _ => Err("expected boolean (y/n/true/false)".to_string()),
+    }
+}
+
+fn parse_qa_enum(question: &serde_json::Value, raw: &str) -> Result<serde_json::Value, String> {
+    let choices = qa_choices(question);
+    if let Ok(index) = raw.parse::<usize>()
+        && let Some(choice) = index.checked_sub(1).and_then(|index| choices.get(index))
+    {
+        return Ok(serde_json::Value::String(choice.clone()));
+    }
+    if let Some(choice) = choices
+        .iter()
+        .find(|choice| choice.eq_ignore_ascii_case(raw))
+    {
+        Ok(serde_json::Value::String(choice.clone()))
+    } else {
+        Err(format!(
+            "choose a number 1-{} or one of: {}",
+            choices.len(),
+            choices.join(", ")
+        ))
+    }
+}
+
+fn qa_choices(question: &serde_json::Value) -> Vec<String> {
+    question
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn startup_schema_to_qa_form(pack_name: &str, schema: &serde_json::Value) -> serde_json::Value {
+    let legacy_required_paths = if is_legacy_start_answers_schema(schema) {
+        legacy_required_paths(schema)
+    } else {
+        Vec::new()
+    };
+    let schema = effective_start_schema(schema);
+    let mut questions = Vec::new();
+    if legacy_required_paths.is_empty() {
+        collect_qa_questions(&schema, "", true, &mut questions);
+    } else {
+        collect_legacy_qa_questions(&schema, &legacy_required_paths, &mut questions);
+    }
+    append_http_auth_questions(&mut questions);
+    serde_json::json!({
+        "id": "greentic.sorx.start",
+        "title": schema
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("SORX startup answers"),
+        "version": "0.1.0",
+        "description": format!("Startup answers for {pack_name}."),
+        "progress_policy": {
+            "skip_answered": true,
+            "autofill_defaults": true,
+            "treat_default_as_answered": true
+        },
+        "questions": questions
+    })
+}
+
+fn append_http_auth_questions(questions: &mut Vec<serde_json::Value>) {
+    if !questions
+        .iter()
+        .any(|question| question["id"].as_str() == Some("server.auth.mode"))
+    {
+        questions.push(serde_json::json!({
+            "id": "server.auth.mode",
+            "type": "enum",
+            "title": question_title("server.auth.mode"),
+            "description": "Use shared_secret when this local HTTP runtime is reachable by anything other than your own shell.",
+            "required": true,
+            "choices": ["none", "shared_secret"]
+        }));
+    }
+    if !questions
+        .iter()
+        .any(|question| question["id"].as_str() == Some("server.auth.shared_secret_ref"))
+    {
+        questions.push(serde_json::json!({
+            "id": "server.auth.shared_secret_ref",
+            "type": "string",
+            "title": question_title("server.auth.shared_secret_ref"),
+            "description": "Type a secret for this run, or use env:NAME to read an environment variable.",
+            "required": true,
+            "secret": true,
+            "visible_if": {
+                "op": "eq",
+                "left": {
+                    "op": "answer",
+                    "path": "/server.auth.mode"
+                },
+                "right": {
+                    "op": "literal",
+                    "value": "shared_secret"
+                }
+            }
+        }));
+    }
+}
+
+fn collect_qa_questions(
+    schema: &serde_json::Value,
+    path: &str,
+    required: bool,
+    questions: &mut Vec<serde_json::Value>,
+) {
+    if schema.get("default").is_some() && !path.is_empty() {
+        return;
+    }
+    if schema.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+        let required_keys = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (key, child) in properties {
+            let child_required = required_keys
+                .iter()
+                .any(|value| value.as_str() == Some(key.as_str()));
+            let child_path = if path.is_empty() {
+                key
+            } else {
+                format!("{path}.{key}")
+            };
+            collect_qa_questions(&child, &child_path, required && child_required, questions);
+        }
+        return;
+    }
+
+    if !required || path.is_empty() {
+        return;
+    }
+
+    questions.push(build_qa_question(schema, path));
+}
+
+fn collect_legacy_qa_questions(
+    schema: &serde_json::Value,
+    paths: &[String],
+    questions: &mut Vec<serde_json::Value>,
+) {
+    for path in paths {
+        if path == "providers.store.config_ref" {
+            continue;
+        }
+        let Some(child_schema) = schema_at_path(schema, path) else {
+            continue;
+        };
+        if child_schema.get("default").is_some() {
+            continue;
+        }
+        questions.push(build_qa_question(child_schema, path));
+    }
+}
+
+fn schema_at_path<'a>(schema: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = schema;
+    for part in path.split('.') {
+        current = current
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get(part))?;
+    }
+    Some(current)
+}
+
+fn build_qa_question(schema: &serde_json::Value, path: &str) -> serde_json::Value {
+    let mut question = serde_json::Map::new();
+    question.insert(
+        "id".to_string(),
+        serde_json::Value::String(path.to_string()),
+    );
+    question.insert(
+        "title".to_string(),
+        serde_json::Value::String(question_title(path)),
+    );
+    question.insert("required".to_string(), serde_json::Value::Bool(true));
+    let kind = match schema.get("type").and_then(serde_json::Value::as_str) {
+        _ if schema.get("enum").is_some() => "enum",
+        Some("boolean") => "boolean",
+        Some("integer") => "integer",
+        Some("number") => "number",
+        Some("array") => "list",
+        _ => "string",
+    };
+    question.insert(
+        "type".to_string(),
+        serde_json::Value::String(kind.to_string()),
+    );
+    if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
+        question.insert(
+            "choices".to_string(),
+            serde_json::Value::Array(
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(|value| serde_json::Value::String(value.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    serde_json::Value::Object(question)
+}
+
+fn question_title(path: &str) -> String {
+    match path {
+        "server.auth.mode" => return "server / http ingest protection".to_string(),
+        "server.auth.shared_secret_ref" => return "server / http ingest secret ref".to_string(),
+        _ => {}
+    }
+    path.split('.')
+        .map(|part| part.replace('_', " "))
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+fn qa_answer_payload(value: &serde_json::Value) -> &serde_json::Value {
+    let Some(object) = value.as_object() else {
+        return value;
+    };
+    if object.contains_key("form_id") && object.contains_key("spec_version") {
+        object.get("answers").unwrap_or(value)
+    } else {
+        value
+    }
+}
+
+fn flatten_answers(value: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    flatten_answers_into(value, "", &mut out);
+    serde_json::Value::Object(out)
+}
+
+fn flatten_answers_into(
+    value: &serde_json::Value,
+    path: &str,
+    out: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                flatten_answers_into(child, &child_path, out);
+            }
+        }
+        serde_json::Value::Null => {}
+        other if !path.is_empty() => {
+            out.insert(path.to_string(), other.clone());
+        }
+        _ => {}
+    }
+}
+
+fn unflatten_answers(
+    initial_answers: &serde_json::Value,
+    flat_answers: &serde_json::Value,
+) -> serde_json::Value {
+    let mut out = initial_answers.clone();
+    let Some(flat) = flat_answers.as_object() else {
+        return out;
+    };
+    for (path, value) in flat {
+        set_nested_answer(&mut out, path, value.clone());
+    }
+    out
+}
+
+fn set_nested_answer(root: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    if !root.is_object() {
+        *root = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let mut current = root;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            if let Some(object) = current.as_object_mut() {
+                object.insert(part.to_string(), value);
+            }
+            return;
+        }
+        let object = current
+            .as_object_mut()
+            .expect("current answer node is always an object");
+        current = object
+            .entry(part.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+    }
+}
+
+fn materialize_required_object_answers(schema: &serde_json::Value, value: &mut serde_json::Value) {
+    if schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        return;
+    }
+    if !value.is_object() {
+        *value = serde_json::Value::Object(serde_json::Map::new());
+    }
+
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let object = value
+        .as_object_mut()
+        .expect("required object materialization always keeps an object");
+
+    for required_key in required.iter().filter_map(serde_json::Value::as_str) {
+        let Some(child_schema) = properties.get(required_key) else {
+            continue;
+        };
+        if child_schema.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+            object
+                .entry(required_key.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        }
+    }
+
+    for (key, child_schema) in properties {
+        if let Some(child_value) = object.get_mut(&key) {
+            materialize_required_object_answers(&child_schema, child_value);
+        }
+    }
+}
+
 fn ontology_audit_event(event: &str, details: serde_json::Value) -> OntologyAuditEvent {
     core_ontology_audit_event(event, "local-cli", details)
 }
@@ -2663,25 +3475,12 @@ fn run_start(
         return Ok(());
     }
 
-    let answers_path = answers.ok_or_else(|| CliError::usage("start requires --answers <FILE>"))?;
-    let raw = fs::read_to_string(&answers_path).map_err(|err| {
-        CliError::answers(format!(
-            "failed to read answers {}: {err}",
-            answers_path.display()
-        ))
-    })?;
-    let answers_json: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
-        CliError::answers(format!(
-            "answers {} are invalid JSON: {err}",
-            answers_path.display()
-        ))
-    })?;
-    let normalized = normalize_start_answers(
+    let normalized = normalize_or_prompt_start_answers(
+        &pack.pack_name,
         &pack.sorx_assets.start_schema_json,
-        &answers_json,
-        context.non_interactive,
-    )
-    .map_err(|err| CliError::answers(err.to_string()))?;
+        answers,
+        context,
+    )?;
 
     if !dry_run && !emit_answers {
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers)
@@ -3015,6 +3814,223 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Commands::Run { .. }));
+    }
+
+    #[test]
+    fn parses_run_alias_without_answers_for_interactive_prompting() {
+        let cli = parse_from(["greentic-sorx", "run", "landlord.gtpack"]).unwrap();
+        assert!(matches!(cli.command, Commands::Run { answers: None, .. }));
+    }
+
+    #[test]
+    fn qa_form_asks_required_non_default_startup_answers() {
+        let form =
+            startup_schema_to_qa_form("landlord", &greentic_sorx_core::default_start_schema());
+        let ids = form["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|question| question["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"tenant.tenant_id"));
+        assert!(ids.contains(&"server.public_base_url"));
+        assert!(ids.contains(&"providers.store.kind"));
+        assert!(ids.contains(&"deployment.tenant_id"));
+        assert!(ids.contains(&"deployment.sor_name"));
+        assert!(ids.contains(&"server.auth.mode"));
+        assert!(ids.contains(&"server.auth.shared_secret_ref"));
+        assert!(!ids.contains(&"server.bind"));
+        assert!(!ids.contains(&"tenant.environment"));
+    }
+
+    #[test]
+    fn legacy_start_schema_questions_follow_required_order() {
+        let schema = serde_json::json!({
+            "schema": "greentic.sorx.start.answers.v1",
+            "title": "Legacy startup answers",
+            "required": [
+                "tenant.tenant_id",
+                "server.bind",
+                "server.public_base_url",
+                "providers.store.kind",
+                "providers.store.config_ref",
+                "policy.approvals.high",
+                "audit.sink"
+            ]
+        });
+        let form = startup_schema_to_qa_form("legacy-pack", &schema);
+        let ids = form["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|question| question["id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "providers.store.kind",
+                "server.auth.mode",
+                "server.auth.shared_secret_ref"
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_start_schema_reports_missing_leaf_answers() {
+        let schema = serde_json::json!({
+            "schema": "greentic.sorx.start.answers.v1",
+            "required": [
+                "tenant.tenant_id",
+                "server.public_base_url",
+                "providers.store.kind",
+                "providers.store.config_ref",
+                "policy.approvals.high",
+                "audit.sink"
+            ]
+        });
+        let effective = effective_start_schema(&schema);
+        let mut answers = serde_json::json!({});
+        materialize_required_object_answers(&effective, &mut answers);
+        let err = normalize_start_answers(&effective, &answers, true).unwrap_err();
+        assert_eq!(err.code, "missing_answers");
+        let paths = err
+            .issues
+            .iter()
+            .map(|issue| issue.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"providers.store.kind"));
+        assert!(!paths.contains(&"tenant.tenant_id"));
+        assert!(!paths.contains(&"server.public_base_url"));
+        assert!(!paths.contains(&"providers.store.config_ref"));
+    }
+
+    #[test]
+    fn legacy_start_schema_defaults_local_runtime_internals() {
+        let schema = serde_json::json!({
+            "schema": "greentic.sorx.start.answers.v1",
+            "required": [
+                "tenant.tenant_id",
+                "server.public_base_url",
+                "providers.store.kind",
+                "providers.store.config_ref",
+                "policy.approvals.high",
+                "audit.sink"
+            ]
+        });
+        let effective = effective_start_schema(&schema);
+        let mut answers = serde_json::json!({
+            "providers": { "store": { "kind": "memory" } }
+        });
+        materialize_required_object_answers(&effective, &mut answers);
+        let normalized = normalize_start_answers(&effective, &answers, true).unwrap();
+        assert_eq!(normalized.answers["tenant"]["tenant_id"], "local");
+        assert_eq!(
+            normalized.answers["server"]["public_base_url"],
+            "http://127.0.0.1:8787"
+        );
+        assert!(normalized.answers["providers"]["store"]["config_ref"].is_null());
+    }
+
+    #[test]
+    fn enum_answers_accept_menu_numbers_and_choice_text() {
+        let question = serde_json::json!({
+            "id": "providers.store.kind",
+            "type": "enum",
+            "title": "Provider",
+            "required": true,
+            "choices": ["memory", "foundationdb"]
+        });
+        assert_eq!(parse_qa_answer(&question, "1").unwrap(), "memory");
+        assert_eq!(parse_qa_answer(&question, "2").unwrap(), "foundationdb");
+        assert_eq!(
+            parse_qa_answer(&question, "foundationdb").unwrap(),
+            "foundationdb"
+        );
+        assert!(
+            parse_qa_answer(&question, "3")
+                .unwrap_err()
+                .contains("choose a number")
+        );
+    }
+
+    #[test]
+    fn secret_ref_answer_accepts_refs_or_transient_secret() {
+        let question = serde_json::json!({
+            "id": "server.auth.shared_secret_ref",
+            "type": "string",
+            "title": "HTTP ingest secret ref",
+            "required": true
+        });
+        assert_eq!(
+            parse_qa_answer(&question, "fff").unwrap(),
+            format!("env:{TRANSIENT_HTTP_INGEST_SECRET_ENV}")
+        );
+        assert_eq!(
+            std::env::var(TRANSIENT_HTTP_INGEST_SECRET_ENV).unwrap(),
+            "fff"
+        );
+        assert_eq!(
+            parse_qa_answer(&question, "env:SORX_HTTP_INGEST_SECRET").unwrap(),
+            "env:SORX_HTTP_INGEST_SECRET"
+        );
+        assert_eq!(
+            parse_qa_answer(&question, "vault:sorx/http").unwrap(),
+            "vault:sorx/http"
+        );
+    }
+
+    #[test]
+    fn qa_answer_flattening_round_trips_nested_answers() {
+        let initial = serde_json::json!({
+            "tenant": { "tenant_id": "acme" },
+            "providers": { "store": { "kind": "memory" } }
+        });
+        let flat = flatten_answers(&initial);
+        assert_eq!(flat["tenant.tenant_id"], "acme");
+        assert_eq!(flat["providers.store.kind"], "memory");
+
+        let merged = unflatten_answers(
+            &initial,
+            &serde_json::json!({
+                "server.public_base_url": "http://127.0.0.1:8787",
+                "deployment.sor_name": "landlord"
+            }),
+        );
+        assert_eq!(merged["tenant"]["tenant_id"], "acme");
+        assert_eq!(merged["server"]["public_base_url"], "http://127.0.0.1:8787");
+        assert_eq!(merged["deployment"]["sor_name"], "landlord");
+    }
+
+    #[test]
+    fn materialized_qa_answers_normalize_with_schema_defaults() {
+        let schema = greentic_sorx_core::default_start_schema();
+        let mut answers = serde_json::json!({
+            "tenant": { "tenant_id": "acme" },
+            "server": { "public_base_url": "http://127.0.0.1:8787" },
+            "providers": { "store": { "kind": "memory" } },
+            "deployment": { "tenant_id": "acme", "sor_name": "landlord" }
+        });
+        materialize_required_object_answers(&schema, &mut answers);
+        let normalized = normalize_start_answers(&schema, &answers, true).unwrap();
+        assert_eq!(
+            normalized.answers["policy"]["approvals"]["high"],
+            "require_approval"
+        );
+        assert_eq!(normalized.answers["audit"]["sink"], "stdout");
+        assert_eq!(normalized.answers["ghcr"]["require_exact_digest"], true);
+    }
+
+    #[test]
+    fn minimal_materialized_answers_are_complete_non_interactively() {
+        let schema = greentic_sorx_core::default_start_schema();
+        let mut answers = serde_json::json!({
+            "tenant": { "tenant_id": "acme" },
+            "server": { "public_base_url": "http://127.0.0.1:8787" },
+            "providers": { "store": { "kind": "memory" } },
+            "deployment": { "tenant_id": "acme", "sor_name": "landlord" }
+        });
+        materialize_required_object_answers(&schema, &mut answers);
+        assert!(normalize_start_answers(&schema, &answers, true).is_ok());
     }
 
     #[test]

@@ -47,7 +47,7 @@ impl RiskLevel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     Create,
@@ -55,6 +55,7 @@ pub enum OperationKind {
     Update,
     Query,
     Delete,
+    Command(CommandSpec),
 }
 
 impl OperationKind {
@@ -65,13 +66,91 @@ impl OperationKind {
             "update" | "patch" => Some(Self::Update),
             "query" | "list" | "search" => Some(Self::Query),
             "delete" | "remove" => Some(Self::Delete),
+            "command" => Some(Self::Command(CommandSpec::default())),
             _ => None,
         }
     }
 
-    pub fn is_mutating(self) -> bool {
-        matches!(self, Self::Create | Self::Update | Self::Delete)
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            Self::Create | Self::Update | Self::Delete | Self::Command(_)
+        )
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub kind: Option<String>,
+    pub action: Option<String>,
+    pub target: Option<String>,
+    pub idempotency: Option<String>,
+    pub steps: Vec<CommandStep>,
+    #[serde(default, rename = "return")]
+    pub return_value: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "op")]
+pub enum CommandStep {
+    Create {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        entity: Option<String>,
+        collection: Option<String>,
+        input: Option<Value>,
+    },
+    DeleteWhere {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        entity: Option<String>,
+        collection: Option<String>,
+        #[serde(default)]
+        r#where: Value,
+    },
+    UpdateWhere {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        entity: Option<String>,
+        collection: Option<String>,
+        #[serde(default)]
+        r#where: Value,
+        #[serde(default)]
+        set: Value,
+    },
+    Query {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        entity: Option<String>,
+        collection: Option<String>,
+        #[serde(default)]
+        r#where: Value,
+    },
+    FindOne {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        entity: Option<String>,
+        collection: Option<String>,
+        #[serde(default)]
+        r#where: Value,
+        #[serde(default)]
+        required: bool,
+    },
+    EmitEvent {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        event: String,
+        #[serde(default)]
+        payload: Value,
+        stream: Option<String>,
+    },
+    Foreach {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        items: Value,
+        #[serde(default, rename = "do")]
+        steps: Vec<CommandStep>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

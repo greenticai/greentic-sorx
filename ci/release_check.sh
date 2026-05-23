@@ -8,6 +8,7 @@ python3 - <<'PY'
 import filecmp
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -87,7 +88,11 @@ if "branches:" not in publish_text or "      - main" not in publish_text:
     fail("publish workflow must trigger from main branch pushes")
 if "Create or verify release tag" not in publish_text:
     fail("publish workflow must create or verify the vX.Y.Z release tag before binary release")
-if "gh workflow run release-binaries.yml --ref" not in publish_text:
+dispatches_binaries_on_ref = any(
+    "gh workflow run release-binaries.yml" in line and re.search(r"(^|\s)--ref(\s|=)", line)
+    for line in publish_text.splitlines()
+)
+if not dispatches_binaries_on_ref:
     fail("publish workflow must dispatch release-binaries.yml on the version tag")
 if "gh run watch" not in publish_text:
     fail("publish workflow must wait for release-binaries.yml before publishing crates")

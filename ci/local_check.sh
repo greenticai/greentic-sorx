@@ -80,7 +80,7 @@ step "cargo clippy"
 cargo clippy --all-targets --all-features -- -D warnings
 
 step "cargo test"
-cargo test --all-features
+cargo test --workspace --all-targets --all-features
 
 step "cargo build"
 cargo build --all-features
