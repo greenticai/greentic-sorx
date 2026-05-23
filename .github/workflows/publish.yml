@@ -87,7 +87,7 @@ jobs:
     steps:
       - name: Dispatch release-binaries.yml on version tag
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
           RELEASE_SHA: ${{ github.sha }}
         run: |

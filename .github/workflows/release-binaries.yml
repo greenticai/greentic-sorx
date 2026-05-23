@@ -30,7 +30,7 @@ jobs:
 
       - name: Dispatch release workflow on tag ref
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           requested_tag=""
