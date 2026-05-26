@@ -1,9 +1,13 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use greentic_sorx_core::{
-    EndpointRouter, EndpointStatus, MemoryStoreProvider, ProviderRegistry, SorxRuntime,
-    default_start_schema, invocation, normalize_start_answers, runtime_config_from_answers,
-    runtime_pack,
+    BoundControlHook, CONTRACT_CONTROL_PRE_CALL_V1, ControlDecision, ControlHook, EndpointRouter,
+    EndpointStatus, ExtensionFailMode, MemoryStoreProvider, ObserverEvent, ObserverHook,
+    ProviderRegistry, RuntimeExtensionAdapter, RuntimeExtensionBinding, RuntimeExtensionRegistry,
+    RuntimeExtensions, SorxError, SorxResult, SorxRuntime, StackCallContext, StackCallRequest,
+    StackCallResponse, default_start_schema, invocation, normalize_start_answers,
+    runtime_config_from_answers, runtime_pack,
 };
 use serde_json::{Value, json};
 
@@ -104,6 +108,108 @@ fn runtime() -> SorxRuntime {
     SorxRuntime::new(runtime_pack("landlord", "0.1.0"), config, router, providers)
 }
 
+#[derive(Debug)]
+struct DenyControl;
+
+impl ControlHook for DenyControl {
+    fn pre_call(
+        &self,
+        _context: &StackCallContext,
+        request: &StackCallRequest,
+    ) -> SorxResult<ControlDecision> {
+        if request.operation_id == "tenant.create" {
+            Ok(ControlDecision::deny("blocked by control"))
+        } else {
+            Ok(ControlDecision::allow())
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PatchControl {
+    pre_patch: Option<Value>,
+    post_patch: Option<Value>,
+}
+
+impl ControlHook for PatchControl {
+    fn pre_call(
+        &self,
+        _context: &StackCallContext,
+        _request: &StackCallRequest,
+    ) -> SorxResult<ControlDecision> {
+        Ok(self
+            .pre_patch
+            .clone()
+            .map(ControlDecision::allow_with_patch)
+            .unwrap_or_else(ControlDecision::allow))
+    }
+
+    fn post_call(
+        &self,
+        _context: &StackCallContext,
+        _request: &StackCallRequest,
+        _response: &StackCallResponse,
+    ) -> SorxResult<ControlDecision> {
+        Ok(self
+            .post_patch
+            .clone()
+            .map(ControlDecision::allow_with_patch)
+            .unwrap_or_else(ControlDecision::allow))
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingObserver {
+    events: Mutex<Vec<String>>,
+    payloads: Mutex<Vec<ObserverEvent>>,
+}
+
+impl RecordingObserver {
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+
+    fn payloads(&self) -> Vec<ObserverEvent> {
+        self.payloads.lock().unwrap().clone()
+    }
+}
+
+impl ObserverHook for RecordingObserver {
+    fn observe(&self, event: &ObserverEvent) -> SorxResult<()> {
+        self.events.lock().unwrap().push(event.event_type.clone());
+        self.payloads.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FailingObserver;
+
+impl ObserverHook for FailingObserver {
+    fn observe(&self, _event: &ObserverEvent) -> SorxResult<()> {
+        Err(SorxError::new("observer_failed", "observer failed"))
+    }
+}
+
+#[derive(Debug)]
+struct BoundDenyExtension;
+
+impl RuntimeExtensionAdapter for BoundDenyExtension {
+    fn control(
+        &self,
+        _hook: &str,
+        _binding: &RuntimeExtensionBinding,
+        request: &Value,
+        _response: Option<&Value>,
+    ) -> SorxResult<ControlDecision> {
+        if request["operation_id"] == "tenant.create" {
+            Ok(ControlDecision::deny("blocked by bound extension"))
+        } else {
+            Ok(ControlDecision::allow())
+        }
+    }
+}
+
 fn runtime_with_gateway(
     pack_version: &str,
     gateway: Value,
@@ -155,6 +261,160 @@ fn create_and_get_tenant_operation() {
         .unwrap();
     assert_eq!(fetched.status, EndpointStatus::Ok);
     assert_eq!(fetched.output["data"]["name"], "Acme");
+}
+
+#[test]
+fn control_pre_deny_prevents_provider_call() {
+    let runtime = runtime().with_control_hook(Arc::new(DenyControl));
+    let denied = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-denied", "name": "Acme", "active": true }),
+        ))
+        .unwrap();
+    assert_eq!(denied.status, EndpointStatus::Denied);
+    assert_eq!(denied.output["reason"], "blocked by control");
+
+    let missing = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.get",
+            "tenant.get",
+            json!({ "id": "tenant-denied" }),
+        ))
+        .unwrap();
+    assert_eq!(missing.status, EndpointStatus::NotFound);
+}
+
+#[test]
+fn bound_control_extension_deny_prevents_provider_call() {
+    let mut extensions = RuntimeExtensions::default();
+    extensions.control.hooks.insert(
+        "pre_call".to_string(),
+        vec![RuntimeExtensionBinding {
+            id: "policy".to_string(),
+            contract: CONTRACT_CONTROL_PRE_CALL_V1.to_string(),
+            pack_ref: "extensions/policy.gtpack".to_string(),
+            fail_mode: ExtensionFailMode::Closed,
+        }],
+    );
+    let control = BoundControlHook::new(
+        extensions,
+        RuntimeExtensionRegistry::new()
+            .with_adapter("extensions/policy.gtpack", Arc::new(BoundDenyExtension)),
+    );
+    let runtime = runtime().with_control_hook(Arc::new(control));
+    let denied = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-bound-denied", "name": "Acme", "active": true }),
+        ))
+        .unwrap();
+    assert_eq!(denied.status, EndpointStatus::Denied);
+    assert_eq!(denied.output["reason"], "blocked by bound extension");
+
+    let missing = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.get",
+            "tenant.get",
+            json!({ "id": "tenant-bound-denied" }),
+        ))
+        .unwrap();
+    assert_eq!(missing.status, EndpointStatus::NotFound);
+}
+
+#[test]
+fn control_pre_patch_mutates_request_before_stack_invoke() {
+    let runtime = runtime().with_control_hook(Arc::new(PatchControl {
+        pre_patch: Some(json!({ "name": "Patched" })),
+        post_patch: None,
+    }));
+    let created = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-patched", "name": "Original", "active": true }),
+        ))
+        .unwrap();
+    assert_eq!(created.status, EndpointStatus::Created);
+    assert_eq!(created.output["data"]["name"], "Patched");
+}
+
+#[test]
+fn control_post_patch_mutates_response_after_stack_invoke() {
+    let runtime = runtime().with_control_hook(Arc::new(PatchControl {
+        pre_patch: None,
+        post_patch: Some(json!({ "data": { "name": "Response Patched" } })),
+    }));
+    let created = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-post-patched", "name": "Original", "active": true }),
+        ))
+        .unwrap();
+    assert_eq!(created.status, EndpointStatus::Created);
+    assert_eq!(created.output["data"]["name"], "Response Patched");
+}
+
+#[test]
+fn observer_receives_pre_and_post_events() {
+    let observer = Arc::new(RecordingObserver::default());
+    let runtime = runtime().with_observer_hook(observer.clone(), true);
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-observed", "name": "Acme", "active": true }),
+        ))
+        .unwrap();
+    assert_eq!(
+        observer.events(),
+        vec!["stack.call.started", "stack.call.completed"]
+    );
+    let payloads = observer.payloads();
+    assert_eq!(payloads[0].context.environment_id, "local");
+    assert_eq!(payloads[0].context.runtime_id, "runtime-main");
+    assert_eq!(payloads[0].context.deployment_id, "landlord");
+    assert_eq!(payloads[0].context.route_id, "tenant.create");
+    assert!(payloads[0].context.call_id.starts_with("call-"));
+    assert_eq!(payloads[0].context.call_id, payloads[1].context.trace_id);
+}
+
+#[test]
+fn observer_failure_fail_open_continues_stack_invoke() {
+    let runtime = runtime().with_observer_hook(Arc::new(FailingObserver), true);
+    let created = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-observer-fail-open", "name": "Acme", "active": true }),
+        ))
+        .unwrap();
+    assert_eq!(created.status, EndpointStatus::Created);
+}
+
+#[test]
+fn observer_failure_fail_closed_blocks_stack_invoke() {
+    let runtime = runtime().with_observer_hook(Arc::new(FailingObserver), false);
+    let err = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-observer-fail-closed", "name": "Acme", "active": true }),
+        ))
+        .unwrap_err();
+    assert_eq!(err.code, "observer_failed");
 }
 
 #[test]

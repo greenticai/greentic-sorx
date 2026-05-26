@@ -5,12 +5,15 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::{
-    AppendEventOp, ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, CommandSpec,
-    CommandStep, CreateOp, DeleteOp, DisabledAuditSink, EndpointDefinition, EndpointInvocation,
-    EndpointResult, EndpointRouter, EndpointStatus, GetOp, IndexQueryOp, LocalPendingBroker,
-    OperationKind, PolicyAction, PolicyConfig, PolicyDecision, PolicyEngine, ProviderBinding,
-    ProviderNamespace, ProviderRegistry, QueryOp, RuntimePack, SorStoreProvider, SorxAuditEvent,
-    SorxError, SorxEvent, SorxResult, SorxRuntimeConfig, TraverseOp, UpdateOp, ViewTransform,
+    AdminActionContext, AdminActionRequest, AdminActionResponse, AdminObserverEvent, AppendEventOp,
+    ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, CommandSpec, CommandStep,
+    ControlDecision, ControlDecisionAction, ControlHook, CreateOp, DeleteOp, DisabledAuditSink,
+    EndpointDefinition, EndpointInvocation, EndpointResult, EndpointRouter, EndpointStatus, GetOp,
+    IndexQueryOp, LocalPendingBroker, NoopControlHook, NoopObserverHook, ObserverEvent,
+    ObserverHook, OperationKind, PolicyAction, PolicyConfig, PolicyDecision, PolicyEngine,
+    ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, RuntimePack, SorStoreProvider,
+    SorxAuditEvent, SorxError, SorxEvent, SorxResult, SorxRuntimeConfig, StackCallContext,
+    StackCallRequest, StackCallResponse, TraverseOp, UpdateOp, ViewTransform, apply_value_patch,
 };
 
 #[derive(Clone)]
@@ -22,6 +25,9 @@ pub struct SorxRuntime {
     pub policy: PolicyEngine,
     approval_broker: Arc<dyn ApprovalBroker>,
     audit_sink: Arc<dyn AuditSink>,
+    control_hook: Arc<dyn ControlHook>,
+    observer_hook: Arc<dyn ObserverHook>,
+    observer_fail_open: bool,
 }
 
 impl SorxRuntime {
@@ -40,6 +46,9 @@ impl SorxRuntime {
             policy,
             approval_broker: Arc::new(LocalPendingBroker),
             audit_sink: Arc::new(DisabledAuditSink),
+            control_hook: Arc::new(NoopControlHook),
+            observer_hook: Arc::new(NoopObserverHook),
+            observer_fail_open: true,
         }
     }
 
@@ -58,9 +67,101 @@ impl SorxRuntime {
         self
     }
 
+    pub fn with_control_hook(mut self, control_hook: Arc<dyn ControlHook>) -> Self {
+        self.control_hook = control_hook;
+        self
+    }
+
+    pub fn with_observer_hook(
+        mut self,
+        observer_hook: Arc<dyn ObserverHook>,
+        fail_open: bool,
+    ) -> Self {
+        self.observer_hook = observer_hook;
+        self.observer_fail_open = fail_open;
+        self
+    }
+
+    pub fn admin_action_context(
+        &self,
+        action_id: impl Into<String>,
+        path: impl Into<String>,
+        actor: impl Into<String>,
+        tenant_id: Option<String>,
+    ) -> AdminActionContext {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let call_id = format!("admin-{now}");
+        AdminActionContext {
+            environment_id: self.config.environment.clone(),
+            runtime_id: "runtime-main".to_string(),
+            tenant_id,
+            team_id: None,
+            action_id: action_id.into(),
+            path: path.into(),
+            call_id: call_id.clone(),
+            trace_id: call_id,
+            actor: actor.into(),
+        }
+    }
+
+    pub fn observe_admin(&self, event: AdminObserverEvent) -> SorxResult<()> {
+        match self.observer_hook.observe_admin(&event) {
+            Ok(()) => Ok(()),
+            Err(_) if self.observer_fail_open => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn pre_admin(
+        &self,
+        context: &AdminActionContext,
+        request: &AdminActionRequest,
+    ) -> SorxResult<ControlDecision> {
+        self.control_hook.pre_admin(context, request)
+    }
+
+    pub fn post_admin(
+        &self,
+        context: &AdminActionContext,
+        request: &AdminActionRequest,
+        response: &AdminActionResponse,
+    ) -> SorxResult<ControlDecision> {
+        self.control_hook.post_admin(context, request, response)
+    }
+
+    pub fn audit_metric(
+        &self,
+        tenant_id: impl Into<String>,
+        caller_id: impl Into<String>,
+        event_name: impl Into<String>,
+        metric_name: impl Into<String>,
+        decision: Option<String>,
+        details: serde_json::Map<String, Value>,
+    ) -> SorxResult<()> {
+        let metric_name = metric_name.into();
+        self.audit_sink.emit(SorxAuditEvent {
+            event: event_name.into(),
+            pack: self.pack.name.clone(),
+            version: self.pack.version.clone(),
+            tenant_id: tenant_id.into(),
+            endpoint_id: format!("metrics.{metric_name}"),
+            operation_id: format!("metrics.query.{metric_name}"),
+            risk: crate::RiskLevel::Low,
+            caller_id: caller_id.into(),
+            decision,
+            duration_ms: None,
+            idempotency_key_present: false,
+            details,
+        })
+    }
+
     pub fn invoke(&self, mut invocation: EndpointInvocation) -> SorxResult<EndpointResult> {
         let started = Instant::now();
         let endpoint = self.router.endpoint(&invocation.endpoint_id)?;
+        let call_context = self.stack_call_context(endpoint, &invocation);
         self.audit(endpoint, &invocation, "sorx.endpoint.invoked", None, None)?;
         if endpoint.operation_id != invocation.operation_id {
             let err = SorxError::new(
@@ -88,6 +189,52 @@ impl SorxRuntime {
         if let Err(err) = validate_input(endpoint, &invocation.input) {
             self.audit(endpoint, &invocation, "sorx.endpoint.failed", None, None)?;
             return Err(err);
+        }
+        let mut stack_request = StackCallRequest {
+            operation_id: invocation.operation_id.clone(),
+            input: invocation.input.clone(),
+        };
+        self.observe(ObserverEvent {
+            event_type: "stack.call.started".to_string(),
+            context: call_context.clone(),
+            status: None,
+            duration_ms: None,
+            control_decision: None,
+        })?;
+        let pre_decision = self.control_hook.pre_call(&call_context, &stack_request)?;
+        match pre_decision.action {
+            ControlDecisionAction::Allow => {}
+            ControlDecisionAction::AllowWithPatch => {
+                if let Some(patch) = &pre_decision.patch {
+                    apply_value_patch(&mut invocation.input, patch);
+                    stack_request.input = invocation.input.clone();
+                }
+            }
+            ControlDecisionAction::Deny => {
+                let result = EndpointResult {
+                    status: EndpointStatus::Denied,
+                    output: json!({
+                        "status": "denied",
+                        "reason": pre_decision.reason.clone().unwrap_or_else(|| "control denied stack call".to_string())
+                    }),
+                    events: vec![event(endpoint, &invocation, "control.denied")],
+                };
+                self.observe(ObserverEvent {
+                    event_type: "stack.call.denied".to_string(),
+                    context: call_context,
+                    status: Some("denied".to_string()),
+                    duration_ms: Some(started.elapsed().as_millis() as u64),
+                    control_decision: Some(pre_decision),
+                })?;
+                self.audit(
+                    endpoint,
+                    &invocation,
+                    "sorx.endpoint.completed",
+                    Some("denied"),
+                    Some(started.elapsed().as_millis() as u64),
+                )?;
+                return Ok(result);
+            }
         }
         let policy_decision = self.policy.decide(endpoint);
         self.audit(
@@ -181,161 +328,217 @@ impl SorxRuntime {
             }
         }
 
-        let binding = self.config.bindings.resolve(endpoint)?;
-        let provider = self.providers.store(&binding.provider_id)?;
-        let namespace = ProviderNamespace {
-            tenant_id: invocation.tenant_id.clone(),
-            sor_name: self.config.deployment.sor_name.clone(),
-        };
+        let provider_result = (|| -> SorxResult<EndpointResult> {
+            let binding = self.config.bindings.resolve(endpoint)?;
+            let provider = self.providers.store(&binding.provider_id)?;
+            let namespace = ProviderNamespace {
+                tenant_id: invocation.tenant_id.clone(),
+                sor_name: self.config.deployment.sor_name.clone(),
+            };
 
-        self.audit(
-            endpoint,
-            &invocation,
-            "sorx.provider.operation.started",
-            None,
-            None,
-        )?;
-        let result = match &endpoint.operation {
-            OperationKind::Create => {
-                let record = provider.create(CreateOp {
-                    namespace: namespace.clone(),
-                    entity: binding.entity.clone(),
-                    collection: binding.collection.clone(),
-                    input: invocation.input.clone(),
-                    idempotency_key: invocation
-                        .idempotency_key
-                        .as_ref()
-                        .map(|key| format!("{}:{key}", endpoint.operation_id)),
-                })?;
-                EndpointResult {
-                    status: EndpointStatus::Created,
-                    output: canonical_to_view(
-                        &endpoint.view,
-                        serde_json::to_value(record)
-                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
-                    ),
-                    events: vec![event(endpoint, &invocation, "entity.created")],
-                }
-            }
-            OperationKind::Get => {
-                let id = required_string(&invocation.input, "id")?;
-                let record = provider.get(GetOp {
-                    namespace: namespace.clone(),
-                    entity: binding.entity.clone(),
-                    collection: binding.collection.clone(),
-                    id,
-                })?;
-                EndpointResult {
-                    status: if record.is_some() {
-                        EndpointStatus::Ok
-                    } else {
-                        EndpointStatus::NotFound
-                    },
-                    output: canonical_to_view(
-                        &endpoint.view,
-                        serde_json::to_value(record)
-                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
-                    ),
-                    events: vec![event(endpoint, &invocation, "entity.get")],
-                }
-            }
-            OperationKind::Update => {
-                let id = required_string(&invocation.input, "id")?;
-                let patch = invocation
-                    .input
-                    .get("patch")
-                    .cloned()
-                    .unwrap_or_else(|| invocation.input.clone());
-                let record = provider.update(UpdateOp {
-                    namespace: namespace.clone(),
-                    entity: binding.entity.clone(),
-                    collection: binding.collection.clone(),
-                    id,
-                    patch,
-                })?;
-                EndpointResult {
-                    status: EndpointStatus::Ok,
-                    output: canonical_to_view(
-                        &endpoint.view,
-                        serde_json::to_value(record)
-                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
-                    ),
-                    events: vec![event(endpoint, &invocation, "entity.updated")],
-                }
-            }
-            OperationKind::Query => {
-                let filter = invocation
-                    .input
-                    .get("filter")
-                    .cloned()
-                    .unwrap_or_else(|| invocation.input.clone());
-                let output = if let Some(index) = &endpoint.query_plan.index {
-                    let canonical = self.providers.canonical_store(&binding.provider_id)?;
-                    serde_json::to_value(canonical.query_index(IndexQueryOp {
+            self.audit(
+                endpoint,
+                &invocation,
+                "sorx.provider.operation.started",
+                None,
+                None,
+            )?;
+            let result = match &endpoint.operation {
+                OperationKind::Create => {
+                    let record = provider.create(CreateOp {
                         namespace: namespace.clone(),
                         entity: binding.entity.clone(),
                         collection: binding.collection.clone(),
-                        index: index.name.clone(),
-                        filter,
-                    })?)
-                    .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
-                } else if let Some(traversal) = &endpoint.query_plan.traversal {
-                    let canonical = self.providers.canonical_store(&binding.provider_id)?;
-                    let root_id = required_string(&invocation.input, "id")?;
-                    serde_json::to_value(canonical.traverse(TraverseOp {
-                        namespace: namespace.clone(),
-                        root_entity: binding.entity.clone(),
-                        root_collection: binding.collection.clone(),
-                        root_id,
-                        max_depth: traversal.max_depth,
-                        relationships: traversal.relationships.clone(),
-                    })?)
-                    .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
-                } else {
-                    serde_json::to_value(provider.query(QueryOp {
+                        input: invocation.input.clone(),
+                        idempotency_key: invocation
+                            .idempotency_key
+                            .as_ref()
+                            .map(|key| format!("{}:{key}", endpoint.operation_id)),
+                    })?;
+                    EndpointResult {
+                        status: EndpointStatus::Created,
+                        output: canonical_to_view(
+                            &endpoint.view,
+                            serde_json::to_value(record)
+                                .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                        ),
+                        events: vec![event(endpoint, &invocation, "entity.created")],
+                    }
+                }
+                OperationKind::Get => {
+                    let id = required_string(&invocation.input, "id")?;
+                    let record = provider.get(GetOp {
                         namespace: namespace.clone(),
                         entity: binding.entity.clone(),
                         collection: binding.collection.clone(),
-                        filter,
-                    })?)
-                    .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
-                };
-                EndpointResult {
-                    status: EndpointStatus::Ok,
-                    output: canonical_to_view(&endpoint.view, output),
-                    events: vec![event(endpoint, &invocation, "entity.queried")],
+                        id,
+                    })?;
+                    EndpointResult {
+                        status: if record.is_some() {
+                            EndpointStatus::Ok
+                        } else {
+                            EndpointStatus::NotFound
+                        },
+                        output: canonical_to_view(
+                            &endpoint.view,
+                            serde_json::to_value(record)
+                                .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                        ),
+                        events: vec![event(endpoint, &invocation, "entity.get")],
+                    }
                 }
-            }
-            OperationKind::Delete => {
-                let id = required_string(&invocation.input, "id")?;
-                let deleted = provider.delete(DeleteOp {
-                    namespace,
-                    entity: binding.entity.clone(),
-                    collection: binding.collection.clone(),
-                    id,
-                })?;
-                EndpointResult {
-                    status: if deleted.deleted {
-                        EndpointStatus::Deleted
+                OperationKind::Update => {
+                    let id = required_string(&invocation.input, "id")?;
+                    let patch = invocation
+                        .input
+                        .get("patch")
+                        .cloned()
+                        .unwrap_or_else(|| invocation.input.clone());
+                    let record = provider.update(UpdateOp {
+                        namespace: namespace.clone(),
+                        entity: binding.entity.clone(),
+                        collection: binding.collection.clone(),
+                        id,
+                        patch,
+                    })?;
+                    EndpointResult {
+                        status: EndpointStatus::Ok,
+                        output: canonical_to_view(
+                            &endpoint.view,
+                            serde_json::to_value(record)
+                                .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                        ),
+                        events: vec![event(endpoint, &invocation, "entity.updated")],
+                    }
+                }
+                OperationKind::Query => {
+                    let filter = invocation
+                        .input
+                        .get("filter")
+                        .cloned()
+                        .unwrap_or_else(|| invocation.input.clone());
+                    let output = if let Some(index) = &endpoint.query_plan.index {
+                        let canonical = self.providers.canonical_store(&binding.provider_id)?;
+                        serde_json::to_value(canonical.query_index(IndexQueryOp {
+                            namespace: namespace.clone(),
+                            entity: binding.entity.clone(),
+                            collection: binding.collection.clone(),
+                            index: index.name.clone(),
+                            filter,
+                        })?)
+                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
+                    } else if let Some(traversal) = &endpoint.query_plan.traversal {
+                        let canonical = self.providers.canonical_store(&binding.provider_id)?;
+                        let root_id = required_string(&invocation.input, "id")?;
+                        serde_json::to_value(canonical.traverse(TraverseOp {
+                            namespace: namespace.clone(),
+                            root_entity: binding.entity.clone(),
+                            root_collection: binding.collection.clone(),
+                            root_id,
+                            max_depth: traversal.max_depth,
+                            relationships: traversal.relationships.clone(),
+                        })?)
+                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
                     } else {
-                        EndpointStatus::NotFound
-                    },
-                    output: serde_json::to_value(deleted)
-                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
-                    events: vec![event(endpoint, &invocation, "entity.deleted")],
+                        serde_json::to_value(provider.query(QueryOp {
+                            namespace: namespace.clone(),
+                            entity: binding.entity.clone(),
+                            collection: binding.collection.clone(),
+                            filter,
+                        })?)
+                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
+                    };
+                    EndpointResult {
+                        status: EndpointStatus::Ok,
+                        output: canonical_to_view(&endpoint.view, output),
+                        events: vec![event(endpoint, &invocation, "entity.queried")],
+                    }
                 }
-            }
-            OperationKind::Command(spec) => {
-                self.execute_command(endpoint, spec, &invocation, &namespace, &binding)?
+                OperationKind::Delete => {
+                    let id = required_string(&invocation.input, "id")?;
+                    let deleted = provider.delete(DeleteOp {
+                        namespace,
+                        entity: binding.entity.clone(),
+                        collection: binding.collection.clone(),
+                        id,
+                    })?;
+                    EndpointResult {
+                        status: if deleted.deleted {
+                            EndpointStatus::Deleted
+                        } else {
+                            EndpointStatus::NotFound
+                        },
+                        output: serde_json::to_value(deleted)
+                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                        events: vec![event(endpoint, &invocation, "entity.deleted")],
+                    }
+                }
+                OperationKind::Command(spec) => {
+                    self.execute_command(endpoint, spec, &invocation, &namespace, &binding)?
+                }
+            };
+            self.audit(
+                endpoint,
+                &invocation,
+                "sorx.provider.operation.completed",
+                None,
+                None,
+            )?;
+            Ok(result)
+        })();
+        let mut result = match provider_result {
+            Ok(result) => result,
+            Err(err) => {
+                self.observe(ObserverEvent {
+                    event_type: "stack.call.failed".to_string(),
+                    context: call_context,
+                    status: Some("failed".to_string()),
+                    duration_ms: Some(started.elapsed().as_millis() as u64),
+                    control_decision: Some(pre_decision),
+                })?;
+                self.audit(endpoint, &invocation, "sorx.endpoint.failed", None, None)?;
+                return Err(err);
             }
         };
-        self.audit(
-            endpoint,
-            &invocation,
-            "sorx.provider.operation.completed",
-            None,
-            None,
-        )?;
+        let mut stack_response = StackCallResponse {
+            status: format!("{:?}", result.status).to_ascii_lowercase(),
+            output: result.output.clone(),
+        };
+        let post_decision =
+            self.control_hook
+                .post_call(&call_context, &stack_request, &stack_response)?;
+        match post_decision.action {
+            ControlDecisionAction::Allow => {}
+            ControlDecisionAction::AllowWithPatch => {
+                if let Some(patch) = &post_decision.patch {
+                    apply_value_patch(&mut result.output, patch);
+                    stack_response.output = result.output.clone();
+                }
+            }
+            ControlDecisionAction::Deny => {
+                result = EndpointResult {
+                    status: EndpointStatus::Denied,
+                    output: json!({
+                        "status": "denied",
+                        "reason": post_decision.reason.clone().unwrap_or_else(|| "control denied stack response".to_string())
+                    }),
+                    events: vec![event(endpoint, &invocation, "control.denied")],
+                };
+                stack_response.status = "denied".to_string();
+                stack_response.output = result.output.clone();
+            }
+        }
+        self.observe(ObserverEvent {
+            event_type: if result.status == EndpointStatus::Denied {
+                "stack.call.denied".to_string()
+            } else {
+                "stack.call.completed".to_string()
+            },
+            context: call_context,
+            status: Some(stack_response.status),
+            duration_ms: Some(started.elapsed().as_millis() as u64),
+            control_decision: Some(post_decision),
+        })?;
         self.audit(
             endpoint,
             &invocation,
@@ -344,6 +547,39 @@ impl SorxRuntime {
             Some(started.elapsed().as_millis() as u64),
         )?;
         Ok(result)
+    }
+
+    fn observe(&self, event: ObserverEvent) -> SorxResult<()> {
+        match self.observer_hook.observe(&event) {
+            Ok(()) => Ok(()),
+            Err(_) if self.observer_fail_open => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn stack_call_context(
+        &self,
+        endpoint: &EndpointDefinition,
+        invocation: &EndpointInvocation,
+    ) -> StackCallContext {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let call_id = format!("call-{now}");
+        StackCallContext {
+            environment_id: self.config.environment.clone(),
+            runtime_id: "runtime-main".to_string(),
+            tenant_id: invocation.tenant_id.clone(),
+            team_id: None,
+            deployment_id: self.config.deployment.sor_name.clone(),
+            stack_id: self.pack.name.clone(),
+            revision_id: None,
+            route_id: endpoint.endpoint_id.clone(),
+            call_id: call_id.clone(),
+            trace_id: call_id,
+            actor: invocation.caller.subject.clone(),
+        }
     }
 
     fn execute_command(

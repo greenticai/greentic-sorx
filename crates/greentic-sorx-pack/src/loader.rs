@@ -16,6 +16,7 @@ use crate::inspect::{
     SorxInspectOntology, SorxInspectPack, SorxInspectReport, SorxInspectSorla, SorxInspectSorx,
 };
 use crate::manifest::{PackLock, PackManifest};
+use crate::metrics::{MetricAssets, MetricCatalog, MetricInspectSummary, validate_metrics};
 use crate::ontology::{OntologyAssets, OntologyGraph, RetrievalBindings, validate_ontology_assets};
 
 const SORX_RUNTIME_EXTENSION_ID: &str = "greentic.sorx.runtime.v1";
@@ -54,6 +55,7 @@ pub struct SorlaAssets {
     pub llms_txt_fragment: Option<String>,
     pub ontology: Option<OntologyAssets>,
     pub business_actions: Option<BusinessActionAssets>,
+    pub metrics: Option<MetricAssets>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +176,9 @@ fn load_sorla_pack_archive<R: Read + Seek>(
     if let Some(ontology) = &sorla_assets.ontology {
         doctor_errors.extend(validate_ontology_assets(ontology));
     }
+    if let Some(metrics) = &sorla_assets.metrics {
+        doctor_errors.extend(validate_metrics(&metrics.catalog));
+    }
     let mut doctor_warnings = Vec::new();
     if lock.is_none() {
         doctor_warnings.push("pack.lock.cbor is missing; lock validation was skipped".to_string());
@@ -268,6 +273,12 @@ fn inspect_loaded_sorla_pack(pack: LoadedSorlaPack) -> Result<SorxInspectReport,
                 hashes_valid: true,
                 execution_targets_valid: true,
             }),
+        metrics: pack
+            .sorla_assets
+            .metrics
+            .as_ref()
+            .map(MetricAssets::inspect_summary)
+            .unwrap_or_else(MetricInspectSummary::missing),
     })
 }
 
@@ -557,6 +568,7 @@ fn read_sorla_assets<R: Read + Seek>(
         &agent_gateway_json,
         mcp_tools_json.as_ref(),
     )?;
+    let metrics = read_metric_assets(archive, entries, manifest)?;
 
     Ok((
         SorlaAssets {
@@ -568,9 +580,36 @@ fn read_sorla_assets<R: Read + Seek>(
             llms_txt_fragment,
             ontology,
             business_actions,
+            metrics,
         },
         business_action_errors,
     ))
+}
+
+fn read_metric_assets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    entries: &BTreeSet<String>,
+    manifest: &PackManifest,
+) -> Result<Option<MetricAssets>, SorxPackError> {
+    let metrics_path = extension_asset_path(manifest, "sorla", "metrics").or_else(|| {
+        entries
+            .contains("assets/sorla/metrics.json")
+            .then_some("assets/sorla/metrics.json")
+    });
+    let Some(metrics_path) = metrics_path else {
+        return Ok(None);
+    };
+    let catalog_json = parse_json(archive, metrics_path)?;
+    let catalog = serde_json::from_value::<MetricCatalog>(catalog_json.clone()).map_err(|err| {
+        SorxPackError::new(
+            "invalid_metrics",
+            format!("{metrics_path} does not match expected shape: {err}"),
+        )
+    })?;
+    Ok(Some(MetricAssets {
+        catalog_json,
+        catalog,
+    }))
 }
 
 fn read_ontology_assets<R: Read + Seek>(
@@ -1269,6 +1308,35 @@ mod tests {
         refresh_lock(entries);
     }
 
+    fn add_valid_metrics(entries: &mut BTreeMap<String, Vec<u8>>) {
+        entries.insert(
+            "assets/sorla/metrics.json".to_string(),
+            br#"{"schema":"greentic.sorla.metrics.v1","package":{"name":"commerce-sor","version":"0.1.0"},"metrics":[{"name":"daily_clicks","source":{"entity":"Click","collection":"clicks"},"measure":{"aggregate":"count"},"time":{"field":"clicked_at","grains":["day"]}},{"name":"gross_margin","formula":{"expression":"monthly_revenue - monthly_cost","dependencies":["monthly_revenue","monthly_cost"]}},{"name":"monthly_revenue","source":{"entity":"Payment","collection":"payments"},"measure":{"aggregate":"sum","field":"amount"},"time":{"field":"paid_at","grains":["month"]}},{"name":"monthly_cost","source":{"entity":"Cost","collection":"costs"},"measure":{"aggregate":"sum","field":"amount"},"time":{"field":"incurred_at","grains":["month"]}}]}"#.to_vec(),
+        );
+        let mut manifest: PackManifest =
+            ciborium::de::from_reader(Cursor::new(entries.get("pack.cbor").unwrap().clone()))
+                .unwrap();
+        manifest
+            .assets
+            .push("assets/sorla/metrics.json".to_string());
+        let sorla = manifest
+            .extension
+            .get_mut("sorla")
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        sorla.insert(
+            "metrics".to_string(),
+            Value::String("assets/sorla/metrics.json".to_string()),
+        );
+        entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert(
+            "manifest.json".to_string(),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+        refresh_lock(entries);
+    }
+
     fn write_pack(entries: BTreeMap<String, Vec<u8>>) -> (TempDir, PathBuf) {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("pack.gtpack");
@@ -1602,6 +1670,46 @@ mod tests {
         assert!(report.business_actions.lock_present);
         assert!(report.business_actions.hashes_valid);
         assert!(report.business_actions.execution_targets_valid);
+    }
+
+    #[test]
+    fn valid_metrics_catalog_passes_doctor_and_inspect() {
+        let mut entries = valid_entries();
+        add_valid_metrics(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(doctor.ok, "{doctor:?}");
+        let report = inspect_sorla_pack(&path).unwrap();
+        assert!(report.metrics.present);
+        assert_eq!(report.metrics.count, 4);
+        assert_eq!(
+            report.metrics.names,
+            vec![
+                "daily_clicks",
+                "gross_margin",
+                "monthly_revenue",
+                "monthly_cost"
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_metrics_catalog_fails_doctor() {
+        let mut entries = valid_entries();
+        entries.insert(
+            "assets/sorla/metrics.json".to_string(),
+            br#"{"schema":"greentic.sorla.metrics.v1","package":{"name":"commerce-sor","version":"0.1.0"},"metrics":[{"name":"daily_clicks","source":{"entity":"Click"},"measure":{"aggregate":"count"}},{"name":"daily_clicks","formula":{"expression":"missing + 1","dependencies":["missing"]}},{"name":"bad","source":{"entity":"Payment"},"measure":{"aggregate":"median"},"time":{"field":"created_at","grains":["century"]}}]}"#.to_vec(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let doctor = doctor_sorla_pack(&path);
+        assert!(!doctor.ok);
+        assert!(
+            doctor
+                .errors
+                .iter()
+                .any(|issue| issue.code == "metrics_invalid")
+        );
     }
 
     #[test]

@@ -7,10 +7,49 @@ use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+const GENERIC_RUNTIME_HOST_MANIFEST: &str =
+    include_str!("e2e/fixtures/generic_runtime_host/runtime-host-manifest.json");
+
 fn greentic_sorx_command() -> Command {
     // Test-only helper invokes Cargo's compiled test binary path.
     // foxguard: ignore[rs/no-command-injection]
     Command::new(env!("CARGO_BIN_EXE_greentic-sorx"))
+}
+
+#[test]
+fn binary_runtime_host_manifest_matches_generic_deployer_contract() {
+    let output = greentic_sorx_command()
+        .args(["runtime-host", "manifest"])
+        .output()
+        .expect("greentic-sorx binary should run");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("manifest output should be JSON");
+    let expected: serde_json::Value =
+        serde_json::from_str(GENERIC_RUNTIME_HOST_MANIFEST).expect("fixture should be JSON");
+    assert_eq!(stdout, expected);
+    assert_eq!(stdout["env_binding"]["slot"], "deployer");
+    assert_eq!(
+        stdout["env_binding"]["kind"],
+        "greentic.deployer.sorx@0.1.0"
+    );
+    assert_eq!(
+        stdout["extension"]["capabilities"]["offers"][0]["capability"],
+        "greentic.cap.runtime.host.v1"
+    );
+    let contracts = stdout["extension"]["capabilities"]["offers"][0]["contracts"]
+        .as_array()
+        .unwrap();
+    for contract in [
+        "greentic.runtime.admin.v1",
+        "greentic.runtime.health.v1",
+        "greentic.runtime.deployments.v1",
+        "greentic.runtime.traffic.v1",
+        "greentic.runtime.invoke.v1",
+    ] {
+        assert!(contracts.iter().any(|value| value == contract));
+    }
 }
 
 #[test]
@@ -137,6 +176,24 @@ fn binary_routes_json_is_stable() {
         serde_json::from_slice(&output.stdout).expect("routes output should be JSON");
     assert_eq!(stdout["schema"], "greentic.sorx.routes.v1");
     assert_eq!(stdout["routes"][0]["endpoint_id"], "tenant.create");
+}
+
+#[test]
+fn binary_doctor_and_inspect_cover_metrics_metadata() {
+    let fixture = PackFixture::new_with_metrics();
+    let doctor = run_json(["doctor", fixture.pack.to_str().unwrap(), "--json"]);
+    assert_eq!(doctor["ok"], true);
+
+    let inspect = run_json(["inspect", fixture.pack.to_str().unwrap(), "--json"]);
+    assert_eq!(inspect["metrics"]["present"], true);
+    assert_eq!(inspect["metrics"]["count"], 4);
+    assert!(
+        inspect["metrics"]["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "gross_margin")
+    );
 }
 
 #[test]
@@ -920,6 +977,10 @@ impl PackFixture {
         Self::from_entries(pack_entries_with_business_ontology())
     }
 
+    fn new_with_metrics() -> Self {
+        Self::from_entries(pack_entries_with_metrics())
+    }
+
     fn from_entries(entries: Vec<(String, Vec<u8>)>) -> Self {
         let temp = TempDir::new().unwrap();
         let pack = temp.path().join("landlord.gtpack");
@@ -1063,6 +1124,46 @@ fn pack_entries_with_business_ontology() -> Vec<(String, Vec<u8>)> {
       "scope": {
         "concepts": ["Customer", "Contract", "EvidenceDocument"],
         "relationships": ["customer_has_contract", "contract_has_evidence"]
+      }
+    }
+  ]
+}"#
+        .to_vec(),
+    ));
+    entries
+}
+
+fn pack_entries_with_metrics() -> Vec<(String, Vec<u8>)> {
+    let mut entries = pack_entries();
+    entries.push((
+        "assets/sorla/metrics.json".to_string(),
+        br#"{
+  "schema": "greentic.sorla.metrics.v1",
+  "package": { "name": "metrics-commerce", "version": "0.1.0" },
+  "metrics": [
+    {
+      "name": "daily_clicks",
+      "source": { "entity": "Click", "collection": "clicks" },
+      "measure": { "aggregate": "count" },
+      "time": { "field": "clicked_at", "grains": ["day"] }
+    },
+    {
+      "name": "monthly_revenue",
+      "source": { "entity": "Payment", "collection": "payments" },
+      "measure": { "aggregate": "sum", "field": "amount" },
+      "time": { "field": "paid_at", "grains": ["month"] }
+    },
+    {
+      "name": "monthly_cost",
+      "source": { "entity": "Cost", "collection": "costs" },
+      "measure": { "aggregate": "sum", "field": "amount" },
+      "time": { "field": "incurred_at", "grains": ["month"] }
+    },
+    {
+      "name": "gross_margin",
+      "formula": {
+        "expression": "monthly_revenue - monthly_cost",
+        "dependencies": ["monthly_revenue", "monthly_cost"]
       }
     }
   ]

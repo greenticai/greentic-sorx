@@ -7,10 +7,22 @@ Execute SoRLa declarative migrations against canonical provider state.
 
 ## Current code assumptions
 
-- There is no `migrate` CLI group yet.
-- Deployment registry already has `shared_requires_migration`, which should be the bridge into this PR.
+- There is already a `migrate` CLI group with `plan`, `dry-run`, and `apply` subcommands in `crates/greentic-sorx-cli/src/lib.rs`.
+- The current migration implementation is intentionally lightweight: it builds deterministic JSON plans, validates answers, writes a sidecar `*.status.json`, rejects destructive plans unless `--allow-destructive` is passed, and treats reapplying a completed sidecar status as idempotent.
+- There is not yet a full provider-backed migration executor. Status is not currently stored in canonical provider state.
+- Deployment registry already has `StateMode::SharedRequiresMigration`, but promotion gating is not yet wired to a concrete migration completion record.
 - Validation reports and promotion gates already exist; migration readiness should integrate with them rather than inventing a second deployment lifecycle.
 - Canonical state namespace from PR 07 should be `sorx/{tenant}/{sor}`.
+
+## Design update
+
+Do not re-add the CLI group. The remaining design work is to evolve the existing command surface into real canonical-state execution:
+
+- Add provider-backed migration status storage behind the canonical store abstraction.
+- Connect `shared_requires_migration` promotion gating to completed migration status or explicit waiver policy.
+- Keep the deterministic JSON plan/dry-run/status shapes stable unless a schema version changes.
+- Keep destructive steps disabled by default.
+- Treat the existing sidecar status file as a local/dev fallback, not the final production source of truth.
 
 ## CLI
 

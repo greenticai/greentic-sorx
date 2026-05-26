@@ -100,6 +100,8 @@ fn doctor_error_code(message: &str) -> &'static str {
         || message.contains("business-actions.lock.json has unsupported schema")
     {
         "business_action_schema_invalid"
+    } else if message.contains("metrics.json") || message.starts_with("metric `") {
+        "metrics_invalid"
     } else if message.contains("secret-like") {
         "secret_like_value"
     } else {

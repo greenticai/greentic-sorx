@@ -6,6 +6,23 @@ Make `greentic-sorx` maintainable, secure, and ready for real use.
 
 This PR focuses on CI workflows, documentation, local checks, security scanning, deterministic outputs, and release packaging.
 
+## Current repo validation
+
+This design is mostly already represented in the repository and should be treated as an audit/alignment checklist, not as a greenfield implementation plan.
+
+Current repo state includes:
+
+- CI/release/security workflows under `.github/workflows/`, including `ci.yml`, `e2e.yml`, `release.yml`, `release-binaries.yml`, CodeQL, dependency review, coverage, perf, and publish workflows.
+- `scripts/local_check.sh`.
+- User and security docs under `docs/`, including getting started, commands, answers, provider bindings, MCP, landlord-tenant e2e, future signing/versioning, release, observability, and security docs.
+- Existing tests for path traversal, secret handling, provider config refs, approval defaults, tenant/caller context, deterministic output, route stability, and validation fixtures.
+
+Design update:
+
+- Do not add duplicate workflow files or duplicate docs. Future work should inspect and align the existing files.
+- Prefer tightening gaps in the existing workflows/scripts/docs over introducing new surfaces.
+- If a check is already covered by Rust tests, avoid adding brittle shell-only duplication unless CI needs that exact command surface.
+
 ## CI workflows
 
 Add or update workflows:
