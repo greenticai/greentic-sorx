@@ -50,7 +50,7 @@ jobs:
           cargo binstall -y greentic-dev
 
       - name: Run coverage and enforce policy
-        run: greentic-dev coverage --policy-file coverage-policy.json
+        run: greentic-dev coverage
 
       - name: Upload coverage report
         if: always()
