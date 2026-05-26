@@ -7,10 +7,24 @@ Replace the current `provider_unavailable` FoundationDB boundary with a real ada
 
 ## Current code assumptions
 
-- `FoundationDbProviderAdapter` already accepts `config_ref` and local/test direct config, then returns `provider_unavailable` for all `SorStoreProvider` operations.
-- `greentic-sorla-providers` is referenced in startup trust defaults, but this workspace does not currently depend on a provider crate.
+- `FoundationDbProviderAdapter` already accepts `config_ref` and local/test direct config.
+- The old `provider_unavailable` boundary is no longer accurate. The adapter currently delegates to a persistent `MemoryStoreProvider` using a deterministic local JSON path derived from `config_ref`/cluster/database fields.
+- The adapter implements both `SorStoreProvider` and `SorxCanonicalStore`, so CRUD, events, index queries, graph traversal, external refs, and evidence storage are available through the same compatibility shim.
+- `greentic-sorla-providers` is referenced in startup trust/default concepts, but this workspace still does not depend on a real provider crate.
 - Production direct-config rejection is already part of startup validation; keep that behavior.
-- The adapter should implement the canonical store contract from PR 07, not only the current CRUD/query trait.
+- The adapter already implements the canonical store contract from PR 07, not only the CRUD/query trait.
+
+## Design update
+
+Do not replace a nonexistent all-operations `provider_unavailable` stub. The remaining design question is whether/when to replace the persistent-memory compatibility adapter with a real `greentic-sorla-providers` FoundationDB implementation.
+
+Future work should:
+
+- Preserve the current provider trait surface and tests while swapping the adapter internals.
+- Keep local/test direct config support and production direct-config rejection.
+- Keep persistence and canonical-store behavior covered across restart.
+- Fail clearly if a real provider crate is requested but unavailable or incompatible.
+- Consider renaming or de-emphasizing legacy helper names like `FoundationDbProviderAdapter::unavailable`, which now construct the local compatibility adapter.
 
 ## Configuration
 

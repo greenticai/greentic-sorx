@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::business_actions::BusinessActionInspectSummary;
+use crate::metrics::MetricInspectSummary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SorxInspectReport {
@@ -10,6 +11,7 @@ pub struct SorxInspectReport {
     pub sorx: SorxInspectSorx,
     pub ontology: SorxInspectOntology,
     pub business_actions: BusinessActionInspectSummary,
+    pub metrics: MetricInspectSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

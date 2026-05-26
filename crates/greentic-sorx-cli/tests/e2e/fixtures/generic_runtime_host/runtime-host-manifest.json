@@ -1,0 +1,37 @@
+{
+  "schema": "greentic.sorx.runtime-host-pack.v1",
+  "descriptor": "greentic.deployer.sorx@0.1.0",
+  "pack_id": "greentic-sorx-runtime-host",
+  "env_binding": {
+    "slot": "deployer",
+    "kind": "greentic.deployer.sorx@0.1.0",
+    "pack_id": "greentic-sorx-runtime-host"
+  },
+  "extension": {
+    "extension": "greentic.ext.capabilities.v1",
+    "descriptor": "greentic.deployer.sorx@0.1.0",
+    "pack_id": "greentic-sorx-runtime-host",
+    "capabilities": {
+      "schema": "greentic.capabilities.v1",
+      "offers": [
+        {
+          "capability": "greentic.cap.runtime.host.v1",
+          "contracts": [
+            "greentic.runtime.admin.v1",
+            "greentic.runtime.health.v1",
+            "greentic.runtime.deployments.v1",
+            "greentic.runtime.traffic.v1",
+            "greentic.runtime.invoke.v1"
+          ]
+        }
+      ],
+      "requires": [
+        { "capability": "greentic.cap.secrets.v1", "optional": true },
+        { "capability": "greentic.cap.telemetry.v1", "optional": true },
+        { "capability": "greentic.cap.extension.control.v1", "optional": true },
+        { "capability": "greentic.cap.extension.observer.v1", "optional": true },
+        { "capability": "greentic.cap.extension.admin.v1", "optional": true }
+      ]
+    }
+  }
+}

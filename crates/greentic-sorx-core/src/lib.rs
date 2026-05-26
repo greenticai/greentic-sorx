@@ -5,8 +5,10 @@ mod audit;
 mod deployment;
 mod error;
 mod evidence;
+mod generic_runtime;
 mod ghcr_webhook;
 mod mcp;
+mod metrics_runtime;
 mod model;
 mod ontology_graph;
 mod policy;
@@ -36,6 +38,28 @@ pub use evidence::{
     EvidenceQueryFilter, EvidenceQueryResult, OntologyAuditEvent, OntologyScope, ScopedEntity,
     ontology_audit_event, redact_audit_value,
 };
+pub use generic_runtime::{
+    AdminActionContext, AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface,
+    BoundControlHook, BoundObserverHook, CAP_EXTENSION_ADMIN_V1, CAP_EXTENSION_CONTROL_V1,
+    CAP_EXTENSION_OBSERVER_V1, CAP_RUNTIME_HOST_V1, CAP_SECRETS_V1, CAP_TELEMETRY_V1,
+    CONTRACT_ADMIN_SURFACE_V1, CONTRACT_CONTROL_POST_ADMIN_V1, CONTRACT_CONTROL_POST_CALL_V1,
+    CONTRACT_CONTROL_PRE_ADMIN_V1, CONTRACT_CONTROL_PRE_CALL_V1, CONTRACT_OBSERVER_ADMIN_EVENT_V1,
+    CONTRACT_OBSERVER_CALL_FAILED_V1, CONTRACT_OBSERVER_CONTROL_DENIED_V1,
+    CONTRACT_OBSERVER_POST_CALL_V1, CONTRACT_OBSERVER_PRE_CALL_V1, CONTRACT_RUNTIME_ADMIN_V1,
+    CONTRACT_RUNTIME_DEPLOYMENTS_V1, CONTRACT_RUNTIME_HEALTH_V1, CONTRACT_RUNTIME_INVOKE_V1,
+    CONTRACT_RUNTIME_TRAFFIC_V1, CapabilityOffer, CapabilityRequirement, ControlDecision,
+    ControlDecisionAction, ControlHook, ExtensionFailMode, NoopControlHook, NoopObserverHook,
+    ObserverEvent, ObserverHook, RUNTIME_ADMIN_SURFACES_SCHEMA, RUNTIME_CAPABILITIES_SCHEMA,
+    RUNTIME_DEPLOYMENTS_SCHEMA, RUNTIME_HEALTH_SCHEMA, RUNTIME_INFO_SCHEMA, RUNTIME_TRAFFIC_SCHEMA,
+    RevisionRuntimeBlock, RuntimeAdminExtensions, RuntimeAdminSurfaceBinding, RuntimeAdminSurfaces,
+    RuntimeCapabilities, RuntimeConfig, RuntimeControlExtensions, RuntimeDeployment,
+    RuntimeDeployments, RuntimeExtensionAdapter, RuntimeExtensionBinding, RuntimeExtensionRegistry,
+    RuntimeExtensions, RuntimeHealth, RuntimeInfo, RuntimeObserverExtensions, RuntimeRevision,
+    RuntimeRevisionLifecycle, RuntimeSnapshot, RuntimeTrafficEntry, RuntimeTrafficSplit,
+    SORX_DEPLOYER_DESCRIPTOR, SORX_DEPLOYER_DESCRIPTOR_PATH, StackCallContext, StackCallRequest,
+    StackCallResponse, StageDeploymentRequest, TrafficUpdateRequest, apply_value_patch,
+    runtime_contracts, validate_runtime_config, validate_runtime_extensions,
+};
 pub use ghcr_webhook::{
     GhcrPublishedMetadata, GhcrWebhookConfig, GhcrWebhookError, GhcrWebhookOutcome,
     GithubWebhookHeaders, OciArtifactResolver, OciReference, PromotionPolicy, ResolvedOciArtifact,
@@ -43,6 +67,11 @@ pub use ghcr_webhook::{
     verify_github_signature,
 };
 pub use mcp::{McpRuntime, McpToolDefinition, McpToolList, mcp_tools_from_metadata};
+pub use metrics_runtime::{
+    MetricAggregate, MetricQuery, MetricQueryFilter, MetricQueryResult, MetricResultRow,
+    MetricRuntime, MetricRuntimeProvider, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog,
+    RuntimeMetricDimension, RuntimeMetricKind,
+};
 pub use model::{
     ApprovalRequirement, CallerContext, CommandSpec, CommandStep, EndpointDefinition,
     EndpointInvocation, EndpointMethod, EndpointResult, EndpointStatus, IndexRequirement,

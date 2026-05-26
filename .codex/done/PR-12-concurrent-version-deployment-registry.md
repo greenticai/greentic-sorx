@@ -6,6 +6,23 @@ Add a first-class SORX deployment registry so multiple versions of the same SoRL
 
 SORX must stop thinking in terms of "the running pack" and start thinking in terms of immutable pack artifacts mounted as deployment instances.
 
+## Current repo validation
+
+This registry model already exists in `crates/greentic-sorx-core/src/deployment.rs` and is exported from `greentic-sorx-core`.
+
+Current repo state includes:
+
+- `PackArtifact`, `SorxDeployment`, `DeploymentAlias`, `DeploymentRegistry`, `LocalDeploymentRegistryStore`, route-table schemas, validation reports, promotion status, promotion audit events, webhook delivery replay tracking, and `StateMode`.
+- CLI deployment commands in `crates/greentic-sorx-cli/src/lib.rs`, including list, inspect, create, validate, activate, promote, rollback, retire-old, public-routes, promotion-status, and retire.
+- Alias commands for set/list.
+- Tests for concurrent versions, state namespace conflicts, aliases, local registry persistence, validation gates, promotion, rollback, and public exposure.
+
+Design update:
+
+- Do not reimplement the registry from scratch.
+- The note below predates later promotion work: public promotion now exists through `promote_public`/`promote --public` and validation gates. Do not preserve the old “no public endpoint exposure happens in this PR” assumption when applying follow-up work.
+- Future changes should extend the existing registry model and tests rather than creating parallel deployment state.
+
 ## Core model
 
 Introduce these concepts:
@@ -183,7 +200,7 @@ Add tests for:
 - SORX can represent multiple active deployments for the same SoR name.
 - Routes are deployment-scoped, not singleton/global.
 - Aliases are mutable pointers to immutable deployment IDs.
-- No public endpoint exposure happens in this PR; public promotion is added in PR 15.
+- Historical note: public endpoint exposure was planned for PR 15, but the current repo already has public promotion and public route table behavior. Treat this criterion as superseded.
 
 ## Codex working style
 

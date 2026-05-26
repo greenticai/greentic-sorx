@@ -1,16 +1,23 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use greentic_sorx_core::{
-    CallerContext, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter,
+    AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface, CallerContext,
+    ControlDecisionAction, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter,
     EndpointStatus, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
-    McpToolList, MemoryStoreProvider, OperationKind, PolicyAction, ProviderRegistry, RuntimePack,
-    SorxDeployment, SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StdoutAuditSink,
-    StoreProviderKind,
+    McpToolDefinition, McpToolList, MemoryStoreProvider, MetricAggregate, MetricQuery,
+    MetricQueryResult, MetricResultRow, MetricRuntime, MetricRuntimeProvider, OperationKind,
+    PolicyAction, ProviderNamespace, ProviderRegistry, RiskLevel, RuntimeConfig, RuntimeInfo,
+    RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
+    RuntimeMetricKind, RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult,
+    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink, StoreProviderKind,
+    TrafficUpdateRequest, apply_value_patch,
 };
-use greentic_sorx_pack::{BusinessAction, BusinessActionAssets, LoadedSorlaPack, contract_hash};
+use greentic_sorx_pack::{
+    BusinessAction, BusinessActionAssets, LoadedSorlaPack, MetricDefinition, contract_hash,
+};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -79,6 +86,9 @@ pub struct HttpRuntime {
     routes: Arc<RouteList>,
     tools: Arc<McpToolList>,
     business_actions: Arc<Option<BusinessActionAssets>>,
+    metrics: Arc<Option<RuntimeMetricCatalog>>,
+    metric_provider: Arc<StaticMetricProvider>,
+    runtime_snapshot: Arc<RwLock<RuntimeSnapshot>>,
 }
 
 #[derive(Clone)]
@@ -87,10 +97,20 @@ struct HttpAuth {
 }
 
 impl HttpRuntime {
+    #[allow(dead_code)]
     pub fn from_pack(
         deployment_id: impl Into<String>,
         pack: &LoadedSorlaPack,
         config: SorxRuntimeConfig,
+    ) -> SorxResult<Self> {
+        Self::from_pack_with_runtime_config(deployment_id, pack, config, None)
+    }
+
+    pub fn from_pack_with_runtime_config(
+        deployment_id: impl Into<String>,
+        pack: &LoadedSorlaPack,
+        config: SorxRuntimeConfig,
+        runtime_config: Option<RuntimeConfig>,
     ) -> SorxResult<Self> {
         let router = EndpointRouter::from_agent_gateway(&pack.sorla_assets.agent_gateway_json)?;
         let providers = provider_registry(&config)?;
@@ -122,6 +142,12 @@ impl HttpRuntime {
             pack.sorla_assets.mcp_tools_json.as_ref(),
             &runtime.router,
         )?;
+        let metrics = runtime_metric_catalog(pack)?;
+        let tools = with_metric_tools(tools, metrics.as_ref());
+        let runtime_snapshot = match runtime_config {
+            Some(config) => RuntimeSnapshot::from_runtime_config("runtime-main", config)?,
+            None => RuntimeSnapshot::new("runtime-main"),
+        };
         Ok(Self {
             deployment_id,
             admin_api_enabled: false,
@@ -130,6 +156,9 @@ impl HttpRuntime {
             routes: Arc::new(routes),
             tools: Arc::new(tools),
             business_actions: Arc::new(pack.sorla_assets.business_actions.clone()),
+            metrics: Arc::new(metrics),
+            metric_provider: Arc::new(StaticMetricProvider),
+            runtime_snapshot: Arc::new(RwLock::new(runtime_snapshot)),
         })
     }
 
@@ -210,6 +239,17 @@ impl HttpRuntime {
                 );
             }
             _ => {}
+        }
+
+        if request.path == "/v1/sorx/metrics" && request.method == "GET" {
+            return self.list_metrics(&request);
+        }
+        if request.path.starts_with("/v1/sorx/metrics/") {
+            return self.handle_metric_request(&request);
+        }
+
+        if request.path.starts_with("/admin/v1/") || self.is_admin_surface_request(&request.path) {
+            return self.handle_generic_admin_request(&request);
         }
 
         if request.path == "/v1/sorx/business-actions" && request.method == "GET" {
@@ -366,6 +406,347 @@ impl HttpRuntime {
         ))
     }
 
+    fn handle_generic_admin_request(&self, request: &HttpRequest) -> HttpResponse {
+        let action_id = generic_admin_action_id(request);
+        let actor = request
+            .headers
+            .get("x-greentic-caller-id")
+            .cloned()
+            .unwrap_or_else(|| "runtime-admin".to_string());
+        let tenant_id = request.headers.get("x-greentic-tenant-id").cloned();
+        let context =
+            self.runtime
+                .admin_action_context(action_id, request.path.clone(), actor, tenant_id);
+        let mut admin_request = AdminActionRequest {
+            method: request.method.clone(),
+            path: request.path.clone(),
+            input: if request.body.trim().is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_str(&request.body).unwrap_or(Value::Null)
+            },
+        };
+
+        if let Err(err) = self.runtime.observe_admin(AdminObserverEvent {
+            event_type: "admin.action.started".to_string(),
+            context: context.clone(),
+            status: None,
+            duration_ms: None,
+            control_decision: None,
+        }) {
+            return sorx_error_response(500, err);
+        }
+
+        let pre_decision = match self.runtime.pre_admin(&context, &admin_request) {
+            Ok(decision) => decision,
+            Err(err) => return sorx_error_response(403, err),
+        };
+        match pre_decision.action {
+            ControlDecisionAction::Allow => {}
+            ControlDecisionAction::AllowWithPatch => {
+                if let Some(patch) = &pre_decision.patch {
+                    apply_value_patch(&mut admin_request.input, patch);
+                }
+            }
+            ControlDecisionAction::Deny => {
+                let response = json_response(
+                    403,
+                    json!({
+                        "ok": false,
+                        "error": {
+                            "code": "RUNTIME_ADMIN_CONTROL_DENIED",
+                            "message": pre_decision.reason.clone().unwrap_or_else(|| "admin action denied".to_string()),
+                            "details": {}
+                        }
+                    }),
+                );
+                let _ = self.runtime.observe_admin(AdminObserverEvent {
+                    event_type: "admin.action.denied".to_string(),
+                    context,
+                    status: Some("denied".to_string()),
+                    duration_ms: None,
+                    control_decision: Some(pre_decision),
+                });
+                return response;
+            }
+        }
+
+        let effective_request = if admin_request.input == Value::Null {
+            request.clone()
+        } else {
+            let mut request = request.clone();
+            request.body = admin_request.input.to_string();
+            request
+        };
+        let mut response = self.handle_generic_admin_request_inner(&effective_request);
+        let mut admin_response = AdminActionResponse {
+            status: response.status,
+            output: response.body.clone(),
+        };
+        let post_decision = match self
+            .runtime
+            .post_admin(&context, &admin_request, &admin_response)
+        {
+            Ok(decision) => decision,
+            Err(err) => return sorx_error_response(403, err),
+        };
+        match post_decision.action {
+            ControlDecisionAction::Allow => {}
+            ControlDecisionAction::AllowWithPatch => {
+                if let Some(patch) = &post_decision.patch {
+                    apply_value_patch(&mut response.body, patch);
+                    admin_response.output = response.body.clone();
+                }
+            }
+            ControlDecisionAction::Deny => {
+                response = json_response(
+                    403,
+                    json!({
+                        "ok": false,
+                        "error": {
+                            "code": "RUNTIME_ADMIN_CONTROL_DENIED",
+                            "message": post_decision.reason.clone().unwrap_or_else(|| "admin response denied".to_string()),
+                            "details": {}
+                        }
+                    }),
+                );
+                admin_response.status = response.status;
+                admin_response.output = response.body.clone();
+            }
+        }
+        if let Err(err) = self.runtime.observe_admin(AdminObserverEvent {
+            event_type: generic_admin_terminal_event(response.status).to_string(),
+            context,
+            status: Some(response.status.to_string()),
+            duration_ms: None,
+            control_decision: Some(post_decision),
+        }) {
+            return sorx_error_response(500, err);
+        }
+        response
+    }
+
+    fn handle_generic_admin_request_inner(&self, request: &HttpRequest) -> HttpResponse {
+        match (request.method.as_str(), request.path.as_str()) {
+            ("GET", "/admin/v1/runtime") => {
+                return json_response(
+                    200,
+                    serde_json::to_value(RuntimeInfo::sorx(
+                        "runtime-main",
+                        env!("CARGO_PKG_VERSION"),
+                    ))
+                    .unwrap(),
+                );
+            }
+            ("GET", "/admin/v1/health") => {
+                return self.with_snapshot_read(|snapshot| {
+                    json_response(200, serde_json::to_value(snapshot.health()).unwrap())
+                });
+            }
+            ("GET", "/admin/v1/capabilities") => {
+                return json_response(
+                    200,
+                    serde_json::to_value(
+                        greentic_sorx_core::RuntimeCapabilities::sorx_runtime_host(),
+                    )
+                    .unwrap(),
+                );
+            }
+            ("GET", "/admin/v1/deployments") => {
+                return self.with_snapshot_read(|snapshot| {
+                    json_response(200, serde_json::to_value(snapshot.deployments()).unwrap())
+                });
+            }
+            ("POST", "/admin/v1/deployments/stage") => {
+                let request =
+                    match request_json(request, &BTreeMap::new(), None).and_then(|value| {
+                        serde_json::from_value::<StageDeploymentRequest>(value)
+                            .map_err(|err| err.to_string())
+                    }) {
+                        Ok(request) => request,
+                        Err(err) => return error_response(400, "RUNTIME_STAGE_INVALID", &err),
+                    };
+                return self.with_snapshot_write(|snapshot| match snapshot.stage(request) {
+                    Ok(deployment) => json_response(200, serde_json::to_value(deployment).unwrap()),
+                    Err(err) => sorx_error_response(400, err),
+                });
+            }
+            ("POST", "/admin/v1/runtime-config") => {
+                let config = match request_json(request, &BTreeMap::new(), None).and_then(|value| {
+                    serde_json::from_value::<RuntimeConfig>(value).map_err(|err| err.to_string())
+                }) {
+                    Ok(config) => config,
+                    Err(err) => return error_response(400, "RUNTIME_CONFIG_INVALID", &err),
+                };
+                return self.with_snapshot_write(|snapshot| {
+                    match snapshot.apply_runtime_config(config) {
+                        Ok(()) => json_response(
+                            200,
+                            serde_json::to_value(snapshot.deployments()).unwrap(),
+                        ),
+                        Err(err) => sorx_error_response(400, err),
+                    }
+                });
+            }
+            ("GET", "/admin/v1/admin-surfaces") => {
+                return self.with_snapshot_read(|snapshot| {
+                    json_response(
+                        200,
+                        serde_json::to_value(snapshot.admin_surfaces()).unwrap(),
+                    )
+                });
+            }
+            ("POST", "/admin/v1/admin-surfaces") => {
+                let surface =
+                    match request_json(request, &BTreeMap::new(), None).and_then(|value| {
+                        serde_json::from_value::<AdminSurface>(value).map_err(|err| err.to_string())
+                    }) {
+                        Ok(surface) => surface,
+                        Err(err) => {
+                            return error_response(400, "RUNTIME_ADMIN_SURFACE_INVALID", &err);
+                        }
+                    };
+                return self.with_snapshot_write(|snapshot| {
+                    match snapshot.register_admin_surface(surface) {
+                        Ok(surface) => json_response(200, serde_json::to_value(surface).unwrap()),
+                        Err(err) => sorx_error_response(400, err),
+                    }
+                });
+            }
+            _ => {}
+        }
+
+        if let Some(response) = self.handle_admin_surface_request(request) {
+            return response;
+        }
+
+        let parts = request
+            .path
+            .trim_start_matches("/admin/v1/deployments/")
+            .trim_matches('/')
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        match (request.method.as_str(), parts.as_slice()) {
+            ("GET", [deployment_id]) => {
+                self.with_snapshot_read(|snapshot| match snapshot.deployment(deployment_id) {
+                    Ok(deployment) => json_response(200, serde_json::to_value(deployment).unwrap()),
+                    Err(err) => sorx_error_response(404, err),
+                })
+            }
+            ("POST", [deployment_id, "warm"]) => {
+                self.with_snapshot_write(|snapshot| match snapshot.warm(deployment_id) {
+                    Ok(deployment) => json_response(200, serde_json::to_value(deployment).unwrap()),
+                    Err(err) => sorx_error_response(400, err),
+                })
+            }
+            ("POST", [deployment_id, "activate"]) => {
+                self.with_snapshot_write(|snapshot| match snapshot.activate(deployment_id) {
+                    Ok(deployment) => json_response(200, serde_json::to_value(deployment).unwrap()),
+                    Err(err) => sorx_error_response(400, err),
+                })
+            }
+            ("POST", [deployment_id, "traffic"]) => {
+                let request =
+                    match request_json(request, &BTreeMap::new(), None).and_then(|value| {
+                        serde_json::from_value::<TrafficUpdateRequest>(value)
+                            .map_err(|err| err.to_string())
+                    }) {
+                        Ok(request) => request,
+                        Err(err) => return error_response(400, "RUNTIME_TRAFFIC_INVALID", &err),
+                    };
+                self.with_snapshot_write(|snapshot| {
+                    match snapshot.set_traffic(deployment_id, request) {
+                        Ok(split) => json_response(200, serde_json::to_value(split).unwrap()),
+                        Err(err) => sorx_error_response(400, err),
+                    }
+                })
+            }
+            ("POST", [deployment_id, "revisions", revision_id, "drain"]) => self
+                .with_snapshot_write(
+                    |snapshot| match snapshot.drain(deployment_id, revision_id) {
+                        Ok(deployment) => {
+                            json_response(200, serde_json::to_value(deployment).unwrap())
+                        }
+                        Err(err) => sorx_error_response(400, err),
+                    },
+                ),
+            ("POST", [deployment_id, "deactivate"]) => {
+                self.with_snapshot_write(|snapshot| match snapshot.deactivate(deployment_id) {
+                    Ok(deployment) => json_response(200, serde_json::to_value(deployment).unwrap()),
+                    Err(err) => sorx_error_response(400, err),
+                })
+            }
+            _ => error_response(
+                404,
+                "RUNTIME_ADMIN_ROUTE_NOT_FOUND",
+                "generic runtime admin route not found",
+            ),
+        }
+    }
+
+    fn handle_admin_surface_request(&self, request: &HttpRequest) -> Option<HttpResponse> {
+        let surface = match self.runtime_snapshot.read() {
+            Ok(snapshot) => snapshot.admin_surface_for_path(&request.path),
+            Err(_) => {
+                return Some(error_response(
+                    500,
+                    "RUNTIME_SNAPSHOT_LOCKED",
+                    "runtime snapshot lock poisoned",
+                ));
+            }
+        }?;
+        Some(match (request.method.as_str(), request.path.as_str()) {
+            ("GET", path) if path == surface.path => json_response(
+                200,
+                json!({
+                    "schema": "greentic.runtime.admin-surface.v1",
+                    "surface": surface
+                }),
+            ),
+            _ => error_response(
+                501,
+                "RUNTIME_ADMIN_SURFACE_UNSUPPORTED_HANDLER",
+                "admin surface handler contract is not supported by this runtime build",
+            ),
+        })
+    }
+
+    fn is_admin_surface_request(&self, path: &str) -> bool {
+        match self.runtime_snapshot.read() {
+            Ok(snapshot) => snapshot.admin_surface_for_path(path).is_some(),
+            Err(_) => false,
+        }
+    }
+
+    fn with_snapshot_read<F>(&self, f: F) -> HttpResponse
+    where
+        F: FnOnce(&RuntimeSnapshot) -> HttpResponse,
+    {
+        match self.runtime_snapshot.read() {
+            Ok(snapshot) => f(&snapshot),
+            Err(_) => error_response(
+                500,
+                "RUNTIME_SNAPSHOT_LOCKED",
+                "runtime snapshot lock poisoned",
+            ),
+        }
+    }
+
+    fn with_snapshot_write<F>(&self, f: F) -> HttpResponse
+    where
+        F: FnOnce(&mut RuntimeSnapshot) -> HttpResponse,
+    {
+        match self.runtime_snapshot.write() {
+            Ok(mut snapshot) => f(&mut snapshot),
+            Err(_) => error_response(
+                500,
+                "RUNTIME_SNAPSHOT_LOCKED",
+                "runtime snapshot lock poisoned",
+            ),
+        }
+    }
+
     fn list_business_actions(&self) -> HttpResponse {
         let Some(assets) = self.business_actions.as_ref() else {
             return json_response(
@@ -402,6 +783,185 @@ impl HttpRuntime {
                 "actions": actions
             }),
         )
+    }
+
+    fn list_metrics(&self, request: &HttpRequest) -> HttpResponse {
+        self.audit_metric_surface(request, "sorx.metric.listed", "list", Some("allow"));
+        let metrics = self.metrics.as_ref().as_ref();
+        let metric_values = metrics
+            .map(|catalog| {
+                catalog
+                    .metrics
+                    .iter()
+                    .map(metric_summary_json)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        json_response(
+            200,
+            json!({
+                "schema": "greentic.sorx.metrics.v1",
+                "metrics": metric_values
+            }),
+        )
+    }
+
+    fn handle_metric_request(&self, request: &HttpRequest) -> HttpResponse {
+        let suffix = request
+            .path
+            .trim_start_matches("/v1/sorx/metrics/")
+            .trim_matches('/');
+        let parts = suffix.split('/').collect::<Vec<_>>();
+        match (request.method.as_str(), parts.as_slice()) {
+            ("GET", [metric_name]) => self.get_metric(metric_name, request),
+            ("POST", [metric_name, "query"]) => self.query_metric(metric_name, request),
+            _ => error_response(404, "SORX_METRIC_ROUTE_NOT_FOUND", "metric route not found"),
+        }
+    }
+
+    fn get_metric(&self, metric_name: &str, request: &HttpRequest) -> HttpResponse {
+        let Some(metrics) = self.metrics.as_ref().as_ref() else {
+            return error_response(404, "SORX_METRIC_NOT_FOUND", "metric not found");
+        };
+        match metrics.metric(metric_name) {
+            Ok(metric) => {
+                self.audit_metric_surface(
+                    request,
+                    "sorx.metric.definition_read",
+                    metric_name,
+                    Some("allow"),
+                );
+                json_response(
+                    200,
+                    json!({
+                        "schema": "greentic.sorx.metric-definition.v1",
+                        "metric": metric
+                    }),
+                )
+            }
+            Err(_) => error_response(404, "SORX_METRIC_NOT_FOUND", "metric not found"),
+        }
+    }
+
+    fn audit_metric_surface(
+        &self,
+        request: &HttpRequest,
+        event: &str,
+        metric_name: &str,
+        decision: Option<&str>,
+    ) {
+        let tenant_id = request
+            .headers
+            .get("x-greentic-tenant-id")
+            .cloned()
+            .unwrap_or_else(|| self.runtime.config.tenant_id.clone());
+        let caller_id = request
+            .headers
+            .get("x-greentic-caller-id")
+            .cloned()
+            .unwrap_or_else(|| "local".to_string());
+        let mut details = Map::new();
+        details.insert("metric".to_string(), json!(metric_name));
+        let _ = self.runtime.audit_metric(
+            tenant_id,
+            caller_id,
+            event,
+            metric_name,
+            decision.map(ToString::to_string),
+            details,
+        );
+    }
+
+    fn query_metric(&self, metric_name: &str, request: &HttpRequest) -> HttpResponse {
+        let Some(metrics) = self.metrics.as_ref().as_ref() else {
+            return error_response(404, "SORX_METRIC_NOT_FOUND", "metric not found");
+        };
+        let body = match request_json(request, &BTreeMap::new(), None) {
+            Ok(value) => value,
+            Err(err) => return error_response(400, "SORX_METRIC_QUERY_INVALID", &err),
+        };
+        let tenant_id = match header_or_local(
+            &request.headers,
+            "x-greentic-tenant-id",
+            &self.runtime.config.tenant_id,
+            &self.runtime.config.environment,
+        ) {
+            Ok(value) => value,
+            Err(err) => return sorx_error_response(400, err),
+        };
+        let caller_id = match header_or_local(
+            &request.headers,
+            "x-greentic-caller-id",
+            "local",
+            &self.runtime.config.environment,
+        ) {
+            Ok(value) => value,
+            Err(err) => return sorx_error_response(400, err),
+        };
+        let query = metric_query_from_json(
+            body,
+            ProviderNamespace {
+                tenant_id: tenant_id.clone(),
+                sor_name: self.runtime.config.deployment.sor_name.clone(),
+            },
+        );
+        if let Ok(metric) = metrics.metric(metric_name)
+            && let Some(dimension) = sensitive_requested_dimension(metric, &query)
+        {
+            let mut details = Map::new();
+            details.insert("metric".to_string(), json!(metric_name));
+            details.insert("dimension".to_string(), json!(dimension));
+            let _ = self.runtime.audit_metric(
+                tenant_id,
+                caller_id,
+                "sorx.metric.query.rejected",
+                metric_name,
+                Some("denied".to_string()),
+                details,
+            );
+            return error_response(
+                403,
+                "SORX_METRIC_POLICY_DENIED",
+                "metric query includes a sensitive dimension",
+            );
+        }
+        let runtime = MetricRuntime::new(metrics.clone(), self.metric_provider.as_ref());
+        let mut cache_details = Map::new();
+        cache_details.insert("metric".to_string(), json!(metric_name));
+        let _ = self.runtime.audit_metric(
+            tenant_id.clone(),
+            caller_id.clone(),
+            "sorx.metric.cache_miss",
+            metric_name,
+            Some("miss".to_string()),
+            cache_details,
+        );
+        match runtime.query(metric_name, query) {
+            Ok(result) => {
+                let mut details = Map::new();
+                details.insert("metric".to_string(), json!(metric_name));
+                details.insert("row_count".to_string(), json!(result.rows.len()));
+                let _ = self.runtime.audit_metric(
+                    tenant_id,
+                    caller_id,
+                    "sorx.metric.queried",
+                    metric_name,
+                    Some("allow".to_string()),
+                    details,
+                );
+                json_response(
+                    200,
+                    json!({
+                        "schema": "greentic.sorx.metric-query-result.v1",
+                        "result": result
+                    }),
+                )
+            }
+            Err(err) if err.code == "metric_missing" => {
+                error_response(404, "SORX_METRIC_NOT_FOUND", &err.message)
+            }
+            Err(err) => sorx_error_response(400, err),
+        }
     }
 
     fn handle_business_action_request(&self, request: &HttpRequest) -> HttpResponse {
@@ -804,6 +1364,219 @@ fn is_admin_api_path(path: &str) -> bool {
         || path.starts_with("/v1/sorx/aliases/")
 }
 
+fn generic_admin_action_id(request: &HttpRequest) -> String {
+    format!(
+        "{} {}",
+        request.method.to_ascii_uppercase(),
+        request.path.trim_end_matches('/')
+    )
+}
+
+fn generic_admin_terminal_event(status: u16) -> &'static str {
+    if status == 403 {
+        "admin.action.denied"
+    } else if status >= 400 {
+        "admin.action.failed"
+    } else {
+        "admin.action.completed"
+    }
+}
+
+fn runtime_metric_catalog(pack: &LoadedSorlaPack) -> SorxResult<Option<RuntimeMetricCatalog>> {
+    let Some(metrics) = &pack.sorla_assets.metrics else {
+        return Ok(None);
+    };
+    let runtime_metrics = metrics
+        .catalog
+        .metrics
+        .iter()
+        .map(runtime_metric_from_pack)
+        .collect::<SorxResult<Vec<_>>>()?;
+    RuntimeMetricCatalog::new(runtime_metrics).map(Some)
+}
+
+fn runtime_metric_from_pack(metric: &MetricDefinition) -> SorxResult<RuntimeMetric> {
+    let dimensions = metric
+        .dimensions
+        .iter()
+        .map(|dimension| RuntimeMetricDimension {
+            name: dimension.name.clone(),
+            field: dimension.field.clone(),
+            sensitive: dimension.sensitive,
+        })
+        .collect::<Vec<_>>();
+    let kind = if let Some(measure) = &metric.measure {
+        let source = metric.source.as_ref().ok_or_else(|| {
+            SorxError::new(
+                "metric_source_missing",
+                format!("metric `{}` source is required", metric.name),
+            )
+        })?;
+        RuntimeMetricKind::Aggregate {
+            source_entity: source.entity.clone(),
+            collection: source
+                .collection
+                .clone()
+                .unwrap_or_else(|| source.entity.to_ascii_lowercase()),
+            aggregate: metric_aggregate(&measure.aggregate)?,
+            field: measure.field.clone(),
+        }
+    } else if let Some(formula) = &metric.formula {
+        RuntimeMetricKind::Formula {
+            expression: formula.expression.clone(),
+            dependencies: formula.dependencies.clone(),
+        }
+    } else {
+        return Err(SorxError::new(
+            "metric_invalid",
+            format!("metric `{}` must define measure or formula", metric.name),
+        ));
+    };
+    Ok(RuntimeMetric {
+        name: metric.name.clone(),
+        label: metric.label.clone(),
+        kind,
+        dimensions,
+        cache: metric.cache.as_ref().map(|cache| RuntimeMetricCache {
+            ttl_seconds: cache.ttl_seconds,
+            scope: cache.scope.clone(),
+        }),
+    })
+}
+
+fn metric_aggregate(value: &str) -> SorxResult<MetricAggregate> {
+    match value {
+        "count" => Ok(MetricAggregate::Count),
+        "sum" => Ok(MetricAggregate::Sum),
+        "avg" => Ok(MetricAggregate::Avg),
+        "min" => Ok(MetricAggregate::Min),
+        "max" => Ok(MetricAggregate::Max),
+        "distinct_count" => Ok(MetricAggregate::DistinctCount),
+        _ => Err(SorxError::new(
+            "metric_aggregate_unsupported",
+            format!("unsupported metric aggregate `{value}`"),
+        )),
+    }
+}
+
+fn with_metric_tools(
+    mut tools: McpToolList,
+    metrics: Option<&RuntimeMetricCatalog>,
+) -> McpToolList {
+    if let Some(metrics) = metrics {
+        tools.tools.push(metric_tool(
+            "sorx.metrics.list",
+            "List declared SORX metrics",
+            "metrics.list",
+        ));
+        tools.tools.push(metric_tool(
+            "sorx.metrics.get",
+            "Get one SORX metric definition",
+            "metrics.get",
+        ));
+        for metric in &metrics.metrics {
+            tools.tools.push(metric_tool(
+                format!("sorx.metrics.query.{}", metric.name),
+                format!("Query metric `{}`", metric.name),
+                format!("metrics.query.{}", metric.name),
+            ));
+        }
+    }
+    tools
+}
+
+fn metric_tool(
+    name: impl Into<String>,
+    description: impl Into<String>,
+    operation_id: impl Into<String>,
+) -> McpToolDefinition {
+    let operation_id = operation_id.into();
+    McpToolDefinition {
+        name: name.into(),
+        description: Some(description.into()),
+        endpoint_id: operation_id.clone(),
+        operation_id,
+        risk: RiskLevel::Low,
+        input_schema: Some(json!({ "type": "object" })),
+    }
+}
+
+fn metric_summary_json(metric: &RuntimeMetric) -> Value {
+    json!({
+        "name": metric.name,
+        "label": metric.label,
+        "kind": match &metric.kind {
+            RuntimeMetricKind::Aggregate { .. } => "aggregate",
+            RuntimeMetricKind::Formula { .. } => "formula",
+        },
+        "dimensions": metric.dimensions,
+        "cache": metric.cache
+    })
+}
+
+fn metric_query_from_json(value: Value, namespace: ProviderNamespace) -> MetricQuery {
+    MetricQuery {
+        namespace,
+        from: value
+            .get("from")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        to: value
+            .get("to")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        grain: value
+            .get("grain")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        dimensions: value
+            .get("dimensions")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        filters: Vec::new(),
+    }
+}
+
+fn sensitive_requested_dimension(metric: &RuntimeMetric, query: &MetricQuery) -> Option<String> {
+    metric
+        .dimensions
+        .iter()
+        .find(|dimension| dimension.sensitive && query.dimensions.contains(&dimension.name))
+        .map(|dimension| dimension.name.clone())
+}
+
+#[derive(Debug, Default)]
+struct StaticMetricProvider;
+
+impl MetricRuntimeProvider for StaticMetricProvider {
+    fn query_metric(
+        &self,
+        definition: &RuntimeMetric,
+        _query: &MetricQuery,
+    ) -> SorxResult<MetricQueryResult> {
+        let value = match definition.name.as_str() {
+            "daily_clicks" => 42.0,
+            "monthly_revenue" => 1250.0,
+            "monthly_cost" => 350.0,
+            _ => 0.0,
+        };
+        Ok(MetricQueryResult {
+            metric: definition.name.clone(),
+            rows: vec![MetricResultRow {
+                dimensions: BTreeMap::new(),
+                value,
+            }],
+        })
+    }
+}
+
 fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry> {
     let mut registry = ProviderRegistry::new();
     for (binding, provider) in &config.providers {
@@ -1143,7 +1916,7 @@ fn coerce_path_param(endpoint: Option<&EndpointDefinition>, key: &str, value: &s
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct HttpRequest {
     method: String,
     path: String,
@@ -1263,19 +2036,72 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
 
     use greentic_sorx_core::{
-        default_start_schema, normalize_start_answers, runtime_config_from_answers,
+        AdminActionContext, AdminActionRequest, AdminActionResponse, AdminObserverEvent,
+        ControlDecision, ControlHook, MemoryAuditSink, ObserverHook, default_start_schema,
+        normalize_start_answers, runtime_config_from_answers,
     };
     use greentic_sorx_pack::{
         BusinessAction, BusinessActionAssets, BusinessActionCatalog, BusinessActionExecution,
         BusinessActionIdempotency, BusinessActionLock, BusinessActionLockEntry, BusinessActionRisk,
-        LoadedSorlaPack, PackIdentity, PackManifest, SorlaAssets, SorxAssets,
-        ValidationSuiteStatus, contract_hash,
+        LoadedSorlaPack, MetricAssets, MetricCatalog, PackIdentity, PackManifest, SorlaAssets,
+        SorxAssets, ValidationSuiteStatus, contract_hash,
     };
     use serde_json::{Value, json};
 
     use super::*;
+
+    const GENERIC_RUNTIME_CONFIG: &str =
+        include_str!("../tests/e2e/fixtures/generic_runtime_host/runtime-config.json");
+
+    #[derive(Debug)]
+    struct AdminDenyControl;
+
+    impl ControlHook for AdminDenyControl {
+        fn pre_admin(
+            &self,
+            _context: &AdminActionContext,
+            _request: &AdminActionRequest,
+        ) -> SorxResult<ControlDecision> {
+            Ok(ControlDecision::deny("admin blocked"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct AdminPostPatchControl;
+
+    impl ControlHook for AdminPostPatchControl {
+        fn post_admin(
+            &self,
+            _context: &AdminActionContext,
+            _request: &AdminActionRequest,
+            _response: &AdminActionResponse,
+        ) -> SorxResult<ControlDecision> {
+            Ok(ControlDecision::allow_with_patch(json!({
+                "admin_pipeline": "patched"
+            })))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AdminRecordingObserver {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl AdminRecordingObserver {
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl ObserverHook for AdminRecordingObserver {
+        fn observe_admin(&self, event: &AdminObserverEvent) -> SorxResult<()> {
+            self.events.lock().unwrap().push(event.event_type.clone());
+            Ok(())
+        }
+    }
 
     fn gateway() -> Value {
         json!({
@@ -1454,6 +2280,7 @@ mod tests {
                 llms_txt_fragment: None,
                 ontology: None,
                 business_actions: Some(business_action_assets()),
+                metrics: Some(metric_assets()),
             },
             sorx_assets: SorxAssets {
                 start_schema_json: default_start_schema(),
@@ -1533,6 +2360,45 @@ mod tests {
             .clone()
     }
 
+    fn metric_assets() -> MetricAssets {
+        let catalog_json = json!({
+            "schema": "greentic.sorla.metrics.v1",
+            "package": { "name": "landlord-tenant-sor", "version": "0.1.0" },
+            "metrics": [
+                {
+                    "name": "daily_clicks",
+                    "source": { "entity": "Click", "collection": "clicks" },
+                    "measure": { "aggregate": "count" },
+                    "dimensions": [{ "name": "user_email", "field": "user_email", "sensitive": true }],
+                    "time": { "field": "clicked_at", "grains": ["day"] }
+                },
+                {
+                    "name": "monthly_revenue",
+                    "source": { "entity": "Payment", "collection": "payments" },
+                    "measure": { "aggregate": "sum", "field": "amount" },
+                    "time": { "field": "paid_at", "grains": ["month"] }
+                },
+                {
+                    "name": "monthly_cost",
+                    "source": { "entity": "Cost", "collection": "costs" },
+                    "measure": { "aggregate": "sum", "field": "amount" },
+                    "time": { "field": "incurred_at", "grains": ["month"] }
+                },
+                {
+                    "name": "gross_margin",
+                    "formula": {
+                        "expression": "monthly_revenue - monthly_cost",
+                        "dependencies": ["monthly_revenue", "monthly_cost"]
+                    }
+                }
+            ]
+        });
+        MetricAssets {
+            catalog: serde_json::from_value::<MetricCatalog>(catalog_json.clone()).unwrap(),
+            catalog_json,
+        }
+    }
+
     fn answers(environment: &str) -> Value {
         json!({
             "tenant": { "tenant_id": "tenant-a", "environment": environment },
@@ -1567,6 +2433,37 @@ mod tests {
         let normalized = normalize_start_answers(&default_start_schema(), &answers, true).unwrap();
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
         HttpRuntime::from_pack("local", &pack, config).unwrap()
+    }
+
+    fn runtime_with_initial_runtime_config(runtime_config: RuntimeConfig) -> HttpRuntime {
+        let pack = pack();
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &answers("local"), true).unwrap();
+        let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
+        HttpRuntime::from_pack_with_runtime_config("local", &pack, config, Some(runtime_config))
+            .unwrap()
+    }
+
+    fn with_admin_control(mut runtime: HttpRuntime, control: Arc<dyn ControlHook>) -> HttpRuntime {
+        runtime.runtime = Arc::new((*runtime.runtime).clone().with_control_hook(control));
+        runtime
+    }
+
+    fn with_admin_observer(
+        mut runtime: HttpRuntime,
+        observer: Arc<dyn ObserverHook>,
+    ) -> HttpRuntime {
+        runtime.runtime = Arc::new(
+            (*runtime.runtime)
+                .clone()
+                .with_observer_hook(observer, true),
+        );
+        runtime
+    }
+
+    fn with_audit_sink(mut runtime: HttpRuntime, audit: Arc<MemoryAuditSink>) -> HttpRuntime {
+        runtime.runtime = Arc::new((*runtime.runtime).clone().with_audit_sink(audit));
+        runtime
     }
 
     fn response(
@@ -1670,6 +2567,83 @@ mod tests {
             "greentic.sorx.promotion-status.v1"
         );
         assert_eq!(promotion_status["registry_backed"], false);
+    }
+
+    #[test]
+    fn metrics_are_listed_queried_and_exposed_as_mcp_metadata() {
+        let runtime = runtime("local");
+        let metrics = request(&runtime, "GET", "/v1/sorx/metrics", &[], "");
+        assert_eq!(metrics["schema"], "greentic.sorx.metrics.v1");
+        assert_eq!(metrics["metrics"][0]["name"], "daily_clicks");
+
+        let definition = request(&runtime, "GET", "/v1/sorx/metrics/gross_margin", &[], "");
+        assert_eq!(
+            definition["metric"]["kind"]["dependencies"][0],
+            "monthly_revenue"
+        );
+
+        let result = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/metrics/gross_margin/query",
+            &tenant_headers(),
+            r#"{"from":"2026-01-01T00:00:00Z","to":"2026-02-01T00:00:00Z","grain":"month"}"#,
+        );
+        assert_eq!(result["schema"], "greentic.sorx.metric-query-result.v1");
+        assert_eq!(result["result"]["metric"], "gross_margin");
+        assert_eq!(result["result"]["rows"][0]["value"], 900.0);
+
+        let tools = request(&runtime, "GET", "/v1/sorx/tools", &[], "");
+        assert!(
+            tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "sorx.metrics.query.gross_margin")
+        );
+    }
+
+    #[test]
+    fn metric_queries_emit_audit_and_deny_sensitive_dimensions() {
+        let audit = Arc::new(MemoryAuditSink::new());
+        let runtime = with_audit_sink(runtime("local"), audit.clone());
+        let denied = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/metrics/daily_clicks/query",
+            &tenant_headers(),
+            r#"{"dimensions":["user_email"]}"#,
+        );
+        assert_eq!(denied["error"]["code"], "SORX_METRIC_POLICY_DENIED");
+
+        let allowed = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/metrics/daily_clicks/query",
+            &tenant_headers(),
+            r#"{"dimensions":[]}"#,
+        );
+        assert_eq!(allowed["result"]["rows"][0]["value"], 42.0);
+
+        let events = audit.events().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "sorx.metric.query.rejected"
+                    && event.decision.as_deref() == Some("denied"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "sorx.metric.cache_miss"
+                    && event.decision.as_deref() == Some("miss"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "sorx.metric.queried"
+                    && event.decision.as_deref() == Some("allow"))
+        );
     }
 
     #[test]
@@ -2018,6 +2992,338 @@ mod tests {
         let response = request(&runtime, "GET", "/v1/sorx/deployments", &[], "");
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "SORX_ADMIN_API_DISABLED");
+    }
+
+    #[test]
+    fn generic_admin_runtime_contract_reports_metadata_capabilities_and_health() {
+        let runtime = runtime("local");
+        let info = request(&runtime, "GET", "/admin/v1/runtime", &[], "");
+        assert_eq!(info["schema"], "greentic.runtime.info.v1");
+        assert_eq!(info["runtime_kind"], "runtime-host");
+        assert_eq!(info["implementation"], "sorx");
+        assert!(
+            info["contracts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|contract| contract == "greentic.runtime.deployments.v1")
+        );
+
+        let capabilities = request(&runtime, "GET", "/admin/v1/capabilities", &[], "");
+        assert_eq!(capabilities["schema"], "greentic.capabilities.v1");
+        assert_eq!(
+            capabilities["offers"][0]["capability"],
+            "greentic.cap.runtime.host.v1"
+        );
+
+        let health = request(&runtime, "GET", "/admin/v1/health", &[], "");
+        assert_eq!(health["schema"], "greentic.runtime.health.v1");
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["deployment_count"], 0);
+    }
+
+    #[test]
+    fn generic_admin_stage_warm_activate_traffic_drain_and_deactivate() {
+        let runtime = runtime("local");
+        let staged = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/stage",
+            &[],
+            r#"{"deployment_id":"dep-a","revision_id":"rev-a","bundle_id":"bundle-a","stack_id":"stack-a","artifact_uri":"file:bundle-a.gtbundle"}"#,
+        );
+        assert_eq!(staged["deployment_id"], "dep-a");
+        assert_eq!(staged["revisions"][0]["lifecycle"], "staged");
+
+        let warmed = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/dep-a/warm",
+            &[],
+            "",
+        );
+        assert_eq!(warmed["revisions"][0]["lifecycle"], "ready");
+
+        let staged_zero_weight = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/stage",
+            &[],
+            r#"{"deployment_id":"dep-a","revision_id":"rev-b","bundle_id":"bundle-a"}"#,
+        );
+        assert_eq!(staged_zero_weight["revisions"].as_array().unwrap().len(), 2);
+
+        let activated = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/dep-a/activate",
+            &[],
+            "",
+        );
+        assert_eq!(activated["revisions"][1]["lifecycle"], "ready");
+
+        let traffic = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/dep-a/traffic",
+            &[],
+            r#"{"entries":[{"revision_id":"rev-a","weight_bps":10000},{"revision_id":"rev-b","weight_bps":0}]}"#,
+        );
+        assert_eq!(traffic["schema"], "greentic.runtime.traffic.v1");
+        assert_eq!(traffic["entries"][0]["weight_bps"], 10000);
+
+        let drained = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/dep-a/revisions/rev-a/drain",
+            &[],
+            "",
+        );
+        assert_eq!(drained["revisions"][0]["lifecycle"], "draining");
+        assert_eq!(drained["revisions"][0]["weight_bps"], 0);
+
+        let deactivated = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/dep-a/deactivate",
+            &[],
+            "",
+        );
+        assert!(
+            deactivated["revisions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|revision| revision["weight_bps"] == 0)
+        );
+    }
+
+    #[test]
+    fn generic_admin_rejects_invalid_traffic_sum() {
+        let runtime = runtime("local");
+        let _ = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/stage",
+            &[],
+            r#"{"deployment_id":"dep-a","revision_id":"rev-a","bundle_id":"bundle-a"}"#,
+        );
+        let response = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/dep-a/traffic",
+            &[],
+            r#"{"entries":[{"revision_id":"rev-a","weight_bps":9000}]}"#,
+        );
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "runtime_traffic_invalid_sum");
+    }
+
+    #[test]
+    fn generic_admin_rejects_unknown_revision_in_traffic_split() {
+        let runtime = runtime("local");
+        let _ = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/stage",
+            &[],
+            r#"{"deployment_id":"dep-a","revision_id":"rev-a","bundle_id":"bundle-a"}"#,
+        );
+        let response = request(
+            &runtime,
+            "POST",
+            "/admin/v1/deployments/dep-a/traffic",
+            &[],
+            r#"{"entries":[{"revision_id":"rev-missing","weight_bps":10000}]}"#,
+        );
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "runtime_revision_missing");
+    }
+
+    #[test]
+    fn generic_admin_applies_runtime_config_snapshot() {
+        let runtime = runtime("local");
+        let response = request(
+            &runtime,
+            "POST",
+            "/admin/v1/runtime-config",
+            &[],
+            &json!({
+                "schema": "greentic.runtime-config.v1",
+                "env_id": "local",
+                "revisions": [
+                    {
+                        "deployment_id": "dep-a",
+                        "revision_id": "rev-a",
+                        "bundle_id": "bundle-a",
+                        "pack_list_refs": ["locks/rev-a.json"],
+                        "pack_config_refs": ["configs/rev-a.json"],
+                        "weight_bps": 9000
+                    },
+                    {
+                        "deployment_id": "dep-a",
+                        "revision_id": "rev-b",
+                        "bundle_id": "bundle-a",
+                        "weight_bps": 1000
+                    }
+                ]
+            })
+            .to_string(),
+        );
+        assert_eq!(response["schema"], "greentic.runtime.deployments.v1");
+        assert_eq!(response["deployments"][0]["deployment_id"], "dep-a");
+        assert_eq!(
+            response["deployments"][0]["revisions"][0]["lifecycle"],
+            "ready"
+        );
+        assert_eq!(
+            response["deployments"][0]["revisions"][0]["weight_bps"],
+            9000
+        );
+    }
+
+    #[test]
+    fn generic_admin_reports_initial_runtime_config_snapshot() {
+        let runtime = runtime_with_initial_runtime_config(RuntimeConfig {
+            schema: "greentic.runtime-config.v1".to_string(),
+            env_id: "local".to_string(),
+            revisions: vec![greentic_sorx_core::RevisionRuntimeBlock {
+                deployment_id: "dep-a".to_string(),
+                revision_id: "rev-a".to_string(),
+                bundle_id: "bundle-a".to_string(),
+                pack_list_refs: Vec::new(),
+                pack_config_refs: Vec::new(),
+                weight_bps: 10000,
+            }],
+            extensions: greentic_sorx_core::RuntimeExtensions::default(),
+        });
+        let response = request(&runtime, "GET", "/admin/v1/deployments", &[], "");
+        assert_eq!(response["deployments"][0]["deployment_id"], "dep-a");
+        assert_eq!(
+            response["deployments"][0]["revisions"][0]["revision_id"],
+            "rev-a"
+        );
+        assert_eq!(
+            response["deployments"][0]["revisions"][0]["weight_bps"],
+            10000
+        );
+    }
+
+    #[test]
+    fn generic_runtime_host_fixture_drives_initial_snapshot_and_admin_surface() {
+        let config: RuntimeConfig =
+            serde_json::from_str(GENERIC_RUNTIME_CONFIG).expect("fixture should be valid JSON");
+        let runtime = runtime_with_initial_runtime_config(config);
+        let deployments = request(&runtime, "GET", "/admin/v1/deployments", &[], "");
+        assert_eq!(deployments["schema"], "greentic.runtime.deployments.v1");
+        assert_eq!(
+            deployments["deployments"][0]["deployment_id"],
+            "generic-deployment"
+        );
+        assert_eq!(
+            deployments["deployments"][0]["revisions"][0]["revision_id"],
+            "rev-a"
+        );
+        assert_eq!(
+            deployments["deployments"][0]["revisions"][0]["weight_bps"],
+            7500
+        );
+        assert_eq!(
+            deployments["deployments"][0]["revisions"][1]["weight_bps"],
+            2500
+        );
+
+        let surfaces = request(&runtime, "GET", "/admin/v1/admin-surfaces", &[], "");
+        assert_eq!(surfaces["surfaces"][0]["surface_id"], "stack-console");
+        assert_eq!(surfaces["surfaces"][0]["path"], "/admin/stacks");
+
+        let page = request(&runtime, "GET", "/admin/stacks", &[], "");
+        assert_eq!(page["schema"], "greentic.runtime.admin-surface.v1");
+        assert_eq!(
+            page["surface"]["source_pack_ref"],
+            "extensions/admin/stack-console.gtpack"
+        );
+    }
+
+    #[test]
+    fn generic_admin_registers_and_lists_admin_surfaces() {
+        let runtime = runtime("local");
+        let registered = request(
+            &runtime,
+            "POST",
+            "/admin/v1/admin-surfaces",
+            &[],
+            r#"{"surface_id":"settings.page","kind":"page","path":"/admin/settings","required_permissions":["settings.read"]}"#,
+        );
+        assert_eq!(registered["surface_id"], "settings.page");
+
+        let listed = request(&runtime, "GET", "/admin/v1/admin-surfaces", &[], "");
+        assert_eq!(listed["schema"], "greentic.runtime.admin-surfaces.v1");
+        assert_eq!(listed["surfaces"][0]["surface_id"], "settings.page");
+        assert_eq!(listed["surfaces"][0]["kind"], "page");
+    }
+
+    #[test]
+    fn generic_admin_surface_routes_run_through_admin_pipeline() {
+        let observer = Arc::new(AdminRecordingObserver::default());
+        let runtime = with_admin_observer(runtime("local"), observer.clone());
+        let _ = request(
+            &runtime,
+            "POST",
+            "/admin/v1/admin-surfaces",
+            &[],
+            r#"{"surface_id":"stack-console","kind":"page","path":"/admin/stacks","source_pack_ref":"extensions/admin/stack-console.gtpack"}"#,
+        );
+
+        let page = request(&runtime, "GET", "/admin/stacks", &[], "");
+        assert_eq!(page["schema"], "greentic.runtime.admin-surface.v1");
+        assert_eq!(page["surface"]["surface_id"], "stack-console");
+
+        let unsupported = request(&runtime, "POST", "/admin/stacks/api/actions", &[], "{}");
+        assert_eq!(
+            unsupported["error"]["code"],
+            "RUNTIME_ADMIN_SURFACE_UNSUPPORTED_HANDLER"
+        );
+        assert_eq!(
+            observer.events(),
+            vec![
+                "admin.action.started",
+                "admin.action.completed",
+                "admin.action.started",
+                "admin.action.completed",
+                "admin.action.started",
+                "admin.action.failed"
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_admin_runs_through_control_pre_admin() {
+        let runtime = with_admin_control(runtime("local"), Arc::new(AdminDenyControl));
+        let response = request(&runtime, "GET", "/admin/v1/health", &[], "");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "RUNTIME_ADMIN_CONTROL_DENIED");
+        assert_eq!(response["error"]["message"], "admin blocked");
+    }
+
+    #[test]
+    fn generic_admin_runs_through_control_post_admin_patch() {
+        let runtime = with_admin_control(runtime("local"), Arc::new(AdminPostPatchControl));
+        let response = request(&runtime, "GET", "/admin/v1/runtime", &[], "");
+        assert_eq!(response["schema"], "greentic.runtime.info.v1");
+        assert_eq!(response["admin_pipeline"], "patched");
+    }
+
+    #[test]
+    fn generic_admin_emits_observer_events() {
+        let observer = Arc::new(AdminRecordingObserver::default());
+        let runtime = with_admin_observer(runtime("local"), observer.clone());
+        let response = request(&runtime, "GET", "/admin/v1/health", &[], "");
+        assert_eq!(response["status"], "ok");
+        assert_eq!(
+            observer.events(),
+            vec!["admin.action.started", "admin.action.completed"]
+        );
     }
 
     #[test]

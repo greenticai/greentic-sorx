@@ -6,6 +6,22 @@ Allow SORX to receive a signed webhook after a GitHub workflow successfully publ
 
 The webhook must not make endpoints public by itself. It may only install/resolve the artifact and create a `pending` or `validating` deployment depending on policy.
 
+## Current repo validation
+
+Most of this design already exists in core and CLI form:
+
+- `crates/greentic-sorx-core/src/ghcr_webhook.rs` defines `GhcrWebhookConfig`, `GithubWebhookHeaders`, `GhcrPublishedMetadata`, `OciReference`, `ResolvedOciArtifact`, `OciArtifactResolver`, `handle_ghcr_published_webhook`, signature verification, metadata parsing, repository/workflow/environment/OCI-prefix checks, digest checks, replay protection, and fake-resolver tests.
+- `DeploymentRegistry` stores webhook delivery IDs and creates pending deployment records from webhook outcomes.
+- `crates/greentic-sorx-cli/src/lib.rs` has `webhook verify-fixture` and `webhook replay`.
+- `docs/ghcr-webhooks.md` exists.
+
+Design update:
+
+- Do not reimplement the parser, verifier, resolver trait, or CLI fixture commands.
+- The current `OciArtifactResolver` trait is synchronous and only resolves metadata. It does not yet include `download_gtpack`.
+- The HTTP server route `POST /v1/sorx/webhooks/github/ghcr-published` is not clearly wired through `HttpRuntime`; that remains a valid follow-up if a long-running webhook listener is required.
+- Webhook replay currently uses a test-only fixture secret path; production secret resolution should stay reference-based and avoid raw secrets in answers.
+
 ## Trigger model
 
 The intended upstream flow is:
@@ -31,7 +47,7 @@ Do not rely on the mutable tag alone. Always resolve and store the exact digest.
 
 ## Webhook endpoint
 
-Add an admin-only webhook server route:
+Add or verify an admin-only webhook server route:
 
 ```text
 POST /v1/sorx/webhooks/github/ghcr-published
@@ -73,14 +89,15 @@ For `workflow_run`, the OCI metadata may need to be fetched from a release asset
 
 ## OCI/GHCR resolver
 
-Add an `OciArtifactResolver` abstraction:
+An `OciArtifactResolver` abstraction already exists. The current trait is synchronous and resolves metadata:
 
 ```rust
 trait OciArtifactResolver {
-    async fn resolve(&self, reference: &OciReference) -> Result<ResolvedOciArtifact>;
-    async fn download_gtpack(&self, resolved: &ResolvedOciArtifact) -> Result<PackBytes>;
+    fn resolve(&self, reference: &OciReference) -> Result<ResolvedOciArtifact>;
 }
 ```
+
+Only add download support when there is a concrete runtime need for local pack bytes.
 
 The resolved artifact must include:
 

@@ -14,7 +14,7 @@ use greentic_sorx_core::{
     OntologyPolicyAction, OntologyPolicyDecisionKind, OntologyPolicyResource,
     OntologyPolicySubject, OntologyRelationshipEdge, OntologyScope, PackArtifact, PolicyEngine,
     ProviderCompatibilityInput, ProviderCompatibilityStatus, ProviderResolutionMode,
-    ResolvedOciArtifact, RollbackAliasRequest, ScopedEntity, SensitivityContext,
+    ResolvedOciArtifact, RollbackAliasRequest, RuntimeConfig, ScopedEntity, SensitivityContext,
     SorxCommandContext, StateMode, build_startup_plan, handle_ghcr_published_webhook,
     mcp_tools_from_metadata, normalize_start_answers,
     ontology_audit_event as core_ontology_audit_event, parse_ghcr_published_metadata,
@@ -23,7 +23,7 @@ use greentic_sorx_core::{
 use greentic_sorx_pack::{
     SorxDoctorReport, SorxInspectReport, doctor_sorla_loaded_pack, doctor_sorla_pack,
     inspect_gtpack_bytes, inspect_sorla_pack, load_sorla_pack, load_sorla_pack_from_bytes,
-    startup_schema_from_gtpack_bytes,
+    sorx_runtime_host_extension, startup_schema_from_gtpack_bytes,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,6 +32,7 @@ mod http_runtime;
 mod validation;
 
 const TRANSIENT_HTTP_INGEST_SECRET_ENV: &str = "GREENTIC_SORX_TRANSIENT_HTTP_INGEST_SECRET";
+const RUNTIME_CONFIG_ENV: &str = "GREENTIC_SORX_RUNTIME_CONFIG";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SorxExitCode {
@@ -235,6 +236,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: MigrationCommands,
     },
+    /// Emit Sorx runtime-host env-pack metadata.
+    RuntimeHost {
+        #[command(subcommand)]
+        command: RuntimeHostCommands,
+    },
     /// Start a SORX runtime from a SoRLa .gtpack and startup answers.
     Start {
         /// Path to a SoRLa .gtpack archive.
@@ -269,6 +275,12 @@ pub enum Commands {
         #[arg(long)]
         answers: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RuntimeHostCommands {
+    /// Emit the runtime-host descriptor, env binding, and capabilities.
+    Manifest,
 }
 
 #[derive(Debug, Subcommand)]
@@ -962,6 +974,7 @@ fn dispatch(
         ),
         Commands::Validation { command } => run_validation_command(command, registry_path),
         Commands::Migrate { command } => run_migrate(command),
+        Commands::RuntimeHost { command } => run_runtime_host(command),
         Commands::Start {
             pack,
             schema,
@@ -986,6 +999,27 @@ fn dispatch(
             run_start(pack, false, answers, false, false, false, _context)
         }
     }
+}
+
+fn run_runtime_host(command: RuntimeHostCommands) -> CliResult<()> {
+    match command {
+        RuntimeHostCommands::Manifest => print_json(&runtime_host_manifest_json()),
+    }
+}
+
+fn runtime_host_manifest_json() -> serde_json::Value {
+    let extension = sorx_runtime_host_extension();
+    serde_json::json!({
+        "schema": "greentic.sorx.runtime-host-pack.v1",
+        "descriptor": extension["descriptor"],
+        "pack_id": extension["pack_id"],
+        "env_binding": {
+            "slot": "deployer",
+            "kind": extension["descriptor"],
+            "pack_id": extension["pack_id"]
+        },
+        "extension": extension
+    })
 }
 
 fn run_deployments(command: DeploymentCommands, registry_path: Option<PathBuf>) -> CliResult<()> {
@@ -3486,15 +3520,22 @@ fn run_start(
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers)
             .map_err(|err| CliError::answers(err.to_string()))?;
         let bind = config.server.bind.clone();
-        let server =
-            http_runtime::HttpRuntime::from_pack("local", &pack, config).map_err(|err| {
-                let message = format!("failed to build HTTP runtime from pack metadata: {err}");
-                if err.code == "provider_unsupported" || err.code == "provider_unavailable" {
-                    CliError::provider(message)
-                } else {
-                    CliError::runtime(message)
-                }
-            })?;
+        let initial_runtime_config =
+            load_initial_runtime_config(&config.environment, context)?.map(|(_, config)| config);
+        let server = http_runtime::HttpRuntime::from_pack_with_runtime_config(
+            "local",
+            &pack,
+            config,
+            initial_runtime_config,
+        )
+        .map_err(|err| {
+            let message = format!("failed to build HTTP runtime from pack metadata: {err}");
+            if err.code == "provider_unsupported" || err.code == "provider_unavailable" {
+                CliError::provider(message)
+            } else {
+                CliError::runtime(message)
+            }
+        })?;
         let listener = std::net::TcpListener::bind(&bind).map_err(|err| {
             CliError::runtime(format!("failed to bind HTTP server on {bind}: {err}"))
         })?;
@@ -3532,6 +3573,67 @@ fn run_start(
         .map_err(|err| CliError::generic(format!("failed to encode startup output: {err}")))?;
     println!("{encoded}");
     Ok(())
+}
+
+fn load_initial_runtime_config(
+    environment: &str,
+    context: &SorxCommandContext,
+) -> CliResult<Option<(PathBuf, RuntimeConfig)>> {
+    let candidates = runtime_config_candidates(environment, context);
+    let explicit = std::env::var_os(RUNTIME_CONFIG_ENV).map(PathBuf::from);
+    if let Some(path) = explicit {
+        let config = read_runtime_config_file(&path)?;
+        return Ok(Some((path, config)));
+    }
+    for path in candidates {
+        if path.is_file() {
+            let config = read_runtime_config_file(&path)?;
+            return Ok(Some((path, config)));
+        }
+    }
+    Ok(None)
+}
+
+fn runtime_config_candidates(environment: &str, context: &SorxCommandContext) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        context.working_dir.join("runtime-config.json"),
+        context
+            .working_dir
+            .join(".greentic")
+            .join("environments")
+            .join(environment)
+            .join("runtime-config.json"),
+        context
+            .working_dir
+            .join("environments")
+            .join(environment)
+            .join("runtime-config.json"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".greentic")
+                .join("environments")
+                .join(environment)
+                .join("runtime-config.json"),
+        );
+    }
+    candidates
+}
+
+fn read_runtime_config_file(path: &Path) -> CliResult<RuntimeConfig> {
+    let raw = fs::read_to_string(path).map_err(|err| {
+        CliError::runtime(format!(
+            "failed to read runtime config at {}: {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str::<RuntimeConfig>(&raw).map_err(|err| {
+        CliError::runtime(format!(
+            "failed to parse runtime config at {}: {err}",
+            path.display()
+        ))
+    })
 }
 
 fn provider_compatibility_input(
@@ -3670,6 +3772,99 @@ mod tests {
     }
 
     #[test]
+    fn runtime_config_candidates_include_local_and_env_store_paths() {
+        let temp = TempDir::new().unwrap();
+        let context = SorxCommandContext::new(temp.path().to_path_buf(), true);
+        let candidates = runtime_config_candidates("local", &context);
+        assert_eq!(candidates[0], temp.path().join("runtime-config.json"));
+        assert_eq!(
+            candidates[1],
+            temp.path()
+                .join(".greentic")
+                .join("environments")
+                .join("local")
+                .join("runtime-config.json")
+        );
+        assert_eq!(
+            candidates[2],
+            temp.path()
+                .join("environments")
+                .join("local")
+                .join("runtime-config.json")
+        );
+    }
+
+    #[test]
+    fn load_initial_runtime_config_reads_first_existing_candidate() {
+        let temp = TempDir::new().unwrap();
+        let context = SorxCommandContext::new(temp.path().to_path_buf(), true);
+        let path = temp.path().join("runtime-config.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "schema": "greentic.runtime-config.v1",
+                "env_id": "local",
+                "revisions": [
+                    {
+                        "deployment_id": "dep-a",
+                        "revision_id": "rev-a",
+                        "bundle_id": "bundle-a",
+                        "weight_bps": 10000
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (loaded_path, config) = load_initial_runtime_config("local", &context)
+            .unwrap()
+            .expect("runtime config should be discovered");
+        assert_eq!(loaded_path, path);
+        assert_eq!(config.env_id, "local");
+        assert_eq!(config.revisions[0].revision_id, "rev-a");
+    }
+
+    #[test]
+    fn load_initial_runtime_config_reads_materialized_environment_paths() {
+        let fixture =
+            include_str!("../tests/e2e/fixtures/generic_runtime_host/runtime-config.json");
+        for relative_path in [
+            ".greentic/environments/local/runtime-config.json",
+            "environments/local/runtime-config.json",
+        ] {
+            let temp = TempDir::new().unwrap();
+            let context = SorxCommandContext::new(temp.path().to_path_buf(), true);
+            let path = temp.path().join(relative_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, fixture).unwrap();
+
+            let (loaded_path, config) = load_initial_runtime_config("local", &context)
+                .unwrap()
+                .expect("runtime config should be discovered");
+            assert_eq!(loaded_path, path);
+            assert_eq!(config.env_id, "local");
+            assert_eq!(config.revisions.len(), 2);
+            assert_eq!(config.revisions[0].deployment_id, "generic-deployment");
+        }
+    }
+
+    #[test]
+    fn runtime_host_manifest_json_contains_env_binding_and_capabilities() {
+        let manifest = runtime_host_manifest_json();
+        assert_eq!(manifest["schema"], "greentic.sorx.runtime-host-pack.v1");
+        assert_eq!(manifest["env_binding"]["slot"], "deployer");
+        assert_eq!(
+            manifest["env_binding"]["kind"],
+            "greentic.deployer.sorx@0.1.0"
+        );
+        assert_eq!(
+            manifest["extension"]["capabilities"]["offers"][0]["capability"],
+            "greentic.cap.runtime.host.v1"
+        );
+    }
+
+    #[test]
     fn parses_doctor_command() {
         let cli = parse_from(["greentic-sorx", "doctor", "landlord.gtpack"]).unwrap();
         assert!(matches!(cli.command, Commands::Doctor { .. }));
@@ -3679,6 +3874,17 @@ mod tests {
     fn parses_inspect_command() {
         let cli = parse_from(["greentic-sorx", "inspect", "landlord.gtpack"]).unwrap();
         assert!(matches!(cli.command, Commands::Inspect { .. }));
+    }
+
+    #[test]
+    fn parses_runtime_host_manifest_command() {
+        let cli = parse_from(["greentic-sorx", "runtime-host", "manifest"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::RuntimeHost {
+                command: RuntimeHostCommands::Manifest
+            }
+        ));
     }
 
     #[test]

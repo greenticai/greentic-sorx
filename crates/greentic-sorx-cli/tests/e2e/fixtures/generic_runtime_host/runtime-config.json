@@ -1,0 +1,58 @@
+{
+  "schema": "greentic.runtime-config.v1",
+  "env_id": "local",
+  "revisions": [
+    {
+      "deployment_id": "generic-deployment",
+      "revision_id": "rev-a",
+      "bundle_id": "landlord-tenant-sor",
+      "pack_list_refs": ["locks/rev-a.json"],
+      "pack_config_refs": ["configs/rev-a.json"],
+      "weight_bps": 7500
+    },
+    {
+      "deployment_id": "generic-deployment",
+      "revision_id": "rev-b",
+      "bundle_id": "landlord-tenant-sor",
+      "pack_list_refs": ["locks/rev-b.json"],
+      "pack_config_refs": ["configs/rev-b.json"],
+      "weight_bps": 2500
+    }
+  ],
+  "extensions": {
+    "control": {
+      "hooks": {
+        "pre_call": [
+          {
+            "id": "policy",
+            "contract": "greentic.control.pre-call.v1",
+            "pack_ref": "extensions/control/policy.gtpack",
+            "fail_mode": "closed"
+          }
+        ]
+      }
+    },
+    "observer": {
+      "subscriptions": {
+        "post_call": [
+          {
+            "id": "audit",
+            "contract": "greentic.observer.post-call.v1",
+            "pack_ref": "extensions/observer/audit.gtpack",
+            "fail_mode": "open"
+          }
+        ]
+      }
+    },
+    "admin": {
+      "surfaces": [
+        {
+          "id": "stack-console",
+          "contract": "greentic.admin.surface.v1",
+          "pack_ref": "extensions/admin/stack-console.gtpack",
+          "mount": "/admin/stacks"
+        }
+      ]
+    }
+  }
+}
