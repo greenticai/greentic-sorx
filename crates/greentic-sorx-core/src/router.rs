@@ -96,7 +96,8 @@ fn parse_endpoint(
             )
         })?;
     if matches!(operation, OperationKind::Command(_)) {
-        operation = OperationKind::Command(parse_command_spec(value.get("command"), &path)?);
+        operation =
+            OperationKind::Command(Box::new(parse_command_spec(value.get("command"), &path)?));
     }
     let method = string_field(value, "method")
         .and_then(|value| EndpointMethod::parse(&value))
@@ -223,6 +224,19 @@ fn parse_command_spec(value: Option<&Value>, path: &str) -> SorxResult<CommandSp
         action: string_field(value, "action"),
         target: string_field(value, "target"),
         idempotency: string_field(value, "idempotency"),
+        constraints: object
+            .get("constraints")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| {
+                SorxError::at_path(
+                    "invalid_gateway",
+                    format!("command constraints are invalid: {err}"),
+                    format!("{path}.command.constraints"),
+                )
+            })?
+            .unwrap_or_default(),
         steps,
         return_value: object
             .get("return")
@@ -243,6 +257,7 @@ fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
     match op.as_str() {
         "create" => Ok(CommandStep::Create {
             as_name: string_field(value, "as"),
+            when: object.get("when").cloned(),
             entity: string_field(value, "entity"),
             collection: string_field(value, "collection"),
             input: object
@@ -252,6 +267,7 @@ fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
         }),
         "delete_where" => Ok(CommandStep::DeleteWhere {
             as_name: string_field(value, "as"),
+            when: object.get("when").cloned(),
             entity: string_field(value, "entity"),
             collection: string_field(value, "collection"),
             r#where: object
@@ -262,6 +278,7 @@ fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
         }),
         "update_where" => Ok(CommandStep::UpdateWhere {
             as_name: string_field(value, "as"),
+            when: object.get("when").cloned(),
             entity: string_field(value, "entity"),
             collection: string_field(value, "collection"),
             r#where: object
@@ -275,8 +292,9 @@ fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Default::default())),
         }),
-        "query" => Ok(CommandStep::Query {
+        "increment_where" => Ok(CommandStep::IncrementWhere {
             as_name: string_field(value, "as"),
+            when: object.get("when").cloned(),
             entity: string_field(value, "entity"),
             collection: string_field(value, "collection"),
             r#where: object
@@ -284,9 +302,38 @@ fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
                 .or_else(|| object.get("filter"))
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Default::default())),
+            increments: object
+                .get("increments")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+        }),
+        "query" => Ok(CommandStep::Query {
+            as_name: string_field(value, "as"),
+            when: object.get("when").cloned(),
+            entity: string_field(value, "entity"),
+            collection: string_field(value, "collection"),
+            r#where: object
+                .get("where")
+                .or_else(|| object.get("filter"))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default())),
+            order_by: object
+                .get("order_by")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|err| {
+                    SorxError::at_path(
+                        "invalid_gateway",
+                        format!("query order_by is invalid: {err}"),
+                        format!("{path}.order_by"),
+                    )
+                })?
+                .unwrap_or_default(),
         }),
         "find_one" | "query_one" => Ok(CommandStep::FindOne {
             as_name: string_field(value, "as"),
+            when: object.get("when").cloned(),
             entity: string_field(value, "entity"),
             collection: string_field(value, "collection"),
             r#where: object
@@ -305,6 +352,7 @@ fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
             })?;
             Ok(CommandStep::EmitEvent {
                 as_name: string_field(value, "as"),
+                when: object.get("when").cloned(),
                 event,
                 payload: object
                     .get("payload")
@@ -331,6 +379,7 @@ fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
             }
             Ok(CommandStep::Foreach {
                 as_name: string_field(value, "as"),
+                when: object.get("when").cloned(),
                 items,
                 steps,
             })

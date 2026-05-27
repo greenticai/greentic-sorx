@@ -196,13 +196,23 @@ pub fn default_start_schema() -> Value {
             },
             "providers": {
                 "type": "object",
+                "default": {
+                    "store": {
+                        "kind": "foundationdb",
+                        "config_ref": "providers.foundationdb.local"
+                    }
+                },
                 "required": ["store"],
                 "properties": {
                     "store": {
                         "type": "object",
+                        "default": {
+                            "kind": "foundationdb",
+                            "config_ref": "providers.foundationdb.local"
+                        },
                         "required": ["kind"],
                         "properties": {
-                            "kind": { "type": "string", "enum": ["memory", "foundationdb"] },
+                            "kind": { "type": "string", "enum": ["memory", "foundationdb"], "default": "foundationdb" },
                             "config_ref": { "type": "string" },
                             "capabilities": {
                                 "type": "array",
@@ -343,7 +353,8 @@ pub fn normalize_start_answers(
 ) -> Result<SorxNormalizedAnswers, SorxStartupError> {
     let mut issues = Vec::new();
     let answers = qa_answer_payload(answers);
-    let normalized = normalize_value(schema, answers, "", true, &mut issues);
+    let mut normalized = normalize_value(schema, answers, "", true, &mut issues);
+    apply_provider_defaults(&mut normalized);
     issues.extend(secret_issues(&normalized, ""));
     issues.extend(provider_config_mode_issues(&normalized));
 
@@ -373,6 +384,41 @@ pub fn normalize_start_answers(
             issues,
         ))
     }
+}
+
+fn apply_provider_defaults(value: &mut Value) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    let providers = root
+        .entry("providers".to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut();
+    let Some(providers) = providers else {
+        return;
+    };
+    let store = providers
+        .entry("store".to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut();
+    let Some(store) = store else {
+        return;
+    };
+    let kind = store
+        .entry("kind".to_string())
+        .or_insert_with(|| json!("foundationdb"))
+        .as_str()
+        .unwrap_or("foundationdb")
+        .to_string();
+    if store.get("config_ref").and_then(Value::as_str).is_some() || store.contains_key("config") {
+        return;
+    }
+    let config_ref = match kind.as_str() {
+        "memory" => "providers.memory.local",
+        "foundationdb" => "providers.foundationdb.local",
+        _ => return,
+    };
+    store.insert("config_ref".to_string(), json!(config_ref));
 }
 
 fn qa_answer_payload(value: &Value) -> &Value {
@@ -959,6 +1005,50 @@ mod tests {
     }
 
     #[test]
+    fn foundationdb_store_is_defaulted_when_provider_answers_are_missing() {
+        let answers = json!({
+            "tenant": {
+                "tenant_id": "tenant-a"
+            },
+            "server": {
+                "public_base_url": "http://127.0.0.1:8787"
+            },
+            "policy": {
+                "approvals": {}
+            },
+            "audit": {},
+            "deployment": {
+                "tenant_id": "tenant-a",
+                "sor_name": "landlord",
+                "environment": "local"
+            },
+            "exposure": {},
+            "ghcr": {}
+        });
+        let normalized = normalize_start_answers(&default_start_schema(), &answers, true).unwrap();
+        assert_eq!(
+            normalized.answers["providers"]["store"]["kind"],
+            "foundationdb"
+        );
+        assert_eq!(
+            normalized.answers["providers"]["store"]["config_ref"],
+            "providers.foundationdb.local"
+        );
+    }
+
+    #[test]
+    fn memory_store_answer_gets_memory_config_ref_default() {
+        let mut answers = full_answers();
+        answers["providers"]["store"] = json!({ "kind": "memory" });
+        let normalized = normalize_start_answers(&default_start_schema(), &answers, true).unwrap();
+        assert_eq!(normalized.answers["providers"]["store"]["kind"], "memory");
+        assert_eq!(
+            normalized.answers["providers"]["store"]["config_ref"],
+            "providers.memory.local"
+        );
+    }
+
+    #[test]
     fn missing_answers_are_reported_as_paths() {
         let answers = json!({
             "tenant": {},
@@ -978,9 +1068,9 @@ mod tests {
                 .any(|issue| issue.path == "tenant.tenant_id")
         );
         assert!(
-            err.issues
+            !err.issues
                 .iter()
-                .any(|issue| issue.path == "providers.store")
+                .any(|issue| issue.path.starts_with("providers.store"))
         );
     }
 

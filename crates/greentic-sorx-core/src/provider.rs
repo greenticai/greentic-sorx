@@ -74,6 +74,10 @@ impl BindingResolver {
         self
     }
 
+    pub fn default_provider_id(&self) -> &str {
+        &self.default_provider_id
+    }
+
     pub fn resolve(&self, endpoint: &EndpointDefinition) -> SorxResult<ProviderBinding> {
         let entity = endpoint
             .entity
@@ -150,6 +154,10 @@ pub struct CreateOp {
     pub collection: String,
     pub input: Value,
     pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub unique_indexes: Vec<UniqueIndex>,
+    #[serde(default)]
+    pub unique_behavior: UniqueConflictBehavior,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +175,27 @@ pub struct UpdateOp {
     pub collection: String,
     pub id: String,
     pub patch: Value,
+    #[serde(default)]
+    pub unique_indexes: Vec<UniqueIndex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniqueIndex {
+    pub id: String,
+    pub record: String,
+    pub collection: String,
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UniqueConflictBehavior {
+    #[default]
+    Reject,
+    ReturnExisting {
+        index: String,
+        fields: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +204,23 @@ pub struct QueryOp {
     pub entity: String,
     pub collection: String,
     pub filter: Value,
+    #[serde(default)]
+    pub order_by: Vec<QueryOrder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryOrder {
+    pub field: String,
+    #[serde(default)]
+    pub direction: QueryOrderDirection,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryOrderDirection {
+    #[default]
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
