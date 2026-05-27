@@ -55,7 +55,7 @@ pub enum OperationKind {
     Update,
     Query,
     Delete,
-    Command(CommandSpec),
+    Command(Box<CommandSpec>),
 }
 
 impl OperationKind {
@@ -66,7 +66,7 @@ impl OperationKind {
             "update" | "patch" => Some(Self::Update),
             "query" | "list" | "search" => Some(Self::Query),
             "delete" | "remove" => Some(Self::Delete),
-            "command" => Some(Self::Command(CommandSpec::default())),
+            "command" => Some(Self::Command(Box::default())),
             _ => None,
         }
     }
@@ -85,9 +85,41 @@ pub struct CommandSpec {
     pub action: Option<String>,
     pub target: Option<String>,
     pub idempotency: Option<String>,
+    #[serde(default)]
+    pub constraints: CommandConstraints,
     pub steps: Vec<CommandStep>,
     #[serde(default, rename = "return")]
     pub return_value: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandConstraints {
+    #[serde(default)]
+    pub idempotency: Option<CommandIdempotencyConstraint>,
+    #[serde(default)]
+    pub unique: Vec<CommandUniqueConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandIdempotencyConstraint {
+    #[serde(default)]
+    pub index: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandUniqueConstraint {
+    #[serde(default)]
+    pub index: Option<String>,
+    #[serde(default)]
+    pub record: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,6 +128,8 @@ pub enum CommandStep {
     Create {
         #[serde(default, rename = "as")]
         as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
         entity: Option<String>,
         collection: Option<String>,
         input: Option<Value>,
@@ -103,6 +137,8 @@ pub enum CommandStep {
     DeleteWhere {
         #[serde(default, rename = "as")]
         as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
         entity: Option<String>,
         collection: Option<String>,
         #[serde(default)]
@@ -111,6 +147,8 @@ pub enum CommandStep {
     UpdateWhere {
         #[serde(default, rename = "as")]
         as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
         entity: Option<String>,
         collection: Option<String>,
         #[serde(default)]
@@ -118,17 +156,35 @@ pub enum CommandStep {
         #[serde(default)]
         set: Value,
     },
-    Query {
+    IncrementWhere {
         #[serde(default, rename = "as")]
         as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
         entity: Option<String>,
         collection: Option<String>,
         #[serde(default)]
         r#where: Value,
+        #[serde(default)]
+        increments: Value,
+    },
+    Query {
+        #[serde(default, rename = "as")]
+        as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
+        entity: Option<String>,
+        collection: Option<String>,
+        #[serde(default)]
+        r#where: Value,
+        #[serde(default)]
+        order_by: Vec<CommandOrderBy>,
     },
     FindOne {
         #[serde(default, rename = "as")]
         as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
         entity: Option<String>,
         collection: Option<String>,
         #[serde(default)]
@@ -139,6 +195,8 @@ pub enum CommandStep {
     EmitEvent {
         #[serde(default, rename = "as")]
         as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
         event: String,
         #[serde(default)]
         payload: Value,
@@ -147,10 +205,27 @@ pub enum CommandStep {
     Foreach {
         #[serde(default, rename = "as")]
         as_name: Option<String>,
+        #[serde(default)]
+        when: Option<Value>,
         items: Value,
         #[serde(default, rename = "do")]
         steps: Vec<CommandStep>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandOrderBy {
+    pub field: String,
+    #[serde(default)]
+    pub direction: CommandOrderDirection,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandOrderDirection {
+    #[default]
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -263,4 +338,16 @@ pub struct RuntimePack {
     pub name: String,
     pub version: String,
     pub digest: Option<String>,
+    #[serde(default)]
+    pub operational_indexes: Vec<RuntimeOperationalIndex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeOperationalIndex {
+    pub id: String,
+    pub record: String,
+    pub collection: Option<String>,
+    pub kind: String,
+    pub fields: Vec<String>,
+    pub unique: bool,
 }

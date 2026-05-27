@@ -296,6 +296,27 @@ fn validation_runtime(
             name: pack.pack_name.clone(),
             version: pack.pack_version.clone(),
             digest: pack.pack_digest.clone(),
+            operational_indexes: pack
+                .sorla_assets
+                .operational_indexes
+                .as_ref()
+                .map(|assets| {
+                    assets
+                        .catalog
+                        .indexes
+                        .iter()
+                        .filter(|index| index.unique)
+                        .map(|index| greentic_sorx_core::RuntimeOperationalIndex {
+                            id: index.id.clone(),
+                            record: index.record.clone(),
+                            collection: index.collection.clone(),
+                            kind: index.kind.clone(),
+                            fields: index.fields.clone(),
+                            unique: index.unique,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
         config.clone(),
         router,

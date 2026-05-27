@@ -1,20 +1,24 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 use crate::{
     AdminActionContext, AdminActionRequest, AdminActionResponse, AdminObserverEvent, AppendEventOp,
-    ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, CommandSpec, CommandStep,
-    ControlDecision, ControlDecisionAction, ControlHook, CreateOp, DeleteOp, DisabledAuditSink,
-    EndpointDefinition, EndpointInvocation, EndpointResult, EndpointRouter, EndpointStatus, GetOp,
-    IndexQueryOp, LocalPendingBroker, NoopControlHook, NoopObserverHook, ObserverEvent,
-    ObserverHook, OperationKind, PolicyAction, PolicyConfig, PolicyDecision, PolicyEngine,
-    ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, RuntimePack, SorStoreProvider,
-    SorxAuditEvent, SorxError, SorxEvent, SorxResult, SorxRuntimeConfig, StackCallContext,
-    StackCallRequest, StackCallResponse, TraverseOp, UpdateOp, ViewTransform, apply_value_patch,
+    ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, CommandOrderDirection, CommandSpec,
+    CommandStep, ControlDecision, ControlDecisionAction, ControlHook, CreateOp, DeleteOp,
+    DisabledAuditSink, EndpointDefinition, EndpointInvocation, EndpointResult, EndpointRouter,
+    EndpointStatus, GetOp, IndexQueryOp, LocalPendingBroker, NoopControlHook, NoopObserverHook,
+    ObserverEvent, ObserverHook, OperationKind, PolicyAction, PolicyConfig, PolicyDecision,
+    PolicyEngine, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, QueryOrder,
+    QueryOrderDirection, RuntimePack, SorStoreProvider, SorxAuditEvent, SorxError, SorxEvent,
+    SorxResult, SorxRuntimeConfig, StackCallContext, StackCallRequest, StackCallResponse,
+    TraverseOp, UniqueConflictBehavior, UniqueIndex, UpdateOp, ViewTransform, apply_value_patch,
 };
+
+static GENERATED_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct SorxRuntime {
@@ -354,6 +358,9 @@ impl SorxRuntime {
                             .idempotency_key
                             .as_ref()
                             .map(|key| format!("{}:{key}", endpoint.operation_id)),
+                        unique_indexes: self
+                            .unique_indexes_for(&binding.entity, &binding.collection),
+                        unique_behavior: UniqueConflictBehavior::Reject,
                     })?;
                     EndpointResult {
                         status: EndpointStatus::Created,
@@ -400,6 +407,8 @@ impl SorxRuntime {
                         collection: binding.collection.clone(),
                         id,
                         patch,
+                        unique_indexes: self
+                            .unique_indexes_for(&binding.entity, &binding.collection),
                     })?;
                     EndpointResult {
                         status: EndpointStatus::Ok,
@@ -445,6 +454,7 @@ impl SorxRuntime {
                             entity: binding.entity.clone(),
                             collection: binding.collection.clone(),
                             filter,
+                            order_by: Vec::new(),
                         })?)
                         .map_err(|err| SorxError::new("encode_failed", err.to_string()))?
                     };
@@ -667,9 +677,13 @@ impl SorxRuntime {
         updated_count: &mut usize,
         deleted_count: &mut usize,
     ) -> SorxResult<(Option<String>, Value)> {
+        if !command.should_run_step(step_when(step))? {
+            return Ok((step_as_name(step).cloned(), skipped_step_output(step)));
+        }
         match step {
             CommandStep::DeleteWhere {
                 as_name,
+                when: _,
                 entity,
                 collection,
                 r#where,
@@ -684,6 +698,7 @@ impl SorxRuntime {
                     entity: entity.clone(),
                     collection: collection.clone(),
                     filter,
+                    order_by: Vec::new(),
                 })?;
                 let mut step_deleted = 0usize;
                 let mut affected_ids = Vec::new();
@@ -716,6 +731,7 @@ impl SorxRuntime {
             }
             CommandStep::Create {
                 as_name,
+                when: _,
                 entity,
                 collection,
                 input,
@@ -724,17 +740,51 @@ impl SorxRuntime {
                     resolve_step_string(entity, command)?.unwrap_or_else(|| binding.entity.clone());
                 let collection = resolve_step_string(collection, command)?
                     .unwrap_or_else(|| binding.collection.clone());
-                let input = command.resolve_value(input.as_ref().unwrap_or(&invocation.input))?;
-                let record = provider.create(CreateOp {
-                    namespace: namespace.clone(),
-                    entity,
-                    collection: collection.clone(),
-                    input,
-                    idempotency_key: invocation
-                        .idempotency_key
-                        .as_ref()
-                        .map(|key| format!("{}:{collection}:{key}", endpoint.operation_id)),
-                })?;
+                let input_template = input.as_ref().unwrap_or(&invocation.input);
+                let generated_fields = generated_field_refs(input_template);
+                let unique_indexes = self.unique_indexes_for(&entity, &collection);
+                let unique_behavior = command_unique_behavior(spec, &entity, &unique_indexes);
+                let mut last_err = None;
+                let mut record = None;
+                for _ in 0..6 {
+                    let input = command.resolve_value(input_template)?;
+                    match provider.create(CreateOp {
+                        namespace: namespace.clone(),
+                        entity: entity.clone(),
+                        collection: collection.clone(),
+                        input,
+                        idempotency_key: invocation
+                            .idempotency_key
+                            .as_ref()
+                            .map(|key| format!("{}:{collection}:{key}", endpoint.operation_id)),
+                        unique_indexes: unique_indexes.clone(),
+                        unique_behavior: unique_behavior.clone(),
+                    }) {
+                        Ok(created) => {
+                            record = Some(created);
+                            break;
+                        }
+                        Err(err)
+                            if err.code == "unique_constraint_violation"
+                                && command
+                                    .reset_generated_for_conflict(&err, &generated_fields) =>
+                        {
+                            last_err = Some(err);
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                let record = match record {
+                    Some(record) => record,
+                    None => {
+                        return Err(last_err.unwrap_or_else(|| {
+                            SorxError::new(
+                                "unique_constraint_retry_exhausted",
+                                "failed to generate a unique value for create command",
+                            )
+                        }));
+                    }
+                };
                 *created_count += 1;
                 Ok((
                     as_name.clone(),
@@ -748,6 +798,7 @@ impl SorxRuntime {
             }
             CommandStep::UpdateWhere {
                 as_name,
+                when: _,
                 entity,
                 collection,
                 r#where,
@@ -758,23 +809,55 @@ impl SorxRuntime {
                 let collection = resolve_step_string(collection, command)?
                     .unwrap_or_else(|| binding.collection.clone());
                 let filter = command.resolve_value(r#where)?;
-                let patch = command.resolve_value(set)?;
+                let generated_fields = generated_field_refs(set);
+                let unique_indexes = self.unique_indexes_for(&entity, &collection);
                 let records = provider.query(QueryOp {
                     namespace: namespace.clone(),
                     entity: entity.clone(),
                     collection: collection.clone(),
                     filter,
+                    order_by: Vec::new(),
                 })?;
                 let mut updated_records = Vec::new();
                 let mut affected_ids = Vec::new();
                 for record in records.records {
-                    let updated = provider.update(UpdateOp {
-                        namespace: namespace.clone(),
-                        entity: entity.clone(),
-                        collection: collection.clone(),
-                        id: record.id,
-                        patch: patch.clone(),
-                    })?;
+                    let mut last_err = None;
+                    let mut updated_record = None;
+                    for _ in 0..6 {
+                        let patch = command.resolve_value(set)?;
+                        match provider.update(UpdateOp {
+                            namespace: namespace.clone(),
+                            entity: entity.clone(),
+                            collection: collection.clone(),
+                            id: record.id.clone(),
+                            patch,
+                            unique_indexes: unique_indexes.clone(),
+                        }) {
+                            Ok(updated) => {
+                                updated_record = Some(updated);
+                                break;
+                            }
+                            Err(err)
+                                if err.code == "unique_constraint_violation"
+                                    && command
+                                        .reset_generated_for_conflict(&err, &generated_fields) =>
+                            {
+                                last_err = Some(err);
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    let updated = match updated_record {
+                        Some(updated) => updated,
+                        None => {
+                            return Err(last_err.unwrap_or_else(|| {
+                                SorxError::new(
+                                    "unique_constraint_retry_exhausted",
+                                    "failed to generate a unique value for update command",
+                                )
+                            }));
+                        }
+                    };
                     affected_ids.push(updated.id.clone());
                     updated_records.push(
                         serde_json::to_value(updated)
@@ -794,11 +877,72 @@ impl SorxRuntime {
                     }),
                 ))
             }
-            CommandStep::Query {
+            CommandStep::IncrementWhere {
                 as_name,
+                when: _,
                 entity,
                 collection,
                 r#where,
+                increments,
+            } => {
+                let entity =
+                    resolve_step_string(entity, command)?.unwrap_or_else(|| binding.entity.clone());
+                let collection = resolve_step_string(collection, command)?
+                    .unwrap_or_else(|| binding.collection.clone());
+                let filter = command.resolve_value(r#where)?;
+                let increments = command.resolve_value(increments)?;
+                let increments = increments.as_object().cloned().ok_or_else(|| {
+                    SorxError::new(
+                        "command_increments_invalid",
+                        "increment_where increments must resolve to an object",
+                    )
+                })?;
+                let unique_indexes = self.unique_indexes_for(&entity, &collection);
+                let records = provider.query(QueryOp {
+                    namespace: namespace.clone(),
+                    entity: entity.clone(),
+                    collection: collection.clone(),
+                    filter,
+                    order_by: Vec::new(),
+                })?;
+                let mut updated_records = Vec::new();
+                let mut affected_ids = Vec::new();
+                for record in records.records {
+                    let patch = increment_patch(&record.data, &increments)?;
+                    let updated = provider.update(UpdateOp {
+                        namespace: namespace.clone(),
+                        entity: entity.clone(),
+                        collection: collection.clone(),
+                        id: record.id,
+                        patch,
+                        unique_indexes: unique_indexes.clone(),
+                    })?;
+                    affected_ids.push(updated.id.clone());
+                    updated_records.push(
+                        serde_json::to_value(updated)
+                            .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
+                    );
+                }
+                *updated_count += updated_records.len();
+                Ok((
+                    as_name.clone(),
+                    json!({
+                        "op": "increment_where",
+                        "collection": collection,
+                        "updated": updated_records.len(),
+                        "updated_count": updated_records.len(),
+                        "affected_ids": affected_ids,
+                        "records": updated_records
+                    }),
+                ))
+            }
+            CommandStep::Query {
+                as_name,
+                when: _,
+                entity,
+                collection,
+                r#where,
+                order_by,
             } => {
                 let entity =
                     resolve_step_string(entity, command)?.unwrap_or_else(|| binding.entity.clone());
@@ -810,6 +954,7 @@ impl SorxRuntime {
                     entity,
                     collection: collection.clone(),
                     filter,
+                    order_by: command_order_by(order_by),
                 })?;
                 Ok((
                     as_name.clone(),
@@ -823,6 +968,7 @@ impl SorxRuntime {
             }
             CommandStep::FindOne {
                 as_name,
+                when: _,
                 entity,
                 collection,
                 r#where,
@@ -838,6 +984,7 @@ impl SorxRuntime {
                     entity,
                     collection: collection.clone(),
                     filter,
+                    order_by: Vec::new(),
                 })?;
                 let record = records.records.into_iter().next();
                 if *required && record.is_none() {
@@ -856,6 +1003,7 @@ impl SorxRuntime {
             }
             CommandStep::EmitEvent {
                 as_name,
+                when: _,
                 event,
                 payload,
                 stream,
@@ -885,6 +1033,7 @@ impl SorxRuntime {
             }
             CommandStep::Foreach {
                 as_name,
+                when: _,
                 items,
                 steps,
             } => {
@@ -972,6 +1121,30 @@ impl SorxRuntime {
             )]),
         })
     }
+
+    fn unique_indexes_for(&self, entity: &str, collection: &str) -> Vec<UniqueIndex> {
+        self.pack
+            .operational_indexes
+            .iter()
+            .filter(|index| {
+                index.unique
+                    && index.record == entity
+                    && index
+                        .collection
+                        .as_deref()
+                        .is_none_or(|index_collection| index_collection == collection)
+            })
+            .map(|index| UniqueIndex {
+                id: index.id.clone(),
+                record: index.record.clone(),
+                collection: index
+                    .collection
+                    .clone()
+                    .unwrap_or_else(|| collection.to_string()),
+                fields: index.fields.clone(),
+            })
+            .collect()
+    }
 }
 
 fn validate_input(endpoint: &EndpointDefinition, input: &Value) -> SorxResult<()> {
@@ -1038,6 +1211,150 @@ fn collect_command_records(output: &Value, records: &mut Vec<Value>) {
     }
 }
 
+fn step_when(step: &CommandStep) -> Option<&Value> {
+    match step {
+        CommandStep::Create { when, .. }
+        | CommandStep::DeleteWhere { when, .. }
+        | CommandStep::UpdateWhere { when, .. }
+        | CommandStep::IncrementWhere { when, .. }
+        | CommandStep::Query { when, .. }
+        | CommandStep::FindOne { when, .. }
+        | CommandStep::EmitEvent { when, .. }
+        | CommandStep::Foreach { when, .. } => when.as_ref(),
+    }
+}
+
+fn step_as_name(step: &CommandStep) -> Option<&String> {
+    match step {
+        CommandStep::Create { as_name, .. }
+        | CommandStep::DeleteWhere { as_name, .. }
+        | CommandStep::UpdateWhere { as_name, .. }
+        | CommandStep::IncrementWhere { as_name, .. }
+        | CommandStep::Query { as_name, .. }
+        | CommandStep::FindOne { as_name, .. }
+        | CommandStep::EmitEvent { as_name, .. }
+        | CommandStep::Foreach { as_name, .. } => as_name.as_ref(),
+    }
+}
+
+fn skipped_step_output(step: &CommandStep) -> Value {
+    let op = match step {
+        CommandStep::Create { .. } => "create",
+        CommandStep::DeleteWhere { .. } => "delete_where",
+        CommandStep::UpdateWhere { .. } => "update_where",
+        CommandStep::IncrementWhere { .. } => "increment_where",
+        CommandStep::Query { .. } => "query",
+        CommandStep::FindOne { .. } => "find_one",
+        CommandStep::EmitEvent { .. } => "emit_event",
+        CommandStep::Foreach { .. } => "foreach",
+    };
+    json!({ "op": op, "skipped": true })
+}
+
+fn command_order_by(order_by: &[crate::model::CommandOrderBy]) -> Vec<QueryOrder> {
+    order_by
+        .iter()
+        .map(|order| QueryOrder {
+            field: order.field.clone(),
+            direction: match order.direction {
+                CommandOrderDirection::Asc => QueryOrderDirection::Asc,
+                CommandOrderDirection::Desc => QueryOrderDirection::Desc,
+            },
+        })
+        .collect()
+}
+
+fn increment_patch(data: &Value, increments: &serde_json::Map<String, Value>) -> SorxResult<Value> {
+    let mut patch = serde_json::Map::new();
+    for (field, amount) in increments {
+        let amount = amount.as_f64().ok_or_else(|| {
+            SorxError::at_path(
+                "command_increment_invalid",
+                "increment amount must be numeric",
+                field,
+            )
+        })?;
+        let current = lookup_path(data, field)
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let next = current + amount;
+        patch.insert(field.clone(), json_number(next));
+    }
+    Ok(Value::Object(patch))
+}
+
+fn json_number(value: f64) -> Value {
+    if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+        json!(value as i64)
+    } else {
+        json!(value)
+    }
+}
+
+fn command_unique_behavior(
+    spec: &CommandSpec,
+    entity: &str,
+    indexes: &[UniqueIndex],
+) -> UniqueConflictBehavior {
+    let Some(idempotency) = &spec.constraints.idempotency else {
+        return UniqueConflictBehavior::Reject;
+    };
+    let mode = idempotency.mode.as_deref().or(spec.idempotency.as_deref());
+    if mode != Some("return_existing") {
+        return UniqueConflictBehavior::Reject;
+    }
+    let Some(index) = idempotency.index.as_ref() else {
+        return UniqueConflictBehavior::Reject;
+    };
+    if let Some(unique) = indexes
+        .iter()
+        .find(|candidate| candidate.id == *index && candidate.record == entity)
+    {
+        return UniqueConflictBehavior::ReturnExisting {
+            index: unique.id.clone(),
+            fields: unique.fields.clone(),
+        };
+    }
+    UniqueConflictBehavior::Reject
+}
+
+fn generated_field_refs(value: &Value) -> BTreeMap<String, String> {
+    let mut refs = BTreeMap::new();
+    collect_generated_field_refs(value, "", &mut refs);
+    refs
+}
+
+fn collect_generated_field_refs(value: &Value, path: &str, refs: &mut BTreeMap<String, String>) {
+    match value {
+        Value::String(text) => {
+            if let Some(name) = text.strip_prefix("$generated.") {
+                refs.insert(path.to_string(), name.to_string());
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                let child = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_generated_field_refs(value, &child, refs);
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                let child = if path.is_empty() {
+                    index.to_string()
+                } else {
+                    format!("{path}.{index}")
+                };
+                collect_generated_field_refs(value, &child, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
 struct CommandExecutionContext<'a> {
     endpoint: &'a EndpointDefinition,
     invocation: &'a EndpointInvocation,
@@ -1048,6 +1365,7 @@ struct CommandExecutionContext<'a> {
     item: Option<Value>,
     index: Option<usize>,
     now: Value,
+    nonce: u64,
 }
 
 impl<'a> CommandExecutionContext<'a> {
@@ -1062,6 +1380,7 @@ impl<'a> CommandExecutionContext<'a> {
             item: None,
             index: None,
             now: Value::String(now_string()),
+            nonce: GENERATED_NONCE.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -1108,9 +1427,12 @@ impl<'a> CommandExecutionContext<'a> {
                     }
                     return Ok(Value::Null);
                 }
+                if let Some(rank) = object.get("rank") {
+                    return self.resolve_rank(rank);
+                }
                 let mut out = serde_json::Map::new();
                 for (key, value) in object {
-                    out.insert(key.clone(), self.resolve_value(value)?);
+                    out.insert(key.clone(), self.resolve_optional_value(value)?);
                 }
                 Ok(Value::Object(out))
             }
@@ -1133,6 +1455,93 @@ impl<'a> CommandExecutionContext<'a> {
                 .map(ToString::to_string)
                 .or_else(|| value.as_i64().map(|number| number.to_string()))
         })
+    }
+
+    fn should_run_step(&mut self, when: Option<&Value>) -> SorxResult<bool> {
+        let Some(when) = when else {
+            return Ok(true);
+        };
+        match when {
+            Value::Bool(value) => Ok(*value),
+            Value::String(_) => Ok(!is_absent_command_value(
+                &self.resolve_optional_value(when)?,
+            )),
+            Value::Object(object) => {
+                if let Some(value) = object.get("present") {
+                    return Ok(!is_absent_command_value(
+                        &self.resolve_optional_value(value)?,
+                    ));
+                }
+                if let Some(value) = object.get("absent") {
+                    return Ok(is_absent_command_value(
+                        &self.resolve_optional_value(value)?,
+                    ));
+                }
+                if let Some(values) = object.get("all").and_then(Value::as_array) {
+                    for value in values {
+                        if !self.should_run_step(Some(value))? {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
+                if let Some(values) = object.get("any").and_then(Value::as_array) {
+                    for value in values {
+                        if self.should_run_step(Some(value))? {
+                            return Ok(true);
+                        }
+                    }
+                    return Ok(false);
+                }
+                if let Some(value) = object.get("eq").and_then(Value::as_array)
+                    && value.len() == 2
+                {
+                    return Ok(self.resolve_optional_value(&value[0])?
+                        == self.resolve_optional_value(&value[1])?);
+                }
+                Ok(!is_absent_command_value(
+                    &self.resolve_optional_value(when)?,
+                ))
+            }
+            _ => Ok(!is_absent_command_value(
+                &self.resolve_optional_value(when)?,
+            )),
+        }
+    }
+
+    fn resolve_rank(&mut self, rank: &Value) -> SorxResult<Value> {
+        let object = rank
+            .as_object()
+            .ok_or_else(|| SorxError::new("command_rank_invalid", "rank must be an object"))?;
+        let records = object
+            .get("records")
+            .ok_or_else(|| SorxError::new("command_rank_invalid", "rank.records is required"))?;
+        let records = self.resolve_value(records)?;
+        let records = records.as_array().ok_or_else(|| {
+            SorxError::new(
+                "command_rank_invalid",
+                "rank.records must resolve to an array",
+            )
+        })?;
+        let where_value = object
+            .get("where")
+            .ok_or_else(|| SorxError::new("command_rank_invalid", "rank.where is required"))?;
+        let filter = self.resolve_value(where_value)?;
+        let filter = filter.as_object().ok_or_else(|| {
+            SorxError::new(
+                "command_rank_invalid",
+                "rank.where must resolve to an object",
+            )
+        })?;
+        for (index, record) in records.iter().enumerate() {
+            if filter
+                .iter()
+                .all(|(path, expected)| lookup_path(record, path) == Some(expected))
+            {
+                return Ok(json!(index + 1));
+            }
+        }
+        Ok(Value::Null)
     }
 
     fn resolve_string_value(&mut self, text: &str) -> SorxResult<Value> {
@@ -1195,24 +1604,54 @@ impl<'a> CommandExecutionContext<'a> {
         if let Some(value) = self.generated.get(name) {
             return value.clone();
         }
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
         let seed = format!(
-            "{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}",
             self.endpoint.endpoint_id,
             self.endpoint.operation_id,
             self.invocation
                 .idempotency_key
                 .as_deref()
                 .unwrap_or("no-key"),
-            self.generated.len()
+            self.generated.len(),
+            self.nonce,
+            time
         );
         let value = match name {
             "uuid" => Value::String(generated_uuid(&seed)),
-            "short_code" => Value::String(generated_short_code(&seed, 8)),
+            "short_code" | "invitation_code" => Value::String(generated_short_code(&seed, 8)),
             "referral_code" => Value::String(generated_short_code(&seed, 10)),
+            value if value.ends_with("_token") => {
+                Value::String(generated_short_code(&format!("{seed}:{name}"), 16))
+            }
+            value if value.ends_with("_code") => {
+                Value::String(generated_short_code(&format!("{seed}:{name}"), 10))
+            }
             _ => Value::String(generated_short_code(&format!("{seed}:{name}"), 12)),
         };
         self.generated.insert(name.to_string(), value.clone());
         value
+    }
+
+    fn reset_generated_for_conflict(
+        &mut self,
+        err: &SorxError,
+        generated_fields: &BTreeMap<String, String>,
+    ) -> bool {
+        let mut reset = false;
+        for (field, name) in generated_fields {
+            if err.message.contains(field) {
+                self.generated.remove(name);
+                reset = true;
+            }
+        }
+        if reset {
+            self.nonce = GENERATED_NONCE.fetch_add(1, Ordering::Relaxed);
+        }
+        reset
     }
 }
 
@@ -1434,6 +1873,7 @@ pub fn runtime_pack(name: impl Into<String>, version: impl Into<String>) -> Runt
         name: name.into(),
         version: version.into(),
         digest: None,
+        operational_indexes: Vec::new(),
     }
 }
 

@@ -73,10 +73,10 @@ pub use metrics_runtime::{
     RuntimeMetricDimension, RuntimeMetricKind,
 };
 pub use model::{
-    ApprovalRequirement, CallerContext, CommandSpec, CommandStep, EndpointDefinition,
-    EndpointInvocation, EndpointMethod, EndpointResult, EndpointStatus, IndexRequirement,
-    InvocationSource, OperationKind, QueryPlan, RiskLevel, RuntimePack, SorxEvent,
-    TraversalRequirement, ViewTransform,
+    ApprovalRequirement, CallerContext, CommandOrderBy, CommandOrderDirection, CommandSpec,
+    CommandStep, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointResult,
+    EndpointStatus, IndexRequirement, InvocationSource, OperationKind, QueryPlan, RiskLevel,
+    RuntimeOperationalIndex, RuntimePack, SorxEvent, TraversalRequirement, ViewTransform,
 };
 pub use ontology_graph::{
     OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,
@@ -90,9 +90,10 @@ pub use policy::{
 pub use provider::{
     AppendEventOp, BindingResolver, CreateOp, DeleteOp, DeleteResult, EntityRecord, EventRecord,
     EvidenceResult, ExternalRef, ExternalRefsOp, ExternalRefsResult, GetOp, IndexQueryOp,
-    IndexQueryResult, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, QueryResult,
-    SorStoreProvider, SorxCanonicalStore, StoreEvidenceOp, StoreProviderKind, TraverseOp,
-    TraverseResult, UpdateOp, default_collection_name,
+    IndexQueryResult, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, QueryOrder,
+    QueryOrderDirection, QueryResult, SorStoreProvider, SorxCanonicalStore, StoreEvidenceOp,
+    StoreProviderKind, TraverseOp, TraverseResult, UniqueConflictBehavior, UniqueIndex, UpdateOp,
+    default_collection_name,
 };
 pub use provider_compatibility::{
     ProviderCapabilityRequirement, ProviderCompatibilityInput, ProviderCompatibilityIssue,

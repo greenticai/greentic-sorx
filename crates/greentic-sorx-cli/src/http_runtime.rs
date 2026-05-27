@@ -8,12 +8,13 @@ use greentic_sorx_core::{
     ControlDecisionAction, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter,
     EndpointStatus, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
     McpToolDefinition, McpToolList, MemoryStoreProvider, MetricAggregate, MetricQuery,
-    MetricQueryResult, MetricResultRow, MetricRuntime, MetricRuntimeProvider, OperationKind,
-    PolicyAction, ProviderNamespace, ProviderRegistry, RiskLevel, RuntimeConfig, RuntimeInfo,
-    RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
-    RuntimeMetricKind, RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult,
-    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink, StoreProviderKind,
-    TrafficUpdateRequest, apply_value_patch,
+    MetricQueryFilter, MetricQueryResult, MetricResultRow, MetricRuntime, MetricRuntimeProvider,
+    OperationKind, PolicyAction, ProviderNamespace, ProviderRegistry, QueryOp, RiskLevel,
+    RuntimeConfig, RuntimeInfo, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog,
+    RuntimeMetricDimension, RuntimeMetricKind, RuntimeOperationalIndex, RuntimePack,
+    RuntimeSnapshot, SorxDeployment, SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig,
+    StageDeploymentRequest, StdoutAuditSink, StoreProviderKind, TrafficUpdateRequest,
+    apply_value_patch,
 };
 use greentic_sorx_pack::{
     BusinessAction, BusinessActionAssets, LoadedSorlaPack, MetricDefinition, contract_hash,
@@ -87,7 +88,7 @@ pub struct HttpRuntime {
     tools: Arc<McpToolList>,
     business_actions: Arc<Option<BusinessActionAssets>>,
     metrics: Arc<Option<RuntimeMetricCatalog>>,
-    metric_provider: Arc<StaticMetricProvider>,
+    metric_provider: Arc<StoreMetricProvider>,
     runtime_snapshot: Arc<RwLock<RuntimeSnapshot>>,
 }
 
@@ -120,6 +121,7 @@ impl HttpRuntime {
                     name: pack.pack_name.clone(),
                     version: pack.pack_version.clone(),
                     digest: pack.pack_digest.clone(),
+                    operational_indexes: runtime_operational_indexes(pack),
                 },
                 config.clone(),
                 router,
@@ -148,6 +150,17 @@ impl HttpRuntime {
             Some(config) => RuntimeSnapshot::from_runtime_config("runtime-main", config)?,
             None => RuntimeSnapshot::new("runtime-main"),
         };
+        let metric_provider = StoreMetricProvider {
+            providers: runtime.providers.clone(),
+            entity_provider_ids: runtime
+                .config
+                .bindings
+                .entity_bindings
+                .iter()
+                .map(|(entity, binding)| (entity.clone(), binding.provider_id.clone()))
+                .collect(),
+            default_provider_id: runtime.config.bindings.default_provider_id().to_string(),
+        };
         Ok(Self {
             deployment_id,
             admin_api_enabled: false,
@@ -157,7 +170,7 @@ impl HttpRuntime {
             tools: Arc::new(tools),
             business_actions: Arc::new(pack.sorla_assets.business_actions.clone()),
             metrics: Arc::new(metrics),
-            metric_provider: Arc::new(StaticMetricProvider),
+            metric_provider: Arc::new(metric_provider),
             runtime_snapshot: Arc::new(RwLock::new(runtime_snapshot)),
         })
     }
@@ -898,32 +911,35 @@ impl HttpRuntime {
             Ok(value) => value,
             Err(err) => return sorx_error_response(400, err),
         };
-        let query = metric_query_from_json(
+        let mut query = metric_query_from_json(
             body,
             ProviderNamespace {
                 tenant_id: tenant_id.clone(),
                 sor_name: self.runtime.config.deployment.sor_name.clone(),
             },
         );
-        if let Ok(metric) = metrics.metric(metric_name)
-            && let Some(dimension) = sensitive_requested_dimension(metric, &query)
-        {
-            let mut details = Map::new();
-            details.insert("metric".to_string(), json!(metric_name));
-            details.insert("dimension".to_string(), json!(dimension));
-            let _ = self.runtime.audit_metric(
-                tenant_id,
-                caller_id,
-                "sorx.metric.query.rejected",
-                metric_name,
-                Some("denied".to_string()),
-                details,
-            );
-            return error_response(
-                403,
-                "SORX_METRIC_POLICY_DENIED",
-                "metric query includes a sensitive dimension",
-            );
+        if let Ok(metric) = metrics.metric(metric_name) {
+            if query.dimensions.is_empty() {
+                query.dimensions = default_metric_dimensions(metric);
+            }
+            if let Some(dimension) = sensitive_requested_dimension(metric, &query) {
+                let mut details = Map::new();
+                details.insert("metric".to_string(), json!(metric_name));
+                details.insert("dimension".to_string(), json!(dimension));
+                let _ = self.runtime.audit_metric(
+                    tenant_id,
+                    caller_id,
+                    "sorx.metric.query.rejected",
+                    metric_name,
+                    Some("denied".to_string()),
+                    details,
+                );
+                return error_response(
+                    403,
+                    "SORX_METRIC_POLICY_DENIED",
+                    "metric query includes a sensitive dimension",
+                );
+            }
         }
         let runtime = MetricRuntime::new(metrics.clone(), self.metric_provider.as_ref());
         let mut cache_details = Map::new();
@@ -1395,6 +1411,29 @@ fn runtime_metric_catalog(pack: &LoadedSorlaPack) -> SorxResult<Option<RuntimeMe
     RuntimeMetricCatalog::new(runtime_metrics).map(Some)
 }
 
+fn runtime_operational_indexes(pack: &LoadedSorlaPack) -> Vec<RuntimeOperationalIndex> {
+    pack.sorla_assets
+        .operational_indexes
+        .as_ref()
+        .map(|assets| {
+            assets
+                .catalog
+                .indexes
+                .iter()
+                .filter(|index| index.unique)
+                .map(|index| RuntimeOperationalIndex {
+                    id: index.id.clone(),
+                    record: index.record.clone(),
+                    collection: index.collection.clone(),
+                    kind: index.kind.clone(),
+                    fields: index.fields.clone(),
+                    unique: index.unique,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn runtime_metric_from_pack(metric: &MetricDefinition) -> SorxResult<RuntimeMetric> {
     let dimensions = metric
         .dimensions
@@ -1475,11 +1514,7 @@ fn with_metric_tools(
             "metrics.get",
         ));
         for metric in &metrics.metrics {
-            tools.tools.push(metric_tool(
-                format!("sorx.metrics.query.{}", metric.name),
-                format!("Query metric `{}`", metric.name),
-                format!("metrics.query.{}", metric.name),
-            ));
+            tools.tools.push(metric_query_tool(metric));
         }
     }
     tools
@@ -1501,6 +1536,55 @@ fn metric_tool(
     }
 }
 
+fn metric_query_tool(metric: &RuntimeMetric) -> McpToolDefinition {
+    McpToolDefinition {
+        name: format!("sorx.metrics.query.{}", metric.name),
+        description: Some(format!("Query metric `{}`", metric.name)),
+        endpoint_id: format!("metrics.query.{}", metric.name),
+        operation_id: format!("metrics.query.{}", metric.name),
+        risk: RiskLevel::Low,
+        input_schema: Some(metric_query_tool_schema(metric)),
+    }
+}
+
+fn metric_query_tool_schema(metric: &RuntimeMetric) -> Value {
+    let dimension_names = metric
+        .dimensions
+        .iter()
+        .map(|dimension| Value::String(dimension.name.clone()))
+        .collect::<Vec<_>>();
+    json!({
+        "type": "object",
+        "properties": {
+            "dimensions": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": dimension_names
+                }
+            },
+            "filters": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["field", "operator", "value"],
+                    "properties": {
+                        "field": { "type": "string" },
+                        "operator": {
+                            "type": "string",
+                            "enum": ["eq", "ne", "gt", "gte", "lt", "lte", "in"]
+                        },
+                        "value": {}
+                    }
+                }
+            },
+            "from": { "type": "string" },
+            "to": { "type": "string" },
+            "grain": { "type": "string" }
+        }
+    })
+}
+
 fn metric_summary_json(metric: &RuntimeMetric) -> Value {
     json!({
         "name": metric.name,
@@ -1515,6 +1599,26 @@ fn metric_summary_json(metric: &RuntimeMetric) -> Value {
 }
 
 fn metric_query_from_json(value: Value, namespace: ProviderNamespace) -> MetricQuery {
+    let filters = value
+        .get("filters")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|filter| {
+                    Some(MetricQueryFilter {
+                        field: filter.get("field")?.as_str()?.to_string(),
+                        operator: filter
+                            .get("operator")
+                            .and_then(Value::as_str)
+                            .unwrap_or("eq")
+                            .to_string(),
+                        value: filter.get("value").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     MetricQuery {
         namespace,
         from: value
@@ -1540,7 +1644,7 @@ fn metric_query_from_json(value: Value, namespace: ProviderNamespace) -> MetricQ
                     .collect()
             })
             .unwrap_or_default(),
-        filters: Vec::new(),
+        filters,
     }
 }
 
@@ -1552,29 +1656,230 @@ fn sensitive_requested_dimension(metric: &RuntimeMetric, query: &MetricQuery) ->
         .map(|dimension| dimension.name.clone())
 }
 
-#[derive(Debug, Default)]
-struct StaticMetricProvider;
+fn default_metric_dimensions(metric: &RuntimeMetric) -> Vec<String> {
+    metric
+        .dimensions
+        .iter()
+        .filter(|dimension| !dimension.sensitive)
+        .map(|dimension| dimension.name.clone())
+        .collect()
+}
 
-impl MetricRuntimeProvider for StaticMetricProvider {
+#[derive(Clone)]
+struct StoreMetricProvider {
+    providers: ProviderRegistry,
+    entity_provider_ids: BTreeMap<String, String>,
+    default_provider_id: String,
+}
+
+impl MetricRuntimeProvider for StoreMetricProvider {
     fn query_metric(
         &self,
         definition: &RuntimeMetric,
-        _query: &MetricQuery,
+        query: &MetricQuery,
     ) -> SorxResult<MetricQueryResult> {
-        let value = match definition.name.as_str() {
-            "daily_clicks" => 42.0,
-            "monthly_revenue" => 1250.0,
-            "monthly_cost" => 350.0,
-            _ => 0.0,
+        let RuntimeMetricKind::Aggregate {
+            source_entity,
+            collection,
+            aggregate,
+            field,
+        } = &definition.kind
+        else {
+            return Err(SorxError::new(
+                "metric_kind_invalid",
+                "store metric provider only supports aggregate metrics",
+            ));
         };
+        let provider_id = self
+            .entity_provider_ids
+            .get(source_entity)
+            .unwrap_or(&self.default_provider_id);
+        let provider = self.providers.store(provider_id)?;
+        let records = provider.query(QueryOp {
+            namespace: query.namespace.clone(),
+            entity: source_entity.clone(),
+            collection: collection.clone(),
+            filter: equality_filter(query),
+            order_by: Vec::new(),
+        })?;
+        let requested_dimensions = query.dimensions.clone();
+        let dimension_defs = requested_dimensions
+            .iter()
+            .map(|name| {
+                definition
+                    .dimensions
+                    .iter()
+                    .find(|dimension| dimension.name == *name)
+                    .ok_or_else(|| {
+                        SorxError::new(
+                            "metric_dimension_unknown",
+                            format!(
+                                "metric `{}` does not define dimension `{name}`",
+                                definition.name
+                            ),
+                        )
+                    })
+            })
+            .collect::<SorxResult<Vec<_>>>()?;
+        let mut groups: BTreeMap<String, (Vec<Value>, AggregateState)> = BTreeMap::new();
+        for record in records
+            .records
+            .iter()
+            .filter(|record| metric_filters_match(&record.data, &query.filters))
+        {
+            let key = dimension_defs
+                .iter()
+                .map(|dimension| {
+                    field_value(
+                        &record.data,
+                        dimension.field.as_deref().unwrap_or(&dimension.name),
+                    )
+                    .cloned()
+                    .unwrap_or(Value::Null)
+                })
+                .collect::<Vec<_>>();
+            let group_key = serde_json::to_string(&key)
+                .map_err(|err| SorxError::new("metric_group_key_failed", err.to_string()))?;
+            groups
+                .entry(group_key)
+                .or_insert_with(|| (key, AggregateState::default()))
+                .1
+                .push(record_value(&record.data, field));
+        }
+        if groups.is_empty() {
+            groups.insert("[]".to_string(), (Vec::new(), AggregateState::default()));
+        }
+        let rows = groups
+            .into_iter()
+            .map(|(_, (key, state))| {
+                let dimensions = dimension_defs
+                    .iter()
+                    .zip(key)
+                    .filter_map(|(dimension, value)| {
+                        if value.is_null() {
+                            None
+                        } else {
+                            Some((dimension.name.clone(), value))
+                        }
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                Ok(MetricResultRow {
+                    dimensions,
+                    value: state.value(*aggregate),
+                })
+            })
+            .collect::<SorxResult<Vec<_>>>()?;
         Ok(MetricQueryResult {
             metric: definition.name.clone(),
-            rows: vec![MetricResultRow {
-                dimensions: BTreeMap::new(),
-                value,
-            }],
+            rows,
         })
     }
+}
+
+#[derive(Default)]
+struct AggregateState {
+    count: usize,
+    sum: f64,
+    numeric_count: usize,
+    min: Option<f64>,
+    max: Option<f64>,
+    distinct: Vec<Value>,
+}
+
+impl AggregateState {
+    fn push(&mut self, value: Option<&Value>) {
+        self.count += 1;
+        if let Some(value) = value {
+            if !self.distinct.contains(value) {
+                self.distinct.push(value.clone());
+            }
+            if let Some(number) = value.as_f64() {
+                self.sum += number;
+                self.numeric_count += 1;
+                self.min = Some(
+                    self.min
+                        .map(|current| current.min(number))
+                        .unwrap_or(number),
+                );
+                self.max = Some(
+                    self.max
+                        .map(|current| current.max(number))
+                        .unwrap_or(number),
+                );
+            }
+        }
+    }
+
+    fn value(&self, aggregate: MetricAggregate) -> f64 {
+        match aggregate {
+            MetricAggregate::Count => self.count as f64,
+            MetricAggregate::Sum => self.sum,
+            MetricAggregate::Avg => {
+                if self.numeric_count == 0 {
+                    0.0
+                } else {
+                    self.sum / self.numeric_count as f64
+                }
+            }
+            MetricAggregate::Min => self.min.unwrap_or(0.0),
+            MetricAggregate::Max => self.max.unwrap_or(0.0),
+            MetricAggregate::DistinctCount => self.distinct.len() as f64,
+        }
+    }
+}
+
+fn equality_filter(query: &MetricQuery) -> Value {
+    let mut filter = Map::new();
+    for metric_filter in &query.filters {
+        if metric_filter.operator == "eq" && !metric_filter.field.contains('.') {
+            filter.insert(metric_filter.field.clone(), metric_filter.value.clone());
+        }
+    }
+    Value::Object(filter)
+}
+
+fn metric_filters_match(data: &Value, filters: &[MetricQueryFilter]) -> bool {
+    filters.iter().all(|filter| {
+        let Some(actual) = field_value(data, &filter.field) else {
+            return false;
+        };
+        match filter.operator.as_str() {
+            "eq" => actual == &filter.value,
+            "ne" => actual != &filter.value,
+            "gt" => compare_numbers(actual, &filter.value, |left, right| left > right),
+            "gte" => compare_numbers(actual, &filter.value, |left, right| left >= right),
+            "lt" => compare_numbers(actual, &filter.value, |left, right| left < right),
+            "lte" => compare_numbers(actual, &filter.value, |left, right| left <= right),
+            "in" => filter
+                .value
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == actual)),
+            _ => false,
+        }
+    })
+}
+
+fn compare_numbers(
+    actual: &Value,
+    expected: &Value,
+    compare: impl FnOnce(f64, f64) -> bool,
+) -> bool {
+    match (actual.as_f64(), expected.as_f64()) {
+        (Some(actual), Some(expected)) => compare(actual, expected),
+        _ => false,
+    }
+}
+
+fn record_value<'a>(data: &'a Value, field: &Option<String>) -> Option<&'a Value> {
+    field.as_deref().and_then(|field| field_value(data, field))
+}
+
+fn field_value<'a>(value: &'a Value, field: &str) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in field.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
 }
 
 fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry> {
@@ -2281,6 +2586,7 @@ mod tests {
                 ontology: None,
                 business_actions: Some(business_action_assets()),
                 metrics: Some(metric_assets()),
+                operational_indexes: None,
             },
             sorx_assets: SorxAssets {
                 start_schema_json: default_start_schema(),
@@ -2390,6 +2696,12 @@ mod tests {
                         "expression": "monthly_revenue - monthly_cost",
                         "dependencies": ["monthly_revenue", "monthly_cost"]
                     }
+                },
+                {
+                    "name": "number_in_waiting_list",
+                    "source": { "entity": "waiting_list_entry", "collection": "waiting_list_entries" },
+                    "measure": { "aggregate": "count" },
+                    "dimensions": [{ "name": "lab_id", "field": "lab_id" }]
                 }
             ]
         });
@@ -2572,6 +2884,49 @@ mod tests {
     #[test]
     fn metrics_are_listed_queried_and_exposed_as_mcp_metadata() {
         let runtime = runtime("local");
+        let provider = runtime.runtime.providers.store("store").unwrap();
+        let namespace = ProviderNamespace {
+            tenant_id: "tenant-a".to_string(),
+            sor_name: "landlord".to_string(),
+        };
+        provider
+            .create(greentic_sorx_core::CreateOp {
+                namespace: namespace.clone(),
+                entity: "Payment".to_string(),
+                collection: "payments".to_string(),
+                input: json!({ "id": "payment-1", "amount": 1250.0 }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: greentic_sorx_core::UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
+        provider
+            .create(greentic_sorx_core::CreateOp {
+                namespace: namespace.clone(),
+                entity: "Cost".to_string(),
+                collection: "costs".to_string(),
+                input: json!({ "id": "cost-1", "amount": 350.0 }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: greentic_sorx_core::UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
+        provider
+            .create(greentic_sorx_core::CreateOp {
+                namespace,
+                entity: "waiting_list_entry".to_string(),
+                collection: "waiting_list_entries".to_string(),
+                input: json!({
+                    "id": "waiting-list-entry-1",
+                    "lab_id": "example",
+                    "user_id": "example",
+                    "referred_count": 0
+                }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: greentic_sorx_core::UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
         let metrics = request(&runtime, "GET", "/v1/sorx/metrics", &[], "");
         assert_eq!(metrics["schema"], "greentic.sorx.metrics.v1");
         assert_eq!(metrics["metrics"][0]["name"], "daily_clicks");
@@ -2593,6 +2948,20 @@ mod tests {
         assert_eq!(result["result"]["metric"], "gross_margin");
         assert_eq!(result["result"]["rows"][0]["value"], 900.0);
 
+        let waiting_list = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/metrics/number_in_waiting_list/query",
+            &tenant_headers(),
+            r#"{"dimensions":["lab_id"]}"#,
+        );
+        assert_eq!(waiting_list["result"]["metric"], "number_in_waiting_list");
+        assert_eq!(
+            waiting_list["result"]["rows"][0]["dimensions"]["lab_id"],
+            "example"
+        );
+        assert_eq!(waiting_list["result"]["rows"][0]["value"], 1.0);
+
         let tools = request(&runtime, "GET", "/v1/sorx/tools", &[], "");
         assert!(
             tools["tools"]
@@ -2601,12 +2970,40 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "sorx.metrics.query.gross_margin")
         );
+        let waiting_tool = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "sorx.metrics.query.number_in_waiting_list")
+            .unwrap();
+        assert_eq!(
+            waiting_tool["input_schema"]["properties"]["dimensions"]["items"]["enum"][0],
+            "lab_id"
+        );
     }
 
     #[test]
     fn metric_queries_emit_audit_and_deny_sensitive_dimensions() {
         let audit = Arc::new(MemoryAuditSink::new());
         let runtime = with_audit_sink(runtime("local"), audit.clone());
+        runtime
+            .runtime
+            .providers
+            .store("store")
+            .unwrap()
+            .create(greentic_sorx_core::CreateOp {
+                namespace: ProviderNamespace {
+                    tenant_id: "tenant-a".to_string(),
+                    sor_name: "landlord".to_string(),
+                },
+                entity: "Click".to_string(),
+                collection: "clicks".to_string(),
+                input: json!({ "id": "click-1", "user_email": "person@example.com" }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: greentic_sorx_core::UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
         let denied = request(
             &runtime,
             "POST",
@@ -2623,7 +3020,7 @@ mod tests {
             &tenant_headers(),
             r#"{"dimensions":[]}"#,
         );
-        assert_eq!(allowed["result"]["rows"][0]["value"], 42.0);
+        assert_eq!(allowed["result"]["rows"][0]["value"], 1.0);
 
         let events = audit.events().unwrap();
         assert!(

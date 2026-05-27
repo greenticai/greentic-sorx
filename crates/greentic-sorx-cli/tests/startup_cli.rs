@@ -214,7 +214,8 @@ fn missing_answers_fail_with_paths_in_non_interactive_mode() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("missing required startup answers in non-interactive mode"));
     assert!(stderr.contains("tenant.tenant_id"));
-    assert!(stderr.contains("providers.store"));
+    assert!(stderr.contains("server.public_base_url"));
+    assert!(!stderr.contains("providers.store"));
 }
 
 #[test]

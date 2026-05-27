@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{Cursor, Read, Seek};
 use std::path::{Component, Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
@@ -56,6 +57,36 @@ pub struct SorlaAssets {
     pub ontology: Option<OntologyAssets>,
     pub business_actions: Option<BusinessActionAssets>,
     pub metrics: Option<MetricAssets>,
+    pub operational_indexes: Option<OperationalIndexAssets>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationalIndexAssets {
+    pub catalog_json: Value,
+    pub catalog: OperationalIndexCatalog,
+    pub ir_cbor: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationalIndexCatalog {
+    pub schema: String,
+    #[serde(default)]
+    pub indexes: Vec<OperationalIndexDefinition>,
+    #[serde(default)]
+    pub query_requirements: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationalIndexDefinition {
+    pub id: String,
+    pub record: String,
+    #[serde(default)]
+    pub collection: Option<String>,
+    pub kind: String,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -569,6 +600,7 @@ fn read_sorla_assets<R: Read + Seek>(
         mcp_tools_json.as_ref(),
     )?;
     let metrics = read_metric_assets(archive, entries, manifest)?;
+    let operational_indexes = read_operational_index_assets(archive, entries, manifest)?;
 
     Ok((
         SorlaAssets {
@@ -581,9 +613,77 @@ fn read_sorla_assets<R: Read + Seek>(
             ontology,
             business_actions,
             metrics,
+            operational_indexes,
         },
         business_action_errors,
     ))
+}
+
+fn read_operational_index_assets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    entries: &BTreeSet<String>,
+    manifest: &PackManifest,
+) -> Result<Option<OperationalIndexAssets>, SorxPackError> {
+    let indexes_path =
+        extension_asset_path(manifest, "sorla", "operational_indexes").or_else(|| {
+            entries
+                .contains("assets/sorla/operational-indexes.json")
+                .then_some("assets/sorla/operational-indexes.json")
+        });
+    let Some(indexes_path) = indexes_path else {
+        return Ok(None);
+    };
+    let catalog_json = parse_json(archive, indexes_path)?;
+    let catalog =
+        serde_json::from_value::<OperationalIndexCatalog>(catalog_json.clone()).map_err(|err| {
+            SorxPackError::new(
+                "invalid_operational_indexes",
+                format!("{indexes_path} does not match expected shape: {err}"),
+            )
+        })?;
+    validate_operational_indexes(&catalog).map_err(|message| {
+        SorxPackError::new(
+            "invalid_operational_indexes",
+            format!("{indexes_path} is invalid: {message}"),
+        )
+    })?;
+    let ir_cbor = optional_zip_bytes(archive, entries, "assets/sorla/operational-indexes.ir.cbor")?;
+    Ok(Some(OperationalIndexAssets {
+        catalog_json,
+        catalog,
+        ir_cbor,
+    }))
+}
+
+fn validate_operational_indexes(catalog: &OperationalIndexCatalog) -> Result<(), String> {
+    let mut ids = BTreeSet::new();
+    for index in &catalog.indexes {
+        if index.id.trim().is_empty() {
+            return Err("index id is required".to_string());
+        }
+        if !ids.insert(index.id.as_str()) {
+            return Err(format!("index `{}` is defined more than once", index.id));
+        }
+        if index.record.trim().is_empty() {
+            return Err(format!("index `{}` record is required", index.id));
+        }
+        match index.kind.as_str() {
+            "exact" | "composite" | "text" => {}
+            other => {
+                return Err(format!(
+                    "index `{}` has unsupported kind `{other}`",
+                    index.id
+                ));
+            }
+        }
+        if index.fields.is_empty() {
+            return Err(format!("index `{}` must declare fields", index.id));
+        }
+        if index.unique && index.kind == "text" {
+            return Err(format!("index `{}` cannot be unique text", index.id));
+        }
+    }
+    Ok(())
 }
 
 fn read_metric_assets<R: Read + Seek>(
@@ -1337,6 +1437,42 @@ mod tests {
         refresh_lock(entries);
     }
 
+    fn add_valid_operational_indexes(entries: &mut BTreeMap<String, Vec<u8>>) {
+        entries.insert(
+            "assets/sorla/operational-indexes.json".to_string(),
+            br#"{"schema":"greentic.sorla.operational-indexes.v1","indexes":[{"id":"waiting_list_entry_lab_invitation_code_unique","record":"waiting_list_entry","kind":"composite","fields":["lab_id","invitation_code"],"unique":true},{"id":"waiting_list_entry_lab_user_unique","record":"waiting_list_entry","kind":"composite","fields":["lab_id","user_id"],"unique":true}],"query_requirements":[{"id":"join_waiting_list_idempotency","used_by":{"agent_endpoint":"join_waiting_list"},"requires_index":"waiting_list_entry_lab_user_unique","scan_ok":false}]}"#.to_vec(),
+        );
+        entries.insert(
+            "assets/sorla/operational-indexes.ir.cbor".to_string(),
+            vec![0xa1, 0x67, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x65, 0x73, 0x80],
+        );
+        let mut manifest: PackManifest =
+            ciborium::de::from_reader(Cursor::new(entries.get("pack.cbor").unwrap().clone()))
+                .unwrap();
+        manifest
+            .assets
+            .push("assets/sorla/operational-indexes.json".to_string());
+        manifest
+            .assets
+            .push("assets/sorla/operational-indexes.ir.cbor".to_string());
+        let sorla = manifest
+            .extension
+            .get_mut("sorla")
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        sorla.insert(
+            "operational_indexes".to_string(),
+            Value::String("assets/sorla/operational-indexes.json".to_string()),
+        );
+        entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert(
+            "manifest.json".to_string(),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+        refresh_lock(entries);
+    }
+
     fn write_pack(entries: BTreeMap<String, Vec<u8>>) -> (TempDir, PathBuf) {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("pack.gtpack");
@@ -1691,6 +1827,23 @@ mod tests {
                 "monthly_cost"
             ]
         );
+    }
+
+    #[test]
+    fn loader_reads_unique_operational_indexes() {
+        let mut entries = valid_entries();
+        add_valid_operational_indexes(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let loaded = load_sorla_pack(&path).unwrap();
+        let assets = loaded.sorla_assets.operational_indexes.unwrap();
+        assert!(assets.ir_cbor.is_some());
+        let indexes = assets.catalog.indexes;
+        assert_eq!(indexes.len(), 2);
+        assert!(indexes.iter().any(|index| {
+            index.id == "waiting_list_entry_lab_user_unique"
+                && index.unique
+                && index.fields == vec!["lab_id".to_string(), "user_id".to_string()]
+        }));
     }
 
     #[test]

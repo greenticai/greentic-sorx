@@ -5,8 +5,8 @@ use greentic_sorx_core::{
     ExternalRefsOp, FoundationDbProviderAdapter, FoundationDbProviderConfig, GetOp, IndexQueryOp,
     MemoryStoreProvider, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp,
     QueryResult, SorStoreProvider, SorxCanonicalStore, SorxRuntime, StoreEvidenceOp,
-    StoreProviderKind, TraverseOp, UpdateOp, default_start_schema, invocation,
-    runtime_config_from_answers, runtime_pack,
+    StoreProviderKind, TraverseOp, UniqueConflictBehavior, UpdateOp, default_start_schema,
+    invocation, runtime_config_from_answers, runtime_pack,
 };
 use serde_json::{Value, json};
 
@@ -195,6 +195,8 @@ fn memory_provider_namespaces_records_by_tenant_and_sor() {
         collection: "tenants".to_string(),
         input: json!({ "id": "same-id", "name": "A" }),
         idempotency_key: None,
+        unique_indexes: Vec::new(),
+        unique_behavior: UniqueConflictBehavior::Reject,
     };
     provider.create(create.clone()).unwrap();
     create.namespace.tenant_id = "tenant-b".to_string();
@@ -243,6 +245,8 @@ fn memory_provider_implements_canonical_store_contract() {
             collection: "tenants".to_string(),
             input: json!({ "id": "tenant-1", "property_id": "property-1" }),
             idempotency_key: None,
+            unique_indexes: Vec::new(),
+            unique_behavior: UniqueConflictBehavior::Reject,
         })
         .unwrap();
 
@@ -375,6 +379,8 @@ fn foundationdb_adapter_persists_store_operations() {
             collection: "tenants".to_string(),
             input: json!({"id": "tenant-1"}),
             idempotency_key: None,
+            unique_indexes: Vec::new(),
+            unique_behavior: UniqueConflictBehavior::Reject,
         })
         .unwrap();
     provider
@@ -384,6 +390,7 @@ fn foundationdb_adapter_persists_store_operations() {
             collection: "tenants".to_string(),
             id: "tenant-1".to_string(),
             patch: json!({"active": true}),
+            unique_indexes: Vec::new(),
         })
         .unwrap();
     provider
@@ -409,6 +416,7 @@ fn foundationdb_adapter_persists_store_operations() {
             entity: "Tenant".to_string(),
             collection: "tenants".to_string(),
             filter: json!({"active": true}),
+            order_by: Vec::new(),
         })
         .unwrap();
     assert_eq!(query.records[0].id, "tenant-1");
@@ -435,6 +443,8 @@ fn foundationdb_adapter_delegates_canonical_store_operations() {
             collection: "tenants".to_string(),
             input: json!({ "id": "tenant-1", "property_id": "property-1" }),
             idempotency_key: None,
+            unique_indexes: Vec::new(),
+            unique_behavior: UniqueConflictBehavior::Reject,
         })
         .unwrap();
 
@@ -537,6 +547,8 @@ fn foundationdb_config_ref_uses_stable_persistence_path() {
             collection: "tenants".to_string(),
             input: json!({ "id": "tenant-stable", "name": "Stable" }),
             idempotency_key: None,
+            unique_indexes: Vec::new(),
+            unique_behavior: UniqueConflictBehavior::Reject,
         })
         .unwrap();
 

@@ -4,10 +4,11 @@ use std::sync::Mutex;
 use greentic_sorx_core::{
     BoundControlHook, CONTRACT_CONTROL_PRE_CALL_V1, ControlDecision, ControlHook, EndpointRouter,
     EndpointStatus, ExtensionFailMode, MemoryStoreProvider, ObserverEvent, ObserverHook,
-    ProviderRegistry, RuntimeExtensionAdapter, RuntimeExtensionBinding, RuntimeExtensionRegistry,
-    RuntimeExtensions, SorxError, SorxResult, SorxRuntime, StackCallContext, StackCallRequest,
-    StackCallResponse, default_start_schema, invocation, normalize_start_answers,
-    runtime_config_from_answers, runtime_pack,
+    ProviderNamespace, ProviderRegistry, QueryOp, RuntimeExtensionAdapter, RuntimeExtensionBinding,
+    RuntimeExtensionRegistry, RuntimeExtensions, RuntimeOperationalIndex, SorStoreProvider,
+    SorxError, SorxResult, SorxRuntime, StackCallContext, StackCallRequest, StackCallResponse,
+    default_start_schema, invocation, normalize_start_answers, runtime_config_from_answers,
+    runtime_pack,
 };
 use serde_json::{Value, json};
 
@@ -226,6 +227,37 @@ fn runtime_with_gateway(
         router,
         providers,
     )
+}
+
+fn runtime_with_gateway_and_indexes(
+    gateway: Value,
+    indexes: Vec<RuntimeOperationalIndex>,
+    provider: Arc<MemoryStoreProvider>,
+) -> SorxRuntime {
+    let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
+    let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
+    let router = EndpointRouter::from_agent_gateway(&gateway).unwrap();
+    let mut providers = ProviderRegistry::new();
+    providers.register_canonical_store("store", provider);
+    let mut pack = runtime_pack("landlord", "0.1.0");
+    pack.operational_indexes = indexes;
+    SorxRuntime::new(pack, config, router, providers)
+}
+
+fn unique_index(id: &str, record: &str, fields: &[&str]) -> RuntimeOperationalIndex {
+    RuntimeOperationalIndex {
+        id: id.to_string(),
+        record: record.to_string(),
+        collection: None,
+        kind: if fields.len() == 1 {
+            "exact"
+        } else {
+            "composite"
+        }
+        .to_string(),
+        fields: fields.iter().map(|field| (*field).to_string()).collect(),
+        unique: true,
+    }
 }
 
 #[test]
@@ -993,6 +1025,740 @@ fn idempotency_key_prevents_duplicate_create() {
     assert_eq!(created.output["id"], "tenant-1");
     assert_eq!(repeated.output["id"], "tenant-1");
     assert_eq!(repeated.output["data"]["name"], "Acme");
+}
+
+#[test]
+fn runtime_create_rejects_duplicate_single_field_unique_index() {
+    let runtime = runtime_with_gateway_and_indexes(
+        gateway(),
+        vec![unique_index("tenant_name_unique", "Tenant", &["name"])],
+        Arc::new(MemoryStoreProvider::new()),
+    );
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-1", "name": "Acme", "active": true }),
+        ))
+        .unwrap();
+
+    let err = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-2", "name": "Acme", "active": true }),
+        ))
+        .unwrap_err();
+    assert_eq!(err.code, "unique_constraint_violation");
+}
+
+#[test]
+fn runtime_create_rejects_duplicate_composite_unique_index() {
+    let runtime = runtime_with_gateway_and_indexes(
+        gateway(),
+        vec![unique_index(
+            "tenant_name_active_unique",
+            "Tenant",
+            &["name", "active"],
+        )],
+        Arc::new(MemoryStoreProvider::new()),
+    );
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-1", "name": "Acme", "active": true }),
+        ))
+        .unwrap();
+
+    let err = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "tenant-2", "name": "Acme", "active": true }),
+        ))
+        .unwrap_err();
+    assert_eq!(err.code, "unique_constraint_violation");
+}
+
+fn waiting_list_gateway() -> Value {
+    json!({
+        "schema": "greentic.sorla.agent-gateway.v1",
+        "endpoints": [
+            {
+                "endpoint_id": "join_waiting_list",
+                "operation_id": "join_waiting_list",
+                "operation": "command",
+                "method": "POST",
+                "path": "/v1/agent/waiting_list_entries/join_waiting_list",
+                "entity": "waiting_list_entry",
+                "collection": "waiting_list_entries",
+                "provider_binding": "store",
+                "risk": "medium",
+                "command": {
+                    "kind": "record_mutation",
+                    "action": "join_waiting_list",
+                    "target": "waiting_list_entries",
+                    "idempotency": "return_existing",
+                    "constraints": {
+                        "idempotency": {
+                            "fields": ["lab_id", "user_id"],
+                            "index": "waiting_list_entry_lab_user_unique",
+                            "mode": "return_existing"
+                        },
+                        "unique": [
+                            {
+                                "fields": ["lab_id", "invitation_code"],
+                                "index": "waiting_list_entry_lab_invitation_code_unique",
+                                "kind": "composite",
+                                "record": "waiting_list_entry"
+                            },
+                            {
+                                "fields": ["lab_id", "user_id"],
+                                "index": "waiting_list_entry_lab_user_unique",
+                                "kind": "composite",
+                                "record": "waiting_list_entry"
+                            }
+                        ]
+                    },
+                    "steps": [
+                        {
+                            "op": "create",
+                            "as": "entry",
+                            "entity": "waiting_list_entry",
+                            "collection": "waiting_list_entries",
+                            "input": {
+                                "entry_id": "$generated.uuid",
+                                "lab_id": "$input.lab_id",
+                                "user_id": "$input.user_id",
+                                "email": "$input.email",
+                                "name": "$input.name",
+                                "invitation_code": "$generated.invitation_code",
+                                "referral_code": "$generated.referral_code",
+                                "invited_by_code": "$input.invited_by_code",
+                                "referred_count": 0,
+                                "joined_at": "$now"
+                            }
+                        },
+                        {
+                            "op": "increment_where",
+                            "as": "referrer",
+                            "entity": "waiting_list_entry",
+                            "collection": "waiting_list_entries",
+                            "where": {
+                                "lab_id": "$input.lab_id",
+                                "invitation_code": "$input.invited_by_code"
+                            },
+                            "increments": {
+                                "referred_count": 1
+                            },
+                            "when": { "present": "$input.invited_by_code" }
+                        },
+                        {
+                            "op": "query",
+                            "as": "waiting_list",
+                            "entity": "waiting_list_entry",
+                            "collection": "waiting_list_entries",
+                            "where": { "lab_id": "$input.lab_id" },
+                            "order_by": [
+                                { "field": "referred_count", "direction": "desc" },
+                                { "field": "joined_at", "direction": "asc" }
+                            ]
+                        }
+                    ],
+                    "return": {
+                        "entry_id": "$steps.entry.record.data.entry_id",
+                        "invitation_code": "$steps.entry.record.data.invitation_code",
+                        "referral_code": "$steps.entry.record.data.referral_code",
+                        "number_in_waiting_list": "$steps.waiting_list.count",
+                        "position": {
+                            "rank": {
+                                "records": "$steps.waiting_list.records",
+                                "where": {
+                                    "data.entry_id": "$steps.entry.record.data.entry_id"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "endpoint_id": "show_waiting_list",
+                "operation_id": "show_waiting_list",
+                "operation": "query",
+                "method": "POST",
+                "path": "/v1/agent/waiting_list_entries/query/show_waiting_list",
+                "entity": "waiting_list_entry",
+                "collection": "waiting_list_entries",
+                "provider_binding": "store"
+            }
+        ]
+    })
+}
+
+fn waiting_list_indexes() -> Vec<RuntimeOperationalIndex> {
+    vec![
+        unique_index(
+            "waiting_list_entry_lab_invitation_code_unique",
+            "waiting_list_entry",
+            &["lab_id", "invitation_code"],
+        ),
+        unique_index(
+            "waiting_list_entry_lab_user_unique",
+            "waiting_list_entry",
+            &["lab_id", "user_id"],
+        ),
+    ]
+}
+
+fn join_input(user_id: &str) -> Value {
+    json!({
+        "lab_id": "example",
+        "user_id": user_id,
+        "email": format!("{user_id}@example.com"),
+        "name": user_id
+    })
+}
+
+fn join_input_with_invite(user_id: &str, invited_by_code: &str) -> Value {
+    json!({
+        "lab_id": "example",
+        "user_id": user_id,
+        "email": format!("{user_id}@example.com"),
+        "name": user_id,
+        "invited_by_code": invited_by_code
+    })
+}
+
+fn waiting_list_leave_gateway() -> Value {
+    json!({
+        "schema": "greentic.sorla.agent-gateway.v1",
+        "endpoints": [
+            {
+                "endpoint_id": "waiting_list_entry.create",
+                "operation_id": "waiting_list_entry.create",
+                "operation": "create",
+                "method": "POST",
+                "path": "/v1/waiting-list-entries",
+                "entity": "waiting_list_entry",
+                "collection": "waiting_list_entries",
+                "provider_binding": "store",
+                "risk": "low"
+            },
+            {
+                "endpoint_id": "leave_waiting_list",
+                "operation_id": "leave_waiting_list",
+                "operation": "command",
+                "method": "POST",
+                "path": "/v1/agent/waiting_list_entries/leave_waiting_list",
+                "entity": "waiting_list_entry",
+                "collection": "waiting_list_entries",
+                "provider_binding": "store",
+                "risk": "medium",
+                "command": {
+                    "kind": "record_mutation",
+                    "action": "leave_waiting_list",
+                    "target": "waiting_list_entries",
+                    "steps": [
+                        {
+                            "op": "find_one",
+                            "as": "entry",
+                            "entity": "waiting_list_entry",
+                            "collection": "waiting_list_entries",
+                            "where": {
+                                "lab_id": "$input.lab_id",
+                                "user_id": "$input.user_id"
+                            }
+                        },
+                        {
+                            "op": "delete_where",
+                            "as": "delete",
+                            "entity": "waiting_list_entry",
+                            "collection": "waiting_list_entries",
+                            "where": {
+                                "lab_id": "$input.lab_id",
+                                "user_id": "$input.user_id"
+                            }
+                        },
+                        {
+                            "op": "increment_where",
+                            "as": "referrer",
+                            "entity": "waiting_list_entry",
+                            "collection": "waiting_list_entries",
+                            "where": {
+                                "entry_id": "$steps.entry.data.referrer_entry_id"
+                            },
+                            "increments": {
+                                "referred_count": -1
+                            },
+                            "when": {
+                                "all": [
+                                    { "present": "$steps.entry.data.referrer_entry_id" },
+                                    { "eq": ["$steps.delete.deleted_count", 1] }
+                                ]
+                            }
+                        }
+                    ],
+                    "return": {
+                        "deleted_count": "$steps.delete.deleted_count",
+                        "referrer_updated_count": "$steps.referrer.updated_count",
+                        "referrer_skipped": "$steps.referrer.skipped"
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn seed_waiting_list_record(runtime: &SorxRuntime, user_id: &str, fields: Value) {
+    let mut record = serde_json::Map::new();
+    record.insert("entry_id".to_string(), json!(user_id));
+    record.insert("lab_id".to_string(), json!("example"));
+    record.insert("user_id".to_string(), json!(user_id));
+    record.insert("email".to_string(), json!(format!("{user_id}@example.com")));
+    record.insert("name".to_string(), json!(user_id));
+    record.insert(
+        "invitation_code".to_string(),
+        json!(format!("invite-{user_id}")),
+    );
+    record.insert(
+        "referral_code".to_string(),
+        json!(format!("refer-{user_id}")),
+    );
+    record.insert("referred_count".to_string(), json!(0));
+    record.insert("joined_at".to_string(), json!("2026-05-27T00:00:00Z"));
+    if let Some(fields) = fields.as_object() {
+        for (key, value) in fields {
+            record.insert(key.clone(), value.clone());
+        }
+    }
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "waiting_list_entry.create",
+            "waiting_list_entry.create",
+            Value::Object(record),
+        ))
+        .unwrap();
+}
+
+fn waiting_list_records(provider: &MemoryStoreProvider) -> Vec<Value> {
+    provider
+        .query(QueryOp {
+            namespace: ProviderNamespace {
+                tenant_id: "tenant-a".to_string(),
+                sor_name: "landlord".to_string(),
+            },
+            entity: "waiting_list_entry".to_string(),
+            collection: "waiting_list_entries".to_string(),
+            filter: json!({ "lab_id": "example" }),
+            order_by: Vec::new(),
+        })
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|record| record.data)
+        .collect()
+}
+
+#[test]
+fn join_waiting_list_return_existing_creates_one_record() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway_and_indexes(
+        waiting_list_gateway(),
+        waiting_list_indexes(),
+        provider.clone(),
+    );
+
+    let first = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "join_waiting_list",
+            "join_waiting_list",
+            join_input("user-1"),
+        ))
+        .unwrap();
+    let second = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "join_waiting_list",
+            "join_waiting_list",
+            join_input("user-1"),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        first.output["result"]["entry_id"],
+        second.output["result"]["entry_id"]
+    );
+    let records = provider
+        .query(QueryOp {
+            namespace: ProviderNamespace {
+                tenant_id: "tenant-a".to_string(),
+                sor_name: "landlord".to_string(),
+            },
+            entity: "waiting_list_entry".to_string(),
+            collection: "waiting_list_entries".to_string(),
+            filter: json!({ "lab_id": "example" }),
+            order_by: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(records.records.len(), 1);
+}
+
+#[test]
+fn join_waiting_list_generates_distinct_codes_for_distinct_users() {
+    let runtime = runtime_with_gateway_and_indexes(
+        waiting_list_gateway(),
+        waiting_list_indexes(),
+        Arc::new(MemoryStoreProvider::new()),
+    );
+
+    let first = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "join_waiting_list",
+            "join_waiting_list",
+            join_input("user-1"),
+        ))
+        .unwrap();
+    let second = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "join_waiting_list",
+            "join_waiting_list",
+            join_input("user-2"),
+        ))
+        .unwrap();
+
+    assert_ne!(
+        first.output["result"]["invitation_code"],
+        second.output["result"]["invitation_code"]
+    );
+    assert_ne!(
+        first.output["result"]["referral_code"],
+        second.output["result"]["referral_code"]
+    );
+}
+
+#[test]
+fn join_waiting_list_increments_referrer_and_returns_ordered_position() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway_and_indexes(
+        waiting_list_gateway(),
+        waiting_list_indexes(),
+        provider.clone(),
+    );
+
+    let referrer = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "join_waiting_list",
+            "join_waiting_list",
+            join_input("referrer"),
+        ))
+        .unwrap();
+    let invitation_code = referrer.output["result"]["invitation_code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let referred = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "join_waiting_list",
+            "join_waiting_list",
+            join_input_with_invite("referred", &invitation_code),
+        ))
+        .unwrap();
+    assert_eq!(referred.output["result"]["position"], 2);
+
+    let records = provider
+        .query(QueryOp {
+            namespace: ProviderNamespace {
+                tenant_id: "tenant-a".to_string(),
+                sor_name: "landlord".to_string(),
+            },
+            entity: "waiting_list_entry".to_string(),
+            collection: "waiting_list_entries".to_string(),
+            filter: json!({ "lab_id": "example" }),
+            order_by: vec![
+                greentic_sorx_core::QueryOrder {
+                    field: "referred_count".to_string(),
+                    direction: greentic_sorx_core::QueryOrderDirection::Desc,
+                },
+                greentic_sorx_core::QueryOrder {
+                    field: "joined_at".to_string(),
+                    direction: greentic_sorx_core::QueryOrderDirection::Asc,
+                },
+            ],
+        })
+        .unwrap();
+    assert_eq!(records.records[0].data["user_id"], "referrer");
+    assert_eq!(records.records[0].data["referred_count"], 1);
+    assert_eq!(records.records[1].data["user_id"], "referred");
+    assert_eq!(records.records[1].data["referred_count"], 0);
+}
+
+#[test]
+fn leave_waiting_list_decrements_referrer_once_with_negative_increment() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway_and_indexes(
+        waiting_list_leave_gateway(),
+        waiting_list_indexes(),
+        provider.clone(),
+    );
+    seed_waiting_list_record(&runtime, "referrer", json!({ "referred_count": 1 }));
+    seed_waiting_list_record(
+        &runtime,
+        "referred",
+        json!({ "referrer_entry_id": "referrer" }),
+    );
+
+    let left = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "leave_waiting_list",
+            "leave_waiting_list",
+            json!({ "lab_id": "example", "user_id": "referred" }),
+        ))
+        .unwrap();
+    assert_eq!(left.output["result"]["deleted_count"], 1);
+    assert_eq!(left.output["result"]["referrer_updated_count"], 1);
+
+    let records = waiting_list_records(&provider);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["user_id"], "referrer");
+    assert_eq!(records[0]["referred_count"], 0);
+
+    let repeated = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "leave_waiting_list",
+            "leave_waiting_list",
+            json!({ "lab_id": "example", "user_id": "referred" }),
+        ))
+        .unwrap();
+    assert_eq!(repeated.output["result"]["deleted_count"], 0);
+    assert_eq!(repeated.output["result"]["referrer_skipped"], true);
+
+    let records = waiting_list_records(&provider);
+    assert_eq!(records[0]["referred_count"], 0);
+}
+
+#[test]
+fn leave_waiting_list_without_referrer_does_not_decrement_any_record() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway_and_indexes(
+        waiting_list_leave_gateway(),
+        waiting_list_indexes(),
+        provider.clone(),
+    );
+    seed_waiting_list_record(&runtime, "other", json!({ "referred_count": 1 }));
+    seed_waiting_list_record(&runtime, "direct", json!({}));
+
+    let left = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "leave_waiting_list",
+            "leave_waiting_list",
+            json!({ "lab_id": "example", "user_id": "direct" }),
+        ))
+        .unwrap();
+    assert_eq!(left.output["result"]["deleted_count"], 1);
+    assert_eq!(left.output["result"]["referrer_skipped"], true);
+
+    let records = waiting_list_records(&provider);
+    let other = records
+        .iter()
+        .find(|record| record["user_id"] == "other")
+        .unwrap();
+    assert_eq!(other["referred_count"], 1);
+}
+
+#[test]
+fn concurrent_join_waiting_list_creates_one_record_for_same_user() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = Arc::new(runtime_with_gateway_and_indexes(
+        waiting_list_gateway(),
+        waiting_list_indexes(),
+        provider.clone(),
+    ));
+    let mut handles = Vec::new();
+    for _ in 0..12 {
+        let runtime = runtime.clone();
+        handles.push(std::thread::spawn(move || {
+            runtime
+                .invoke(invocation(
+                    "tenant-a",
+                    "join_waiting_list",
+                    "join_waiting_list",
+                    join_input("same-user"),
+                ))
+                .unwrap()
+                .output["result"]["entry_id"]
+                .clone()
+        }));
+    }
+    let entry_ids = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert!(entry_ids.iter().all(|id| id == &entry_ids[0]));
+    let records = provider
+        .query(QueryOp {
+            namespace: ProviderNamespace {
+                tenant_id: "tenant-a".to_string(),
+                sor_name: "landlord".to_string(),
+            },
+            entity: "waiting_list_entry".to_string(),
+            collection: "waiting_list_entries".to_string(),
+            filter: json!({ "lab_id": "example" }),
+            order_by: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(records.records.len(), 1);
+}
+
+#[test]
+fn concurrent_join_waiting_list_generates_unique_codes_for_different_users() {
+    let runtime = Arc::new(runtime_with_gateway_and_indexes(
+        waiting_list_gateway(),
+        waiting_list_indexes(),
+        Arc::new(MemoryStoreProvider::new()),
+    ));
+    let mut handles = Vec::new();
+    for index in 0..16 {
+        let runtime = runtime.clone();
+        handles.push(std::thread::spawn(move || {
+            runtime
+                .invoke(invocation(
+                    "tenant-a",
+                    "join_waiting_list",
+                    "join_waiting_list",
+                    join_input(&format!("user-{index}")),
+                ))
+                .unwrap()
+                .output["result"]["invitation_code"]
+                .clone()
+        }));
+    }
+    let codes = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    let unique = codes
+        .iter()
+        .map(|code| code.as_str().unwrap().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), codes.len());
+}
+
+#[test]
+fn update_where_generated_values_are_fresh_and_unique() {
+    let provider = Arc::new(MemoryStoreProvider::new());
+    let runtime = runtime_with_gateway_and_indexes(
+        json!({
+            "schema": "greentic.sorla.agent-gateway.v1",
+            "endpoints": [
+                {
+                    "endpoint_id": "record.create",
+                    "operation_id": "record.create",
+                    "operation": "create",
+                    "method": "POST",
+                    "path": "/v1/records",
+                    "entity": "Record",
+                    "collection": "records",
+                    "provider_binding": "store",
+                    "risk": "low"
+                },
+                {
+                    "endpoint_id": "record.assign_code",
+                    "operation_id": "record.assign_code",
+                    "operation": "command",
+                    "method": "POST",
+                    "path": "/v1/records/assign-code",
+                    "entity": "Record",
+                    "collection": "records",
+                    "provider_binding": "store",
+                    "risk": "low",
+                    "command": {
+                        "kind": "record_mutation",
+                        "steps": [
+                            {
+                                "op": "update_where",
+                                "as": "update",
+                                "entity": "Record",
+                                "collection": "records",
+                                "where": { "id": "$input.id" },
+                                "set": { "code": "$generated.short_code" }
+                            }
+                        ],
+                        "return": {
+                            "code": "$steps.update.records.0.data.code"
+                        }
+                    }
+                }
+            ]
+        }),
+        vec![unique_index("record_code_unique", "Record", &["code"])],
+        provider.clone(),
+    );
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.create",
+            "record.create",
+            json!({ "id": "record-1", "name": "One" }),
+        ))
+        .unwrap();
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.create",
+            "record.create",
+            json!({ "id": "record-2", "name": "Two" }),
+        ))
+        .unwrap();
+
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.assign_code",
+            "record.assign_code",
+            json!({ "id": "record-1" }),
+        ))
+        .unwrap();
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.assign_code",
+            "record.assign_code",
+            json!({ "id": "record-2" }),
+        ))
+        .unwrap();
+    let records = provider
+        .query(QueryOp {
+            namespace: ProviderNamespace {
+                tenant_id: "tenant-a".to_string(),
+                sor_name: "landlord".to_string(),
+            },
+            entity: "Record".to_string(),
+            collection: "records".to_string(),
+            filter: json!({}),
+            order_by: Vec::new(),
+        })
+        .unwrap();
+    let codes = records
+        .records
+        .iter()
+        .map(|record| record.data["code"].as_str().unwrap().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(codes.len(), 2);
 }
 
 #[test]

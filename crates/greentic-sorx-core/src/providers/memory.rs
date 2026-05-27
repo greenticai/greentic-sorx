@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -9,8 +10,9 @@ use serde_json::{Map, Value};
 use crate::{
     AppendEventOp, CreateOp, DeleteOp, DeleteResult, EntityRecord, EventRecord, EvidenceResult,
     ExternalRef, ExternalRefsOp, ExternalRefsResult, GetOp, IndexQueryOp, IndexQueryResult,
-    QueryOp, QueryResult, SorStoreProvider, SorxCanonicalStore, SorxError, SorxResult,
-    StoreEvidenceOp, TraverseOp, TraverseResult, UpdateOp,
+    QueryOp, QueryOrder, QueryOrderDirection, QueryResult, SorStoreProvider, SorxCanonicalStore,
+    SorxError, SorxResult, StoreEvidenceOp, TraverseOp, TraverseResult, UniqueConflictBehavior,
+    UniqueIndex, UpdateOp,
 };
 
 #[derive(Debug, Default)]
@@ -109,6 +111,20 @@ impl SorStoreProvider for MemoryStoreProvider {
             .unwrap_or_else(|| format!("{}-{}", op.collection, collection_len + 1));
         let mut data = object_clone(&op.input);
         data.insert("id".to_string(), Value::String(id.clone()));
+        if let Some(conflict) = unique_conflict(
+            state.collections.get(&collection_key),
+            &op.unique_indexes,
+            &Value::Object(data.clone()),
+            None,
+        ) {
+            if let UniqueConflictBehavior::ReturnExisting { index, fields } = &op.unique_behavior
+                && conflict.index.id == *index
+                && conflict.index.fields == *fields
+            {
+                return Ok(conflict.record);
+            }
+            return Err(unique_conflict_error(&conflict.index, &conflict.values));
+        }
 
         let record = EntityRecord {
             entity: op.entity,
@@ -149,17 +165,31 @@ impl SorStoreProvider for MemoryStoreProvider {
                     format!("record `{}` was not found in `{}`", op.id, op.collection),
                 )
             })?;
+        let existing = collection.get(&op.id).ok_or_else(|| {
+            SorxError::new(
+                "record_not_found",
+                format!("record `{}` was not found in `{}`", op.id, op.collection),
+            )
+        })?;
+        let mut data = object_clone(&existing.data);
+        for (key, value) in object_clone(&op.patch) {
+            data.insert(key, value);
+        }
+        data.insert("id".to_string(), Value::String(op.id.clone()));
+        if let Some(conflict) = unique_conflict(
+            Some(collection),
+            &op.unique_indexes,
+            &Value::Object(data.clone()),
+            Some(&op.id),
+        ) {
+            return Err(unique_conflict_error(&conflict.index, &conflict.values));
+        }
         let record = collection.get_mut(&op.id).ok_or_else(|| {
             SorxError::new(
                 "record_not_found",
                 format!("record `{}` was not found in `{}`", op.id, op.collection),
             )
         })?;
-        let mut data = object_clone(&record.data);
-        for (key, value) in object_clone(&op.patch) {
-            data.insert(key, value);
-        }
-        data.insert("id".to_string(), Value::String(op.id));
         record.data = Value::Object(data);
         record.version += 1;
         let record = record.clone();
@@ -181,7 +211,11 @@ impl SorStoreProvider for MemoryStoreProvider {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        records.sort_by(|left, right| left.id.cmp(&right.id));
+        if op.order_by.is_empty() {
+            records.sort_by(|left, right| left.id.cmp(&right.id));
+        } else {
+            records.sort_by(|left, right| compare_records(left, right, &op.order_by));
+        }
         Ok(QueryResult { records })
     }
 
@@ -227,6 +261,7 @@ impl SorxCanonicalStore for MemoryStoreProvider {
             entity: op.entity,
             collection: op.collection,
             filter: op.filter,
+            order_by: Vec::new(),
         })?;
         Ok(IndexQueryResult {
             records: query.records,
@@ -290,6 +325,62 @@ fn collection_key(namespace: &crate::ProviderNamespace, collection: &str) -> Str
     format!("{}/{collection}", namespace.key_prefix())
 }
 
+struct UniqueConflict {
+    index: UniqueIndex,
+    values: Vec<Value>,
+    record: EntityRecord,
+}
+
+fn unique_conflict(
+    collection: Option<&BTreeMap<String, EntityRecord>>,
+    indexes: &[UniqueIndex],
+    data: &Value,
+    current_id: Option<&str>,
+) -> Option<UniqueConflict> {
+    let collection = collection?;
+    for index in indexes {
+        let values = index_values(data, &index.fields)?;
+        for record in collection.values() {
+            if current_id.is_some_and(|id| record.id == id) {
+                continue;
+            }
+            if index_values(&record.data, &index.fields).as_ref() == Some(&values) {
+                return Some(UniqueConflict {
+                    index: index.clone(),
+                    values,
+                    record: record.clone(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn index_values(data: &Value, fields: &[String]) -> Option<Vec<Value>> {
+    fields
+        .iter()
+        .map(|field| lookup_path(data, field).cloned())
+        .collect()
+}
+
+fn lookup_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = value;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+fn unique_conflict_error(index: &UniqueIndex, values: &[Value]) -> SorxError {
+    SorxError::new(
+        "unique_constraint_violation",
+        format!(
+            "unique index `{}` already has fields {:?} values {:?}",
+            index.id, index.fields, values
+        ),
+    )
+}
+
 fn subject_key(
     namespace: &crate::ProviderNamespace,
     collection: &str,
@@ -329,6 +420,44 @@ fn matches_filter(data: &Value, filter: &Map<String, Value>) -> bool {
     filter
         .iter()
         .all(|(key, expected)| data.get(key) == Some(expected))
+}
+
+fn compare_records(left: &EntityRecord, right: &EntityRecord, order_by: &[QueryOrder]) -> Ordering {
+    for order in order_by {
+        let ordering = compare_values(
+            lookup_path(&left.data, &order.field),
+            lookup_path(&right.data, &order.field),
+        );
+        let ordering = match order.direction {
+            QueryOrderDirection::Asc => ordering,
+            QueryOrderDirection::Desc => ordering.reverse(),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.id.cmp(&right.id)
+}
+
+fn compare_values(left: Option<&Value>, right: Option<&Value>) -> Ordering {
+    match (left, right) {
+        (Some(Value::Number(left)), Some(Value::Number(right))) => {
+            match (left.as_f64(), right.as_f64()) {
+                (Some(left), Some(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+                _ => Ordering::Equal,
+            }
+        }
+        (Some(Value::String(left)), Some(Value::String(right))) => left.cmp(right),
+        (Some(Value::Bool(left)), Some(Value::Bool(right))) => left.cmp(right),
+        (Some(left), Some(right)) => value_sort_key(left).cmp(&value_sort_key(right)),
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn value_sort_key(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> SorxError {

@@ -4040,7 +4040,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ids.contains(&"tenant.tenant_id"));
         assert!(ids.contains(&"server.public_base_url"));
-        assert!(ids.contains(&"providers.store.kind"));
+        assert!(!ids.contains(&"providers.store.kind"));
+        assert!(!ids.contains(&"providers.store.config_ref"));
         assert!(ids.contains(&"deployment.tenant_id"));
         assert!(ids.contains(&"deployment.sor_name"));
         assert!(ids.contains(&"server.auth.mode"));
@@ -4073,16 +4074,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             ids,
-            vec![
-                "providers.store.kind",
-                "server.auth.mode",
-                "server.auth.shared_secret_ref"
-            ]
+            vec!["server.auth.mode", "server.auth.shared_secret_ref"]
         );
     }
 
     #[test]
-    fn legacy_start_schema_reports_missing_leaf_answers() {
+    fn legacy_start_schema_defaults_provider_answers() {
         let schema = serde_json::json!({
             "schema": "greentic.sorx.start.answers.v1",
             "required": [
@@ -4097,17 +4094,15 @@ mod tests {
         let effective = effective_start_schema(&schema);
         let mut answers = serde_json::json!({});
         materialize_required_object_answers(&effective, &mut answers);
-        let err = normalize_start_answers(&effective, &answers, true).unwrap_err();
-        assert_eq!(err.code, "missing_answers");
-        let paths = err
-            .issues
-            .iter()
-            .map(|issue| issue.path.as_str())
-            .collect::<Vec<_>>();
-        assert!(paths.contains(&"providers.store.kind"));
-        assert!(!paths.contains(&"tenant.tenant_id"));
-        assert!(!paths.contains(&"server.public_base_url"));
-        assert!(!paths.contains(&"providers.store.config_ref"));
+        let normalized = normalize_start_answers(&effective, &answers, true).unwrap();
+        assert_eq!(
+            normalized.answers["providers"]["store"]["kind"],
+            "foundationdb"
+        );
+        assert_eq!(
+            normalized.answers["providers"]["store"]["config_ref"],
+            "providers.foundationdb.local"
+        );
     }
 
     #[test]
@@ -4134,7 +4129,10 @@ mod tests {
             normalized.answers["server"]["public_base_url"],
             "http://127.0.0.1:8787"
         );
-        assert!(normalized.answers["providers"]["store"]["config_ref"].is_null());
+        assert_eq!(
+            normalized.answers["providers"]["store"]["config_ref"],
+            "providers.memory.local"
+        );
     }
 
     #[test]
