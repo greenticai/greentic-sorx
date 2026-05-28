@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 
 use crate::{
     AdminActionContext, AdminActionRequest, AdminActionResponse, AdminObserverEvent, AppendEventOp,
-    ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, CommandOrderDirection, CommandSpec,
+    ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, AuthorizationPolicyInput,
+    AuthorizationPolicyResource, AuthorizationRequirement, CommandOrderDirection, CommandSpec,
     CommandStep, ControlDecision, ControlDecisionAction, ControlHook, CreateOp, DeleteOp,
     DisabledAuditSink, EndpointDefinition, EndpointInvocation, EndpointResult, EndpointRouter,
     EndpointStatus, GetOp, IndexQueryOp, LocalPendingBroker, NoopControlHook, NoopObserverHook,
@@ -193,6 +194,25 @@ impl SorxRuntime {
         if let Err(err) = validate_input(endpoint, &invocation.input) {
             self.audit(endpoint, &invocation, "sorx.endpoint.failed", None, None)?;
             return Err(err);
+        }
+        if let Some(reason) = self.authorization_denial(endpoint, &invocation) {
+            let result = EndpointResult {
+                status: EndpointStatus::Denied,
+                output: json!({
+                    "status": "denied",
+                    "reason": reason,
+                    "authorization": "denied"
+                }),
+                events: vec![event(endpoint, &invocation, "authorization.denied")],
+            };
+            self.audit(
+                endpoint,
+                &invocation,
+                "sorx.endpoint.completed",
+                Some("denied"),
+                Some(started.elapsed().as_millis() as u64),
+            )?;
+            return Ok(result);
         }
         let mut stack_request = StackCallRequest {
             operation_id: invocation.operation_id.clone(),
@@ -557,6 +577,82 @@ impl SorxRuntime {
             Some(started.elapsed().as_millis() as u64),
         )?;
         Ok(result)
+    }
+
+    fn authorization_denial(
+        &self,
+        endpoint: &EndpointDefinition,
+        invocation: &EndpointInvocation,
+    ) -> Option<String> {
+        if let Some(auth) = &endpoint.authorization
+            && !authorization_matches(auth, &invocation.caller.roles)
+        {
+            return Some("endpoint authorization roles did not match principal".to_string());
+        }
+        if let Some(auth) = &endpoint.authorization
+            && let Some(reason) = self.authorization_policy_denial(
+                auth,
+                AuthorizationPolicyResource::Endpoint {
+                    endpoint_id: endpoint.endpoint_id.clone(),
+                },
+                operation_access_name(&endpoint.operation),
+                invocation,
+            )
+        {
+            return Some(reason);
+        }
+        let record = endpoint.entity.as_deref()?;
+        let access = self.pack.record_access.get(record)?;
+        let auth = match endpoint.operation {
+            OperationKind::Get | OperationKind::Query => access.read.as_ref(),
+            OperationKind::Create => access.create.as_ref(),
+            OperationKind::Update => access.update.as_ref(),
+            OperationKind::Delete => access.delete.as_ref(),
+            OperationKind::Command(_) => None,
+        };
+        if let Some(auth) = auth
+            && !authorization_matches(auth, &invocation.caller.roles)
+        {
+            return Some(format!(
+                "record `{record}` {} access roles did not match principal",
+                operation_access_name(&endpoint.operation)
+            ));
+        }
+        if let Some(auth) = auth
+            && let Some(reason) = self.authorization_policy_denial(
+                auth,
+                AuthorizationPolicyResource::Record {
+                    record: record.to_string(),
+                },
+                operation_access_name(&endpoint.operation),
+                invocation,
+            )
+        {
+            return Some(reason);
+        }
+        None
+    }
+
+    fn authorization_policy_denial(
+        &self,
+        auth: &AuthorizationRequirement,
+        resource: AuthorizationPolicyResource,
+        operation: &str,
+        invocation: &EndpointInvocation,
+    ) -> Option<String> {
+        let decision = self.policy.decide_authorization(&AuthorizationPolicyInput {
+            principal_subject: invocation.caller.subject.clone(),
+            principal_roles: invocation.caller.roles.clone(),
+            resource,
+            operation: operation.to_string(),
+            policies: auth.policies.clone(),
+            conditions: auth.conditions.clone(),
+        });
+        if decision.action == PolicyAction::Deny {
+            Some(decision.reason)
+        } else {
+            None
+        }
     }
 
     fn observe(&self, event: ObserverEvent) -> SorxResult<()> {
@@ -1852,6 +1948,34 @@ fn approval_request_id(endpoint: &EndpointDefinition, invocation: &EndpointInvoc
     )
 }
 
+fn authorization_matches(auth: &AuthorizationRequirement, principal_roles: &[String]) -> bool {
+    if auth.roles.any_of.is_empty() && auth.roles.all_of.is_empty() {
+        return true;
+    }
+    let any_ok = auth.roles.any_of.is_empty()
+        || auth
+            .roles
+            .any_of
+            .iter()
+            .any(|role| principal_roles.iter().any(|principal| principal == role));
+    let all_ok = auth
+        .roles
+        .all_of
+        .iter()
+        .all(|role| principal_roles.iter().any(|principal| principal == role));
+    any_ok && all_ok
+}
+
+fn operation_access_name(operation: &OperationKind) -> &'static str {
+    match operation {
+        OperationKind::Get | OperationKind::Query => "read",
+        OperationKind::Create => "create",
+        OperationKind::Update => "update",
+        OperationKind::Delete => "delete",
+        OperationKind::Command(_) => "execute",
+    }
+}
+
 fn policy_decision_label(decision: &PolicyDecision) -> &'static str {
     match decision.action {
         PolicyAction::Execute => "execute",
@@ -1874,6 +1998,7 @@ pub fn runtime_pack(name: impl Into<String>, version: impl Into<String>) -> Runt
         version: version.into(),
         digest: None,
         operational_indexes: Vec::new(),
+        record_access: BTreeMap::new(),
     }
 }
 

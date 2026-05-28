@@ -7,6 +7,7 @@ mod error;
 mod evidence;
 mod generic_runtime;
 mod ghcr_webhook;
+mod manager;
 mod mcp;
 mod metrics_runtime;
 mod model;
@@ -66,6 +67,16 @@ pub use ghcr_webhook::{
     github_signature, handle_ghcr_published_webhook, parse_ghcr_published_metadata,
     verify_github_signature,
 };
+pub use manager::{
+    ChannelCapabilities, ManagerActionView, ManagerChannel, ManagerContextDefaults,
+    ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle, ManagerLocaleCatalog,
+    ManagerLocaleContext, ManagerNavItem, ManagerPolicyDecision, ManagerPolicyEffect,
+    ManagerPolicyHint, ManagerPolicySet, ManagerRecordView, ManagerRelationshipView,
+    ManagerViewModel, SorxManagerContext, TextDirection, filter_manager_view, format_manager_value,
+    generate_manager_view, humanize_identifier, localize_manager_view, render_dashboard_card,
+    render_record_create_card, render_record_detail_card, render_record_list_card,
+    render_record_picker_card, render_relationship_summary_card, resolve_manager_context,
+};
 pub use mcp::{McpRuntime, McpToolDefinition, McpToolList, mcp_tools_from_metadata};
 pub use metrics_runtime::{
     MetricAggregate, MetricQuery, MetricQueryFilter, MetricQueryResult, MetricResultRow,
@@ -73,16 +84,18 @@ pub use metrics_runtime::{
     RuntimeMetricDimension, RuntimeMetricKind,
 };
 pub use model::{
-    ApprovalRequirement, CallerContext, CommandOrderBy, CommandOrderDirection, CommandSpec,
-    CommandStep, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointResult,
-    EndpointStatus, IndexRequirement, InvocationSource, OperationKind, QueryPlan, RiskLevel,
+    ApprovalRequirement, AuthorizationRequirement, AuthorizationRoles, CallerContext,
+    CommandOrderBy, CommandOrderDirection, CommandSpec, CommandStep, EndpointDefinition,
+    EndpointInvocation, EndpointMethod, EndpointResult, EndpointStatus, IndexRequirement,
+    InvocationSource, OperationKind, QueryPlan, RecordAccessPolicy, RiskLevel,
     RuntimeOperationalIndex, RuntimePack, SorxEvent, TraversalRequirement, ViewTransform,
 };
 pub use ontology_graph::{
     OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,
 };
 pub use policy::{
-    OntologyPolicyAction, OntologyPolicyDecision, OntologyPolicyDecisionKind, OntologyPolicyReason,
+    AuthorizationPolicyInput, AuthorizationPolicyResource, OntologyPolicyAction,
+    OntologyPolicyDecision, OntologyPolicyDecisionKind, OntologyPolicyReason,
     OntologyPolicyRedaction, OntologyPolicyResource, OntologyPolicySubject, PolicyAction,
     PolicyConfig, PolicyDecision, PolicyEngine, PolicyMode, RelationshipTraversalPermission,
     SensitivityContext,

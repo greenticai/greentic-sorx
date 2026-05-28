@@ -2,9 +2,9 @@
 
 ## 1. High-Level Purpose
 
-`greentic-sorx` is intended to become the Greentic System of Record eXecutor: a Rust executable that consumes SoRLa `.gtpack` artifacts and runs them through runtime validation, startup answers, HTTP/MCP endpoints, provider bindings, policy/approval enforcement, audit logging, and deployment lifecycle management.
+`greentic-sorx` is intended to become the Greentic System of Record eXecutor: a Rust executable that consumes SoRLa `.gtpack` artifacts and runs them through runtime validation, startup answers, HTTP/MCP endpoints, provider bindings, policy/approval enforcement, audit logging, deployment lifecycle management, and generated Sorx Business Manager surfaces.
 
-The current repository has completed the PR 01 scaffold, PR 02 pack loader/doctor work, PR 03 startup schema/answer planning work, PR 04 runtime core/provider work, PR 05 HTTP endpoint runtime work, PR 06 policy/approval/audit work, PR 07 MCP tool adapter work, PR 08 provider binding/FoundationDB adapter boundary work, PR 09 landlord/tenant e2e work, PR 10 `gtc`/bundle integration alignment work, PR 11 CI/docs/security/release hardening work, PR 12 concurrent deployment registry work, PR 13 GHCR publish webhook-to-pending-deployment work, PR 14 pack-embedded validation-suite work, and PR 15 public promotion/rollback gate work. It is now a small Rust workspace with core types, startup answer normalization/planning helpers, endpoint routing, provider traits, entity binding resolution, tenant/pack/version provider namespaces, policy enforcement, local approval brokers, audit sinks, an in-memory provider, a FoundationDB unavailable adapter boundary, generated route listing, a local HTTP runtime adapter, MCP tool metadata loading, an MCP runtime adapter, a landlord/tenant e2e scenario, stable CLI exit-code behavior, a local JSON deployment registry with validation-gated public promotion, aliases, rollback audit, and deployment-scoped route listing, signed GitHub/GHCR webhook fixture handling with replay protection, declarative pack-embedded validation suite execution, `gtc`/`.gtbundle` integration docs, security/user/release docs, a CLI, a `.gtpack` loader/inspector/doctor crate, local/CI/e2e/release automation, lightweight performance guard tests, i18n assets, and `.codex` PR specifications that describe the remaining SORX implementation path.
+The current repository has completed the PR 01 scaffold, PR 02 pack loader/doctor work, PR 03 startup schema/answer planning work, PR 04 runtime core/provider work, PR 05 HTTP endpoint runtime work, PR 06 policy/approval/audit work, PR 07 MCP tool adapter work, PR 08 provider binding/FoundationDB adapter boundary work, PR 09 landlord/tenant e2e work, PR 10 `gtc`/bundle integration alignment work, PR 11 CI/docs/security/release hardening work, PR 12 concurrent deployment registry work, PR 13 GHCR publish webhook-to-pending-deployment work, PR 14 pack-embedded validation-suite work, PR 15 public promotion/rollback gate work, and PR 16-21 Sorx Business Manager context, policy filtering, i18n, Adaptive Card routes, generic fixtures, and docs. It is now a small Rust workspace with core types, startup answer normalization/planning helpers, endpoint routing, provider traits, entity binding resolution, tenant/pack/version provider namespaces, policy enforcement, local approval brokers, audit sinks, an in-memory provider, a FoundationDB unavailable adapter boundary, generated route listing, a local HTTP runtime adapter, MCP tool metadata loading, an MCP runtime adapter, manager view/card generation, a landlord/tenant e2e scenario, stable CLI exit-code behavior, a local JSON deployment registry with validation-gated public promotion, aliases, rollback audit, and deployment-scoped route listing, signed GitHub/GHCR webhook fixture handling with replay protection, declarative pack-embedded validation suite execution, `gtc`/`.gtbundle` integration docs, security/user/release docs, a CLI, a `.gtpack` loader/inspector/doctor crate, local/CI/e2e/release automation, lightweight performance guard tests, i18n assets, and `.codex` PR specifications/history that describe the SORX implementation path.
 
 ## 2. Main Components and Functionality
 
@@ -28,6 +28,7 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
     - Applies tenant/pack/version namespaces to provider operations so local providers can isolate records per tenant and pack version.
     - Provides a `FoundationDbProviderAdapter` boundary that accepts `config_ref` or local/test direct config and returns `provider_unavailable` until a SORX-compatible FoundationDB store provider is wired.
     - Defines risk policy types, `PolicyEngine`, policy decisions, approval broker trait, local auto-approve/deny/pending brokers, structured `SorxAuditEvent`, and stdout/memory/disabled audit sinks.
+    - Defines Sorx Business Manager context/channel/capability types, manager view models, render-time policy decisions/filtering, locale catalog/fallback helpers, and provider-neutral Adaptive Card JSON renderers.
     - Loads and validates MCP tool definitions from SoRLa `mcp-tools.json` metadata.
     - Provides an `McpRuntime` adapter that invokes MCP tools through the same `SorxRuntime` router, policy, provider, approval, idempotency, and audit path as direct and HTTP calls.
     - Defines PR 12/15 deployment registry types for immutable pack artifacts, deployments, aliases, public route tables, deployment statuses, visibility, state modes, traffic split metadata, validation-report gates, promotion audit events, rollback requests, conflict checks, and local JSON registry storage.
@@ -67,7 +68,7 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
     - Wires `doctor <pack.gtpack>` to real pack validation.
     - Wires `inspect <pack.gtpack>` to stable JSON metadata output.
     - Wires `start <pack.gtpack> --schema` to emit the embedded startup schema.
-    - Wires `start <pack.gtpack> --answers <file>` to validate and normalize answers, build the runtime config/provider registry, and start a local HTTP server.
+    - Wires `start <pack.gtpack> --answers <file>` to validate and normalize answers, build the runtime config/provider registry, start a local HTTP server, and print both the canonical Sorx Business Manager URL and `/manager` alias using the actual bound address.
     - Accepts provider `config_ref` for normal runtime use and direct provider `config` only in local/test startup answers.
     - Supports `--dry-run` for deterministic startup plan output and `--emit-answers` for normalized answer output.
     - Accepts raw SORX answer objects and `greentic-qa`-style `AnswerSet` JSON envelopes with `form_id`, `spec_version`, and `answers`.
@@ -81,10 +82,11 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
     - Wires `validate <pack.gtpack> --answers <file>` to a declarative validation-suite runner with `doctor`, artifact, route generation, provider contract, endpoint, negative endpoint, audit, idempotency, and policy-denial test kinds.
     - Wires `validation report <deployment-id>` to read stored registry validation reports once deployment-backed validation persistence is populated by later flows.
     - Accepts `--json` on `doctor`, `inspect`, `routes`, and `start` schema/dry-run/emit-answer command shapes for machine-readable compatibility. These outputs are JSON today.
-    - Provides a dependency-light local HTTP adapter with `GET /healthz`, `GET /readyz`, `GET /v1/sorx/routes`, `GET /v1/sorx/public-routes`, `GET /v1/sorx/tools`, `GET /v1/sorx/deployments/local/routes`, `GET /v1/sorx/deployments/local/promotion-status`, generated agent endpoint routes, and disabled-by-default mutating admin API guards.
+    - Provides a dependency-light local HTTP adapter with `GET /healthz`, `GET /readyz`, `GET /v1/sorx/routes`, `GET /v1/sorx/public-routes`, `GET /v1/sorx/tools`, `GET /v1/sorx/deployments/local/routes`, `GET /v1/sorx/deployments/local/promotion-status`, `GET /v1/sorx/manager/...` plus `/manager/...` manager view/card/graph/picker routes, `POST /v1/sorx/manager/submit`, generated agent endpoint routes, and disabled-by-default mutating admin API guards.
     - Serves `/v1/sorx/tools` from resolved MCP tool metadata rather than an unrelated placeholder surface.
     - Configures stdout audit sinks for HTTP runtimes when startup answers request `audit.sink = "stdout"`.
     - Requires tenant and caller headers outside local HTTP mode.
+    - Resolves manager context from existing SORX headers, emits canonical manager views/cards, and routes manager submit requests back through `SorxRuntime::invoke`.
     - Includes parser tests and binary smoke tests.
     - Includes a PR 09 landlord/tenant e2e integration test that builds a deterministic `.gtpack`, runs `doctor`, starts the local HTTP runtime, calls generated routes, verifies create/read/update/query behavior, idempotency, high-risk approval-required behavior, response events, and MCP tool listing.
     - cargo-binstall metadata is configured for GitHub Release archives named `greentic-sorx-<target>-v<version>`.
@@ -222,7 +224,7 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
     - Runs the memory-provider landlord/tenant e2e test.
     - For `--provider foundationdb`, verifies the manual fixture and reports that real execution is not automated until the SORX-compatible FoundationDB store adapter exists.
 
-- **Path:** `.codex/PR-01-*.md` through `.codex/PR-15-*.md`
+- **Path:** `.codex/done/PR-01-*.md` through `.codex/done/PR-21-*.md`
   - **Role:** Planned PR roadmap for SORX.
   - **Key functionality:**
     - PR 01: audit Greentic reuse points and scaffold real `greentic-sorx` CLI/core structure. Implemented in the current workspace.
@@ -240,7 +242,13 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
     - PR 13: add GHCR publish webhook to pending deployment flow. Implemented as signed webhook parsing/verification, trust/digest/replay checks, OCI resolver trait with fixture resolver, pending registry deployment creation, startup config shape, CLI fixture verification/replay commands, and docs.
     - PR 14: add pack-embedded validation suite execution. Implemented as suite schema checks, fixture JSON loading, validation runner, report shape, validate CLI, JUnit output, docs, and smoke coverage for happy path, negative endpoint, idempotency, audit, and recommended-failure behavior.
     - PR 15: add public endpoint promotion, rollout, rollback, and gate policies. Implemented as validation-report-gated private/public promotion, alias promotion, alias rollback audit, old-deployment retirement, public route diagnostics, promotion-status diagnostics, traffic split metadata, expanded webhook promotion policy values, CLI commands, docs, and focused tests. Mutating HTTP admin endpoints remain disabled until auth and registry storage are wired into the runtime.
-  - **Key dependencies / integration points:** PR 01 through PR 15 are implemented in source code/docs. Later PR files remain specifications only; real FoundationDB execution, real GHCR auth/download behavior, schema migration, full MCP server transport, mutating HTTP admin API implementation, configured-provider validation execution, and actual `gtc sorx` support in `gtc` are not yet implemented.
+    - PR 16: add Sorx Business Manager context model. Implemented as core manager context/channel/capability types and header-map context resolution preserving existing SORX tenant/caller headers.
+    - PR 17: add policy-aware manager view filtering. Implemented as core manager view models, `ManagerPolicyDecision`, `ManagerPolicySet`, and deterministic filtering over records, fields, actions, and relationships.
+    - PR 18: add locale and i18n support. Implemented as manager locale context/catalog/bundle helpers, RTL direction detection, humanized fallback labels, and view localization.
+    - PR 19: add manager routes and canonical Adaptive Card rendering. Implemented as core Adaptive Card renderers and CLI HTTP `/v1/sorx/manager/...` routes with submit delegation to `SorxRuntime::invoke`.
+    - PR 20: add generic SorLa manager fixture suite. Implemented as domain-neutral RecordAlpha/RecordBeta manager fixture assets and CLI HTTP tests.
+    - PR 21: add manager docs and rollout notes. Implemented as docs for manager routes, policy, i18n, Adaptive Cards, and fixtures.
+  - **Key dependencies / integration points:** PR 01 through PR 21 are implemented in source code/docs. Real FoundationDB execution, real GHCR auth/download behavior, schema migration, full MCP server transport, mutating HTTP admin API implementation, configured-provider validation execution, and actual `gtc sorx` support in `gtc` are not yet implemented.
 
 - **Path:** `.codex/global_rules.md`
   - **Role:** Repository working rules for future Codex PR-style work.
@@ -318,6 +326,10 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
   - **Role:** Pack-embedded validation suite guide.
   - **Key functionality:** Documents PR 14 validation assets, minimal suite shape, supported declarative test kinds, validate CLI usage, provider modes, report shape, public-readiness behavior, and no-arbitrary-code rule.
 
+- **Path:** `docs/sorx-business-manager.md`, `docs/sorx-manager-policy.md`, `docs/sorx-manager-i18n.md`, `docs/sorx-manager-adaptive-cards.md`, and `docs/sorx-manager-fixtures.md`
+  - **Role:** Sorx Business Manager documentation set.
+  - **Key functionality:** Documents manager product boundaries, `/v1/sorx/manager/...` route usage, context headers, render-time policy filtering versus submit-time enforcement, manager locale catalogs and fallbacks, provider-neutral Adaptive Card output, SVG limitations, and generic fixture strategy.
+
 - **Path:** `docs/security.md`
   - **Role:** Security model.
   - **Key functionality:** Documents pack path safety, lock digest checks, startup secret/config rules, non-local HTTP context requirements, idempotency guidance, request body audit redaction, default risk policies, and future signing gaps.
@@ -345,7 +357,7 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
 
 - **Location:** `crates/greentic-sorx-core/src/lib.rs`
   - **Status:** Runtime core
-  - **Short description:** Core startup answer normalization, defaults, validation, runtime config construction, dry-run plan generation, endpoint routing, provider traits, provider registry, in-memory provider, provider binding resolver, tenant/pack/version provider namespaces, FoundationDB unavailable adapter boundary, policy decisions, local approval brokers, audit sinks/events, idempotency scoping, MCP tool metadata loading, MCP adapter invocation, invocation source tracking, and provider-backed endpoint invocation exist.
+  - **Short description:** Core startup answer normalization, defaults, validation, runtime config construction, dry-run plan generation, endpoint routing, provider traits, provider registry, in-memory provider, provider binding resolver, tenant/pack/version provider namespaces, FoundationDB unavailable adapter boundary, policy decisions, local approval brokers, audit sinks/events, idempotency scoping, MCP tool metadata loading, MCP adapter invocation, invocation source tracking, provider-backed endpoint invocation, and Sorx Business Manager view/card/context helpers exist.
 
 - **Location:** `crates/greentic-sorx-pack/src/loader.rs`
   - **Status:** Partial/shared-API gap
@@ -359,14 +371,14 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
   - **Status:** Placeholder guard tests
   - **Short description:** Tests use synthetic workloads because the repo has no real SORX critical paths yet.
 
-- **Location:** `.codex/PR-15-public-endpoint-promotion-rollout.md`
-  - **Status:** Implemented in source/docs
-  - **Short description:** PR 15 public promotion and rollback gates are implemented for the local registry and CLI. Mutating HTTP admin endpoints remain disabled until admin auth and registry storage are available in the runtime.
+- **Location:** `.codex/done/PR-15-public-endpoint-promotion-rollout.md` through `.codex/done/PR-21-docs-and-rollout.md`
+  - **Status:** Implemented and moved to `.codex/done`
+  - **Short description:** PR 15 public promotion and rollback gates are implemented for the local registry and CLI. PR 16-21 manager specs have also been implemented and moved to `.codex/done`. Mutating HTTP admin endpoints remain disabled until admin auth and registry storage are available in the runtime.
 
 ## 4. Broken, Failing, or Conflicting Areas
 
 - **Location:** Repository checks
-  - **Evidence:** `bash ci/local_check.sh` completed successfully after the PR 15 public promotion/rollback gate work. It ran formatting, i18n validation/status, clippy, tests, build, docs, and packaging/publish dry-run checks. A sandboxed `./scripts/local_check.sh` attempt during PR 11 reached the landlord/tenant binary e2e and failed only because the sandbox denied loopback `TcpListener::bind`; the same check passed outside the sandbox.
+  - **Evidence:** `bash ci/local_check.sh` completed successfully after the PR 16-21 Sorx Business Manager work. It ran formatting, i18n validation/status, release metadata checks, clippy, all tests including manager/core/CLI tests and landlord/tenant e2e, build, docs, packaging, and publish dry-run checks for publishable dependency crates. The dependent `greentic-sorx` crate registry verification remains intentionally deferred by the script because its local workspace dependencies must exist in the registry first.
   - **Likely cause / nature of issue:** No current build/test failure was observed.
 
 - **Location:** Coverage policy

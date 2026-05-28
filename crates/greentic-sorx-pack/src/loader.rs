@@ -14,7 +14,8 @@ use crate::business_actions::{
     BusinessActionValidationContext, validate_business_actions,
 };
 use crate::inspect::{
-    SorxInspectOntology, SorxInspectPack, SorxInspectReport, SorxInspectSorla, SorxInspectSorx,
+    SorxInspectOntology, SorxInspectPack, SorxInspectReport, SorxInspectRole, SorxInspectSorla,
+    SorxInspectSorx,
 };
 use crate::manifest::{PackLock, PackManifest};
 use crate::metrics::{MetricAssets, MetricCatalog, MetricInspectSummary, validate_metrics};
@@ -262,6 +263,7 @@ fn inspect_loaded_sorla_pack(pack: LoadedSorlaPack) -> Result<SorxInspectReport,
             has_arazzo: pack.sorla_assets.arazzo_yaml.is_some(),
             has_mcp_tools: pack.sorla_assets.mcp_tools_json.is_some(),
             has_llms_fragment: pack.sorla_assets.llms_txt_fragment.is_some(),
+            roles: inspect_model_roles(&pack.sorla_assets.model_cbor),
         },
         sorx: SorxInspectSorx {
             has_start_schema: true,
@@ -311,6 +313,39 @@ fn inspect_loaded_sorla_pack(pack: LoadedSorlaPack) -> Result<SorxInspectReport,
             .map(MetricAssets::inspect_summary)
             .unwrap_or_else(MetricInspectSummary::missing),
     })
+}
+
+fn inspect_model_roles(model_cbor: &[u8]) -> Vec<SorxInspectRole> {
+    let Ok(model) = ciborium::de::from_reader::<Value, _>(model_cbor) else {
+        return Vec::new();
+    };
+    model
+        .get("roles")
+        .and_then(Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(|role| {
+                    let id = role
+                        .get("id")
+                        .or_else(|| role.get("role_id"))
+                        .or_else(|| role.get("roleId"))
+                        .or_else(|| role.get("name"))
+                        .and_then(Value::as_str)?;
+                    let label = role
+                        .get("label")
+                        .or_else(|| role.get("title"))
+                        .or_else(|| role.get("description"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string);
+                    Some(SorxInspectRole {
+                        id: id.to_string(),
+                        label,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn validate_input_path(path: &Path) -> Result<(), SorxPackError> {
@@ -1529,6 +1564,29 @@ mod tests {
         assert!(json.contains("\"name\": \"landlord-tenant-sor\""));
         assert!(json.contains("\"has_mcp_tools\": true"));
         assert!(json.contains("\"present\": false"));
+    }
+
+    #[test]
+    fn inspect_lists_roles_from_model_cbor() {
+        let mut entries = valid_entries();
+        entries.insert(
+            "assets/sorla/model.cbor".to_string(),
+            encode_cbor(&serde_json::json!({
+                "roles": [
+                    { "id": "leasing-agent", "label": "Leasing agent" },
+                    { "role_id": "property-manager" }
+                ]
+            })),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let report = inspect_sorla_pack(&path).unwrap();
+        assert_eq!(report.sorla.roles[0].id, "leasing-agent");
+        assert_eq!(
+            report.sorla.roles[0].label.as_deref(),
+            Some("Leasing agent")
+        );
+        assert_eq!(report.sorla.roles[1].id, "property-manager");
     }
 
     #[test]

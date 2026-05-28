@@ -3520,6 +3520,7 @@ fn run_start(
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers)
             .map_err(|err| CliError::answers(err.to_string()))?;
         let bind = config.server.bind.clone();
+        let public_base_url = config.server.public_base_url.clone();
         let initial_runtime_config =
             load_initial_runtime_config(&config.environment, context)?.map(|(_, config)| config);
         let server = http_runtime::HttpRuntime::from_pack_with_runtime_config(
@@ -3539,7 +3540,13 @@ fn run_start(
         let listener = std::net::TcpListener::bind(&bind).map_err(|err| {
             CliError::runtime(format!("failed to bind HTTP server on {bind}: {err}"))
         })?;
-        eprintln!("greentic-sorx HTTP runtime listening on http://{bind}");
+        let local_addr = listener.local_addr().map_err(|err| {
+            CliError::runtime(format!("failed to read HTTP listener address: {err}"))
+        })?;
+        let base_url = runtime_base_url(public_base_url.as_deref(), &bind, local_addr);
+        eprintln!("greentic-sorx HTTP runtime listening on {base_url}");
+        eprintln!("Sorx Business Manager: {base_url}/v1/sorx/manager");
+        eprintln!("Sorx Business Manager alias: {base_url}/manager");
         return server
             .serve(listener)
             .map_err(|err| CliError::runtime(format!("HTTP server failed: {err}")));
@@ -3573,6 +3580,20 @@ fn run_start(
         .map_err(|err| CliError::generic(format!("failed to encode startup output: {err}")))?;
     println!("{encoded}");
     Ok(())
+}
+
+fn runtime_base_url(
+    public_base_url: Option<&str>,
+    requested_bind: &str,
+    local_addr: std::net::SocketAddr,
+) -> String {
+    if !requested_bind.ends_with(":0")
+        && let Some(public_base_url) = public_base_url
+        && !public_base_url.trim().is_empty()
+    {
+        return public_base_url.trim().trim_end_matches('/').to_string();
+    }
+    format!("http://{local_addr}")
 }
 
 fn load_initial_runtime_config(
@@ -4180,6 +4201,19 @@ mod tests {
         assert_eq!(
             parse_qa_answer(&question, "vault:sorx/http").unwrap(),
             "vault:sorx/http"
+        );
+    }
+
+    #[test]
+    fn runtime_base_url_uses_public_url_except_ephemeral_bind() {
+        let local_addr = "127.0.0.1:34567".parse().unwrap();
+        assert_eq!(
+            runtime_base_url(Some("http://example.test/"), "127.0.0.1:8787", local_addr),
+            "http://example.test"
+        );
+        assert_eq!(
+            runtime_base_url(Some("http://example.test"), "127.0.0.1:0", local_addr),
+            "http://127.0.0.1:34567"
         );
     }
 

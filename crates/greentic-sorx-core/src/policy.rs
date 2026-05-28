@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{EndpointDefinition, RiskLevel};
 
@@ -77,6 +78,23 @@ pub enum PolicyAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolicyEngine {
     pub config: PolicyConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationPolicyInput {
+    pub principal_subject: String,
+    pub principal_roles: Vec<String>,
+    pub resource: AuthorizationPolicyResource,
+    pub operation: String,
+    pub policies: Vec<String>,
+    pub conditions: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationPolicyResource {
+    Endpoint { endpoint_id: String },
+    Record { record: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +217,19 @@ impl PolicyEngine {
                 action: PolicyAction::Deny,
                 reason: "Risk policy denies execution".to_string(),
             },
+        }
+    }
+
+    pub fn decide_authorization(&self, input: &AuthorizationPolicyInput) -> PolicyDecision {
+        if input.policies.is_empty() && input.conditions.is_none() {
+            return PolicyDecision {
+                action: PolicyAction::Execute,
+                reason: "No authorization policies were declared".to_string(),
+            };
+        }
+        PolicyDecision {
+            action: PolicyAction::Execute,
+            reason: "Authorization policy inputs accepted".to_string(),
         }
     }
 

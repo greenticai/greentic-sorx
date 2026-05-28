@@ -1,0 +1,56 @@
+{
+  "schema": "greentic.sorla.agent-gateway.v1",
+  "endpoints": [
+    {
+      "endpoint_id": "record_alpha.create",
+      "operation_id": "record_alpha.create",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/record-alpha/create",
+      "entity": "RecordAlpha",
+      "collection": "record_alpha",
+      "provider_binding": "store",
+      "risk": "low",
+      "input_schema": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    {
+      "endpoint_id": "record_beta.create",
+      "operation_id": "record_beta.create",
+      "operation": "create",
+      "method": "POST",
+      "path": "/v1/agent/record-beta/create",
+      "entity": "RecordBeta",
+      "collection": "record_beta",
+      "provider_binding": "store",
+      "risk": "medium",
+      "input_schema": {
+        "type": "object",
+        "required": ["id", "owner_ref"],
+        "properties": {
+          "id": { "type": "string" },
+          "owner_ref": { "type": "string" },
+          "sensitive_note": { "type": "string" }
+        }
+      }
+    },
+    {
+      "endpoint_id": "record_beta.approve",
+      "operation_id": "record_beta.approve",
+      "operation": "update",
+      "method": "PATCH",
+      "path": "/v1/agent/record-beta/{id}/approve",
+      "entity": "RecordBeta",
+      "collection": "record_beta",
+      "provider_binding": "store",
+      "risk": "high"
+    }
+  ]
+}

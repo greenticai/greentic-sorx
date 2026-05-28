@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use greentic_sorx_core::{
-    EndpointRouter, EndpointStatus, LocalAutoApproveBroker, LocalDenyBroker, MemoryAuditSink,
-    MemoryStoreProvider, PolicyConfig, PolicyEngine, PolicyMode, ProviderRegistry, RiskLevel,
+    AuthorizationRequirement, AuthorizationRoles, EndpointInvocation, EndpointRouter,
+    EndpointStatus, LocalAutoApproveBroker, LocalDenyBroker, MemoryAuditSink, MemoryStoreProvider,
+    PolicyConfig, PolicyEngine, PolicyMode, ProviderRegistry, RecordAccessPolicy, RiskLevel,
     SorxRuntime, default_start_schema, invocation, normalize_start_answers,
     runtime_config_from_answers, runtime_pack,
 };
@@ -62,17 +63,40 @@ fn runtime() -> SorxRuntime {
 }
 
 fn runtime_with_policy(policy: PolicyEngine) -> SorxRuntime {
+    runtime_with_gateway_and_pack(gateway(), runtime_pack("landlord", "0.1.0"), policy)
+}
+
+fn runtime_with_gateway_and_pack(
+    gateway: Value,
+    pack: greentic_sorx_core::RuntimePack,
+    policy: PolicyEngine,
+) -> SorxRuntime {
     let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
     let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
-    let router = EndpointRouter::from_agent_gateway(&gateway()).unwrap();
+    let router = EndpointRouter::from_agent_gateway(&gateway).unwrap();
     let mut providers = ProviderRegistry::new();
     providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
-    SorxRuntime::new(runtime_pack("landlord", "0.1.0"), config, router, providers)
-        .with_policy(policy)
+    SorxRuntime::new(pack, config, router, providers).with_policy(policy)
 }
 
 fn input(id: &str) -> Value {
     json!({ "id": id, "name": "Acme", "active": true })
+}
+
+fn with_roles(mut invocation: EndpointInvocation, roles: &[&str]) -> EndpointInvocation {
+    invocation.caller.roles = roles.iter().map(|role| role.to_string()).collect();
+    invocation
+}
+
+fn role_auth(any_of: &[&str], all_of: &[&str]) -> AuthorizationRequirement {
+    AuthorizationRequirement {
+        roles: AuthorizationRoles {
+            any_of: any_of.iter().map(|role| role.to_string()).collect(),
+            all_of: all_of.iter().map(|role| role.to_string()).collect(),
+        },
+        policies: Vec::new(),
+        conditions: None,
+    }
 }
 
 #[test]
@@ -97,6 +121,120 @@ fn low_and_medium_risk_execute_by_default() {
         ))
         .unwrap();
     assert_eq!(medium.status, EndpointStatus::Created);
+}
+
+#[test]
+fn endpoint_authorization_requires_matching_any_role() {
+    let mut gateway = gateway();
+    gateway["endpoints"][0]["authorization"] = json!({
+        "roles": { "any_of": ["leasing-agent"] }
+    });
+    let runtime = runtime_with_gateway_and_pack(
+        gateway,
+        runtime_pack("landlord", "0.1.0"),
+        PolicyEngine::default(),
+    );
+
+    let denied = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create.low",
+            "tenant.create.low",
+            input("tenant-auth-denied"),
+        ))
+        .unwrap();
+    assert_eq!(denied.status, EndpointStatus::Denied);
+    assert_eq!(denied.output["authorization"], "denied");
+
+    let allowed = runtime
+        .invoke(with_roles(
+            invocation(
+                "tenant-a",
+                "tenant.create.low",
+                "tenant.create.low",
+                input("tenant-auth-allowed"),
+            ),
+            &["leasing-agent"],
+        ))
+        .unwrap();
+    assert_eq!(allowed.status, EndpointStatus::Created);
+}
+
+#[test]
+fn endpoint_authorization_requires_all_roles_before_approval() {
+    let mut gateway = gateway();
+    gateway["endpoints"][2]["authorization"] = json!({
+        "roles": { "all_of": ["leasing-agent", "approver"] }
+    });
+    let runtime = runtime_with_gateway_and_pack(
+        gateway,
+        runtime_pack("landlord", "0.1.0"),
+        PolicyEngine::default(),
+    );
+
+    let denied = runtime
+        .invoke(with_roles(
+            invocation(
+                "tenant-a",
+                "tenant.create.high",
+                "tenant.create.high",
+                input("tenant-high-auth-denied"),
+            ),
+            &["leasing-agent"],
+        ))
+        .unwrap();
+    assert_eq!(denied.status, EndpointStatus::Denied);
+    assert_eq!(denied.output["authorization"], "denied");
+
+    let pending = runtime
+        .invoke(with_roles(
+            invocation(
+                "tenant-a",
+                "tenant.create.high",
+                "tenant.create.high",
+                input("tenant-high-auth-pending"),
+            ),
+            &["leasing-agent", "approver"],
+        ))
+        .unwrap();
+    assert_eq!(pending.status, EndpointStatus::ApprovalRequired);
+}
+
+#[test]
+fn record_create_access_requires_matching_role_without_magic_admin() {
+    let mut pack = runtime_pack("landlord", "0.1.0");
+    pack.record_access.insert(
+        "Tenant".to_string(),
+        RecordAccessPolicy {
+            create: Some(role_auth(&["leasing-agent"], &[])),
+            ..RecordAccessPolicy::default()
+        },
+    );
+    let runtime = runtime_with_gateway_and_pack(gateway(), pack, PolicyEngine::default());
+
+    let denied = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create.low",
+            "tenant.create.low",
+            input("tenant-record-auth-denied"),
+        ))
+        .unwrap();
+    assert_eq!(denied.status, EndpointStatus::Denied);
+    assert_eq!(denied.output["authorization"], "denied");
+
+    let allowed = runtime
+        .invoke(with_roles(
+            invocation(
+                "tenant-a",
+                "tenant.create.low",
+                "tenant.create.low",
+                input("tenant-record-auth-allowed"),
+            ),
+            &["leasing-agent"],
+        ))
+        .unwrap();
+    assert_eq!(allowed.status, EndpointStatus::Created);
 }
 
 #[test]
