@@ -29,6 +29,14 @@ pub struct SorxInspectSorla {
     pub has_arazzo: bool,
     pub has_mcp_tools: bool,
     pub has_llms_fragment: bool,
+    pub roles: Vec<SorxInspectRole>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SorxInspectRole {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

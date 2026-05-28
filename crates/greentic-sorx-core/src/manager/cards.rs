@@ -1,0 +1,1067 @@
+use serde_json::{Value, json};
+
+use super::{ManagerActionView, ManagerFieldView, ManagerRecordView, ManagerViewModel};
+
+pub fn render_dashboard_card(view: &ManagerViewModel) -> Value {
+    adaptive_card(
+        view,
+        "manager.dashboard",
+        vec![
+            text_block(&view.title, "large", true),
+            text_block(&view.description, "default", false),
+        ],
+        view.navigation
+            .iter()
+            .map(|item| open_action(&item.label, &format!("records/{}", item.record)))
+            .collect(),
+    )
+}
+
+pub fn render_record_list_card(view: &ManagerViewModel, record_name: &str) -> Option<Value> {
+    let record = view
+        .records
+        .iter()
+        .find(|record| record.record == record_name)?;
+    Some(adaptive_card(
+        view,
+        "manager.record.list",
+        vec![
+            text_block(&record.plural_label, "large", true),
+            text_block(&record.collection, "default", false),
+        ],
+        vec![
+            open_action(
+                localized_static(&view.locale, "Create"),
+                &format!("records/{}/create", record.record),
+            ),
+            open_action(localized_static(&view.locale, "Dashboard"), "dashboard"),
+        ],
+    ))
+}
+
+pub fn render_record_create_card(view: &ManagerViewModel, record_name: &str) -> Option<Value> {
+    let record = view
+        .records
+        .iter()
+        .find(|record| record.record == record_name)?;
+    let mut body = form_body(&record.label, record, FormScope::Create);
+    body.push(form_action_set(
+        &view.locale,
+        &record.record,
+        None,
+        create_action(view, &record.record),
+    ));
+    Some(adaptive_card(
+        view,
+        "manager.record.create",
+        body,
+        Vec::new(),
+    ))
+}
+
+pub fn render_record_detail_card(
+    view: &ManagerViewModel,
+    record_name: &str,
+    id: &str,
+) -> Option<Value> {
+    let record = view
+        .records
+        .iter()
+        .find(|record| record.record == record_name)?;
+    let mut body = form_body(&record.label, record, FormScope::Record);
+    body.push(text_block(&format!("id: {id}"), "default", false));
+    Some(adaptive_card(
+        view,
+        "manager.record.detail",
+        body,
+        submit_actions(
+            &view.locale,
+            &record.record,
+            Some(id),
+            update_action(view, &record.record),
+        ),
+    ))
+}
+
+pub fn render_record_picker_card(view: &ManagerViewModel, record_name: &str) -> Option<Value> {
+    let record = view
+        .records
+        .iter()
+        .find(|record| record.record == record_name)?;
+    Some(adaptive_card(
+        view,
+        "manager.record.picker",
+        vec![
+            text_block(
+                &format!(
+                    "{} {}",
+                    localized_static(&view.locale, "Select"),
+                    record.label
+                ),
+                "Large",
+                true,
+            ),
+            text_block(
+                localized_static(
+                    &view.locale,
+                    "Search and dropdown choices will appear here when records are available.",
+                ),
+                "Default",
+                false,
+            ),
+            json!({
+                "type": "Input.Text",
+                "id": "query",
+                "label": localized_static(&view.locale, "Search"),
+                "placeholder": format!("{} {}", localized_static(&view.locale, "Search"), record.plural_label)
+            }),
+        ],
+        vec![open_action(
+            localized_static(&view.locale, "Dashboard"),
+            "dashboard",
+        )],
+    ))
+}
+
+pub fn render_relationship_summary_card(view: &ManagerViewModel) -> Value {
+    let mut body = vec![text_block(
+        localized_static(&view.locale, "Relationships"),
+        "large",
+        true,
+    )];
+    if view.relationships.is_empty() {
+        body.push(text_block(
+            localized_static(&view.locale, "No relationship metadata is declared."),
+            "default",
+            false,
+        ));
+    } else {
+        for relationship in &view.relationships {
+            body.push(text_block(
+                &format!(
+                    "{}: {} -> {}",
+                    relationship.label, relationship.from_record, relationship.to_record
+                ),
+                "default",
+                false,
+            ));
+        }
+    }
+    adaptive_card(
+        view,
+        "manager.relationships",
+        body,
+        vec![open_action(
+            localized_static(&view.locale, "Graph"),
+            "graph.json",
+        )],
+    )
+}
+
+fn adaptive_card(
+    view: &ManagerViewModel,
+    kind: &str,
+    body: Vec<Value>,
+    actions: Vec<Value>,
+) -> Value {
+    json!({
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "lang": view.locale,
+        "metadata": {
+            "schema": "greentic.sorx.manager-card.v1",
+            "kind": kind,
+            "locale": view.locale
+        },
+        "body": body,
+        "actions": actions
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormScope {
+    Create,
+    Record,
+}
+
+fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<Value> {
+    let mut body = vec![text_block(title, "Large", true)];
+    for field in &record.fields {
+        if scope == FormScope::Create
+            && !record.create_field_names.is_empty()
+            && !record
+                .create_field_names
+                .iter()
+                .any(|candidate| candidate == &field.name)
+        {
+            continue;
+        }
+        if field.redacted {
+            body.push(text_block(
+                &format!("{}: redacted", field.label),
+                "Default",
+                false,
+            ));
+        } else if field.generated && field.value.is_none() {
+            continue;
+        } else if field.read_only {
+            body.push(text_block(&field.label, "Default", false));
+        } else {
+            body.push(input_for_field(field));
+        }
+    }
+    body
+}
+
+fn input_for_field(field: &ManagerFieldView) -> Value {
+    if field.relationship.is_some() && canonical_scalar_type(field.json_type.as_deref()) == "uuid" {
+        return relationship_picker_input(field);
+    }
+    if let Some(choices) = choice_values(field) {
+        return choice_input(field, choices);
+    }
+    let scalar_type = canonical_scalar_type(field.json_type.as_deref());
+    let mut input = match scalar_type {
+        "boolean" => json!({
+            "type": "Input.Toggle",
+            "id": field.name,
+            "title": field.label,
+            "label": field.label,
+            "valueOn": "true",
+            "valueOff": "false",
+        }),
+        "date" => json!({
+            "type": "Input.Date",
+            "id": field.name,
+            "label": field.label,
+        }),
+        "time" => json!({
+            "type": "Input.Time",
+            "id": field.name,
+            "label": field.label,
+        }),
+        "datetime" => datetime_input_container(field),
+        "decimal" | "integer" => json!({
+            "type": "Input.Number",
+            "id": field.name,
+            "label": field.label,
+            "placeholder": field.label,
+        }),
+        _ => json!({
+            "type": "Input.Text",
+            "id": field.name,
+            "label": field.label,
+            "placeholder": field.label,
+        }),
+    };
+
+    input["isRequired"] = Value::Bool(field.required);
+    if field.required {
+        input["errorMessage"] = Value::String(format!("{} is required.", field.label));
+    }
+    if scalar_type != "datetime" {
+        apply_field_rules(&mut input, field);
+        if let Some(value) = field.value.as_ref() {
+            input["value"] = Value::String(input_value_string(value));
+        }
+    }
+    input
+}
+
+fn choice_input(field: &ManagerFieldView, choices: Vec<Value>) -> Value {
+    let mut input = json!({
+        "type": "Input.ChoiceSet",
+        "id": field.name,
+        "label": field.label,
+        "style": "compact",
+        "isMultiSelect": false,
+        "choices": choices,
+        "isRequired": field.required,
+        "metadata": {
+            "schema": "greentic.sorx.manager-input.v1",
+            "scalar_type": canonical_scalar_type(field.json_type.as_deref()),
+            "rules": field.rules.clone()
+        }
+    });
+    if field.required {
+        input["errorMessage"] = Value::String(format!("{} is required.", field.label));
+    }
+    if let Some(value) = field.value.as_ref() {
+        input["value"] = Value::String(input_value_string(value));
+    }
+    input
+}
+
+fn input_value_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => String::new(),
+        value => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn choice_values(field: &ManagerFieldView) -> Option<Vec<Value>> {
+    let rules = field.rules.as_ref().and_then(Value::as_object)?;
+    let values = rules
+        .get("enum")
+        .or_else(|| rules.get("enum_values"))
+        .or_else(|| rules.get("choices"))
+        .or_else(|| rules.get("allowed_values"))?
+        .as_array()?;
+    let choices = values
+        .iter()
+        .filter_map(|value| {
+            if let Some(raw) = value.as_str() {
+                return Some(json!({
+                    "title": humanize_choice(raw),
+                    "value": raw
+                }));
+            }
+            let object = value.as_object()?;
+            let raw = object
+                .get("value")
+                .or_else(|| object.get("id"))
+                .and_then(Value::as_str)?;
+            let title = object
+                .get("title")
+                .or_else(|| object.get("label"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| humanize_choice(raw));
+            Some(json!({
+                "title": title,
+                "value": raw
+            }))
+        })
+        .collect::<Vec<_>>();
+    (!choices.is_empty()).then_some(choices)
+}
+
+fn humanize_choice(value: &str) -> String {
+    value
+        .split(['_', '-', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn relationship_picker_input(field: &ManagerFieldView) -> Value {
+    let relationship = field
+        .relationship
+        .as_ref()
+        .expect("relationship is present");
+    let picker_card = route_card_id(&format!("pickers/{}", relationship.to_record));
+    let mut input = json!({
+        "type": "Input.Text",
+        "id": field.name,
+        "label": field.label,
+        "placeholder": format!("Select {}", relationship.label),
+        "isRequired": field.required
+    });
+    if field.required {
+        input["errorMessage"] = Value::String(format!("{} is required.", field.label));
+    }
+    json!({
+        "type": "ColumnSet",
+        "metadata": {
+            "schema": "greentic.sorx.manager-input.v1",
+            "scalar_type": "uuid",
+            "relationship": relationship,
+            "picker": {
+                "record": relationship.to_record,
+                "card_id": picker_card
+            }
+        },
+        "columns": [
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [input]
+            },
+            {
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "bottom",
+                "items": [{
+                    "type": "ActionSet",
+                    "actions": [{
+                        "type": "Action.Submit",
+                        "title": format!("⌕ Search {}", relationship.label),
+                        "associatedInputs": "none",
+                        "data": {
+                            "manager_target": format!("pickers/{}", relationship.to_record),
+                            "routeToCardId": picker_card,
+                            "cardId": picker_card,
+                            "step": "open",
+                            "relationship_id": relationship.relationship_id,
+                            "field": field.name,
+                            "record": relationship.to_record
+                        }
+                    }]
+                }]
+            }
+        ]
+    })
+}
+
+fn datetime_input_container(field: &ManagerFieldView) -> Value {
+    let date_id = datetime_part_id(&field.name, "date");
+    let time_id = datetime_part_id(&field.name, "time");
+    let mut date_input = json!({
+        "type": "Input.Date",
+        "id": date_id,
+        "label": format!("{} date", field.label),
+        "metadata": {
+            "schema": "greentic.sorx.manager-input-part.v1",
+            "target": field.name,
+            "part": "date",
+            "scalar_type": "datetime"
+        }
+    });
+    let mut time_input = json!({
+        "type": "Input.Time",
+        "id": time_id,
+        "label": format!("{} time", field.label),
+        "metadata": {
+            "schema": "greentic.sorx.manager-input-part.v1",
+            "target": field.name,
+            "part": "time",
+            "scalar_type": "datetime"
+        }
+    });
+    if field.required {
+        date_input["isRequired"] = Value::Bool(true);
+        date_input["errorMessage"] = Value::String(format!("{} date is required.", field.label));
+        time_input["isRequired"] = Value::Bool(true);
+        time_input["errorMessage"] = Value::String(format!("{} time is required.", field.label));
+    }
+    if let Some(rules) = field.rules.as_ref().and_then(Value::as_object) {
+        copy_date_rule(&mut date_input, rules, "after", "min");
+        copy_date_rule(&mut date_input, rules, "before", "max");
+    }
+
+    json!({
+        "type": "Container",
+        "metadata": {
+            "schema": "greentic.sorx.manager-input.v1",
+            "scalar_type": "datetime",
+            "target": field.name,
+            "combine": "date_time_iso8601_utc",
+            "rules": field.rules.clone()
+        },
+        "items": [
+            text_block(&field.label, "Default", false),
+            date_input,
+            time_input
+        ]
+    })
+}
+
+pub fn datetime_part_id(field_name: &str, part: &str) -> String {
+    format!("{field_name}__sorx_{part}")
+}
+
+fn apply_field_rules(input: &mut Value, field: &ManagerFieldView) {
+    let Some(rules) = field.rules.as_ref().and_then(Value::as_object) else {
+        return;
+    };
+
+    let scalar_type = canonical_scalar_type(field.json_type.as_deref());
+    match scalar_type {
+        "decimal" | "integer" => {
+            copy_rule(input, rules, "min", "min");
+            copy_rule(input, rules, "max", "max");
+        }
+        "date" | "time" => {
+            copy_rule(input, rules, "after", "min");
+            copy_rule(input, rules, "before", "max");
+        }
+        "datetime" => {
+            input["placeholder"] = Value::String("YYYY-MM-DDTHH:MM:SSZ".to_string());
+        }
+        _ => {}
+    }
+
+    if input.get("type").and_then(Value::as_str) == Some("Input.Text") {
+        copy_rule(input, rules, "max_length", "maxLength");
+        copy_rule(input, rules, "pattern", "regex");
+    }
+
+    input["metadata"] = json!({
+        "schema": "greentic.sorx.manager-input.v1",
+        "scalar_type": scalar_type,
+        "rules": field.rules.clone()
+    });
+}
+
+fn copy_rule(
+    input: &mut Value,
+    rules: &serde_json::Map<String, Value>,
+    source: &str,
+    target: &str,
+) {
+    if let Some(value) = rules.get(source) {
+        input[target] = value.clone();
+    }
+}
+
+fn copy_date_rule(
+    input: &mut Value,
+    rules: &serde_json::Map<String, Value>,
+    source: &str,
+    target: &str,
+) {
+    if let Some(Value::String(value)) = rules.get(source) {
+        input[target] = Value::String(
+            value
+                .split_once('T')
+                .map(|(date, _)| date)
+                .unwrap_or(value)
+                .to_string(),
+        );
+    } else {
+        copy_rule(input, rules, source, target);
+    }
+}
+
+fn canonical_scalar_type(value: Option<&str>) -> &'static str {
+    match value.unwrap_or("string").to_ascii_lowercase().as_str() {
+        "bool" | "boolean" => "boolean",
+        "int" | "integer" | "u32" => "integer",
+        "decimal" | "number" | "float" | "double" => "decimal",
+        "uuid" => "uuid",
+        "email" => "email",
+        "url" => "url",
+        "date" => "date",
+        "time" => "time",
+        "datetime" | "timestamp" => "datetime",
+        _ => "string",
+    }
+}
+
+fn submit_actions(
+    locale: &str,
+    record: &str,
+    id: Option<&str>,
+    action: Option<&ManagerActionView>,
+) -> Vec<Value> {
+    let mut data = json!({
+        "record": record
+    });
+    if let Some(id) = id {
+        data["id"] = Value::String(id.to_string());
+    }
+    if let Some(action) = action {
+        data["endpoint_id"] = Value::String(action.endpoint_id.clone());
+        data["operation_id"] = Value::String(action.operation_id.clone());
+        data["action"] = Value::String("manager_submit".to_string());
+    }
+    vec![json!({
+        "type": "Action.Submit",
+        "title": localized_static(locale, "Submit"),
+        "data": data
+    })]
+}
+
+fn form_action_set(
+    locale: &str,
+    record: &str,
+    id: Option<&str>,
+    action: Option<&ManagerActionView>,
+) -> Value {
+    let mut actions = submit_actions(locale, record, id, action);
+    let target = format!("records/{record}");
+    actions.push(json!({
+        "type": "Action.Submit",
+        "title": localized_static(locale, "Cancel"),
+        "style": "default",
+        "associatedInputs": "none",
+        "data": {
+            "manager_target": target,
+            "routeToCardId": route_card_id(&target),
+            "cardId": route_card_id(&target),
+            "step": "open",
+            "sorx_action_style": "secondary"
+        }
+    }));
+    json!({
+        "type": "ActionSet",
+        "spacing": "medium",
+        "actions": actions
+    })
+}
+
+fn localized_static<'a>(locale: &str, text: &'a str) -> &'a str {
+    let language = locale
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(locale)
+        .to_ascii_lowercase();
+    if language != "es" {
+        return text;
+    }
+    match text {
+        "Create" => "Crear",
+        "Cancel" => "Cancelar",
+        "Dashboard" => "Panel",
+        "Submit" => "Enviar",
+        "Search" => "Buscar",
+        "Select" => "Seleccionar",
+        "Relationships" => "Relaciones",
+        "Graph" => "Grafo",
+        "No relationship metadata is declared." => "No se han declarado metadatos de relaciones.",
+        "Search and dropdown choices will appear here when records are available." => {
+            "La busqueda y las opciones desplegables apareceran aqui cuando haya registros disponibles."
+        }
+        _ => text,
+    }
+}
+
+fn text_block(text: &str, size: &str, weight: bool) -> Value {
+    json!({
+        "type": "TextBlock",
+        "text": text,
+        "wrap": true,
+        "size": size,
+        "weight": if weight { "Bolder" } else { "Default" }
+    })
+}
+
+fn open_action(title: &str, target: &str) -> Value {
+    let route_to_card_id = route_card_id(target);
+    json!({
+        "type": "Action.Submit",
+        "title": title,
+        "associatedInputs": "none",
+        "data": {
+            "manager_target": target,
+            "routeToCardId": route_to_card_id,
+            "cardId": route_to_card_id,
+            "step": "open"
+        }
+    })
+}
+
+fn create_action<'a>(view: &'a ManagerViewModel, record: &str) -> Option<&'a ManagerActionView> {
+    view.actions.iter().find(|action| {
+        action.record.as_deref() == Some(record) && action_matches_operation(action, "create")
+    })
+}
+
+fn update_action<'a>(view: &'a ManagerViewModel, record: &str) -> Option<&'a ManagerActionView> {
+    view.actions.iter().find(|action| {
+        action.record.as_deref() == Some(record) && action_matches_operation(action, "update")
+    })
+}
+
+fn action_matches_operation(action: &ManagerActionView, operation: &str) -> bool {
+    let marker = format!(".{operation}");
+    let underscore_marker = format!("_{operation}");
+    let dash_marker = format!("-{operation}");
+    let slash_marker = format!("/{operation}");
+    action.label_key.ends_with(&format!("{marker}.label"))
+        || [&action.endpoint_id, &action.operation_id]
+            .into_iter()
+            .any(|value| {
+                value.contains(&marker)
+                    || value.contains(&underscore_marker)
+                    || value.contains(&dash_marker)
+                    || value.contains(&slash_marker)
+                    || value.starts_with(&format!("{operation}_"))
+                    || value.starts_with(&format!("{operation}-"))
+                    || value.ends_with(operation)
+            })
+}
+
+fn route_card_id(target: &str) -> String {
+    if target == "dashboard" {
+        return "sorx_dashboard".to_string();
+    }
+    target
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::manager::{
+        ManagerFieldRelationshipView, ManagerFieldView, ManagerNavItem, ManagerPolicyDecision,
+        ManagerRecordView, ManagerViewModel,
+    };
+
+    #[test]
+    fn dashboard_card_is_adaptive_card_json() {
+        let card = render_dashboard_card(&view());
+        assert_eq!(card["type"], "AdaptiveCard");
+        assert_eq!(card["lang"], "en");
+        assert_eq!(card["metadata"]["schema"], "greentic.sorx.manager-card.v1");
+        assert_eq!(card["metadata"]["locale"], "en");
+        assert_eq!(card["body"][0]["text"], "Generic Sor");
+        assert_eq!(card["body"][1]["text"], "Manage Record Alpha.");
+        assert_eq!(
+            card["actions"][0]["data"]["routeToCardId"],
+            "records_RecordAlpha"
+        );
+    }
+
+    #[test]
+    fn create_card_contains_inputs_from_fields() {
+        let card = render_record_create_card(&view(), "RecordAlpha").unwrap();
+        assert_eq!(card["body"][1]["type"], "Input.Text");
+        assert_eq!(card["body"][1]["id"], "id");
+        assert_eq!(card["body"][1]["label"], "Id");
+        assert_eq!(card["body"][1]["errorMessage"], "Id is required.");
+        let actions = card["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "ActionSet")
+            .unwrap();
+        assert_eq!(
+            actions["actions"][0]["data"]["endpoint_id"],
+            "record_alpha.create"
+        );
+        assert_eq!(actions["actions"][1]["title"], "Cancel");
+    }
+
+    #[test]
+    fn create_card_uses_scalar_specific_inputs_and_rules() {
+        let card = render_record_create_card(&typed_view(), "RecordAlpha").unwrap();
+        assert_eq!(card["body"][1]["type"], "Input.Date");
+        assert_eq!(card["body"][1]["min"], "2026-01-01");
+        assert_eq!(card["body"][1]["max"], "2026-12-31");
+        assert_eq!(card["body"][1]["metadata"]["scalar_type"], "date");
+
+        assert_eq!(card["body"][2]["type"], "Input.Number");
+        assert_eq!(card["body"][2]["min"], 0);
+        assert_eq!(card["body"][2]["max"], 10000);
+
+        assert_eq!(card["body"][3]["type"], "Input.Toggle");
+        assert_eq!(card["body"][3]["valueOn"], "true");
+
+        assert_eq!(card["body"][4]["type"], "Input.Text");
+        assert_eq!(card["body"][4]["maxLength"], 120);
+        assert_eq!(card["body"][4]["regex"], "^[A-Z].*");
+
+        assert_eq!(card["body"][5]["type"], "Container");
+        assert_eq!(card["body"][5]["metadata"]["scalar_type"], "datetime");
+        assert_eq!(card["body"][5]["metadata"]["target"], "scheduled_at");
+        assert_eq!(card["body"][5]["items"][1]["type"], "Input.Date");
+        assert_eq!(card["body"][5]["items"][1]["id"], "scheduled_at__sorx_date");
+        assert_eq!(card["body"][5]["items"][2]["type"], "Input.Time");
+        assert_eq!(card["body"][5]["items"][2]["id"], "scheduled_at__sorx_time");
+
+        assert_eq!(card["body"][6]["type"], "Input.ChoiceSet");
+        assert_eq!(card["body"][6]["id"], "status");
+        assert_eq!(card["body"][6]["choices"][0]["title"], "Pending");
+        assert_eq!(card["body"][6]["choices"][0]["value"], "pending");
+    }
+
+    #[test]
+    fn create_card_skips_generated_uuid_and_uses_picker_for_relationship_uuid() {
+        let card = render_record_create_card(&relationship_view(), "RecordAlpha").unwrap();
+        let body = card["body"].as_array().unwrap();
+        assert!(!body.iter().any(|item| item["id"] == "id"));
+        let tenant = body
+            .iter()
+            .find(|item| item["metadata"]["relationship"]["to_record"] == "Tenant")
+            .unwrap();
+        assert_eq!(tenant["columns"][0]["items"][0]["id"], "tenant_id");
+        assert_eq!(
+            tenant["columns"][1]["items"][0]["actions"][0]["data"]["routeToCardId"],
+            "pickers_Tenant"
+        );
+    }
+
+    #[test]
+    fn create_card_skips_record_scoped_generated_uuid() {
+        let mut view = view();
+        view.records[0].record = "Landlord".to_string();
+        view.records[0].label = "Landlord".to_string();
+        view.records[0].fields = vec![
+            ManagerFieldView {
+                name: "landlord_id".to_string(),
+                label_key: "field.landlord.landlord_id.label".to_string(),
+                label: "Landlord Id".to_string(),
+                json_type: Some("uuid".to_string()),
+                rules: None,
+                generated: true,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "name".to_string(),
+                label_key: "field.landlord.name.label".to_string(),
+                label: "Name".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+        ];
+
+        let card = render_record_create_card(&view, "Landlord").unwrap();
+        let body = card["body"].as_array().unwrap();
+        assert!(!body.iter().any(|item| item["id"] == "landlord_id"));
+        assert!(body.iter().any(|item| item["id"] == "name"));
+    }
+
+    #[test]
+    fn create_card_uses_create_endpoint_fields_not_record_wide_admin_fields() {
+        let mut view = view();
+        view.records[0].record = "Landlord".to_string();
+        view.records[0].label = "Landlord".to_string();
+        view.records[0].create_field_names = vec!["email".to_string(), "full_name".to_string()];
+        view.records[0].fields = ["email", "full_name", "patch_json", "reason", "record_id"]
+            .into_iter()
+            .map(|name| ManagerFieldView {
+                name: name.to_string(),
+                label_key: format!("field.landlord.{name}.label"),
+                label: name.to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            })
+            .collect();
+
+        let card = render_record_create_card(&view, "Landlord").unwrap();
+        let body = card["body"].as_array().unwrap();
+        assert!(body.iter().any(|item| item["id"] == "email"));
+        assert!(body.iter().any(|item| item["id"] == "full_name"));
+        assert!(!body.iter().any(|item| item["id"] == "patch_json"));
+        assert!(!body.iter().any(|item| item["id"] == "reason"));
+        assert!(!body.iter().any(|item| item["id"] == "record_id"));
+    }
+
+    fn view() -> ManagerViewModel {
+        ManagerViewModel {
+            schema: "greentic.sorx.manager-view.v1".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            sor_id: "generic-sor".to_string(),
+            title: "Generic Sor".to_string(),
+            description: "Manage Record Alpha.".to_string(),
+            locale: "en".to_string(),
+            navigation: vec![ManagerNavItem {
+                record: "RecordAlpha".to_string(),
+                label_key: "record.record_alpha.plural".to_string(),
+                label: "Record Alpha".to_string(),
+                collection: "record_alpha".to_string(),
+            }],
+            records: vec![ManagerRecordView {
+                record: "RecordAlpha".to_string(),
+                collection: "record_alpha".to_string(),
+                label_key: "record.record_alpha.label".to_string(),
+                label: "Record Alpha".to_string(),
+                plural_label_key: "record.record_alpha.plural".to_string(),
+                plural_label: "Record Alpha".to_string(),
+                create_field_names: Vec::new(),
+                fields: vec![ManagerFieldView {
+                    name: "id".to_string(),
+                    label_key: "field.record_alpha.id.label".to_string(),
+                    label: "Id".to_string(),
+                    json_type: Some("string".to_string()),
+                    rules: None,
+                    generated: false,
+                    relationship: None,
+                    required: true,
+                    read_only: false,
+                    redacted: false,
+                    value: None,
+                    policy: ManagerPolicyDecision::allow(),
+                }],
+                endpoint_ids: Vec::new(),
+                policy: ManagerPolicyDecision::allow(),
+            }],
+            relationships: Vec::new(),
+            actions: vec![crate::manager::ManagerActionView {
+                action_id: "record_alpha.create".to_string(),
+                endpoint_id: "record_alpha.create".to_string(),
+                operation_id: "record_alpha.create".to_string(),
+                record: Some("RecordAlpha".to_string()),
+                label_key: "action.record_alpha.create.label".to_string(),
+                label: "Create Record Alpha".to_string(),
+                risk: "low".to_string(),
+                approval_required: false,
+                policy: ManagerPolicyDecision::allow(),
+            }],
+            policies: Vec::new(),
+        }
+    }
+
+    fn typed_view() -> ManagerViewModel {
+        let mut view = view();
+        view.records[0].fields = vec![
+            ManagerFieldView {
+                name: "starts_on".to_string(),
+                label_key: "field.record_alpha.starts_on.label".to_string(),
+                label: "Starts On".to_string(),
+                json_type: Some("date".to_string()),
+                rules: Some(json!({"after": "2026-01-01", "before": "2026-12-31"})),
+                generated: false,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "rent".to_string(),
+                label_key: "field.record_alpha.rent.label".to_string(),
+                label: "Rent".to_string(),
+                json_type: Some("decimal".to_string()),
+                rules: Some(json!({"min": 0, "max": 10000})),
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "active".to_string(),
+                label_key: "field.record_alpha.active.label".to_string(),
+                label: "Active".to_string(),
+                json_type: Some("boolean".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "summary".to_string(),
+                label_key: "field.record_alpha.summary.label".to_string(),
+                label: "Summary".to_string(),
+                json_type: Some("string".to_string()),
+                rules: Some(json!({"max_length": 120, "pattern": "^[A-Z].*"})),
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "scheduled_at".to_string(),
+                label_key: "field.record_alpha.scheduled_at.label".to_string(),
+                label: "Scheduled At".to_string(),
+                json_type: Some("datetime".to_string()),
+                rules: Some(json!({"after": "2026-01-01", "before": "2026-12-31"})),
+                generated: false,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "status".to_string(),
+                label_key: "field.record_alpha.status.label".to_string(),
+                label: "Status".to_string(),
+                json_type: Some("string".to_string()),
+                rules: Some(json!({"enum": ["pending", "settled"]})),
+                generated: false,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+        ];
+        view
+    }
+
+    fn relationship_view() -> ManagerViewModel {
+        let mut view = view();
+        view.records.push(ManagerRecordView {
+            record: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            label_key: "record.tenant.label".to_string(),
+            label: "Tenant".to_string(),
+            plural_label_key: "record.tenant.plural".to_string(),
+            plural_label: "Tenants".to_string(),
+            create_field_names: Vec::new(),
+            fields: Vec::new(),
+            endpoint_ids: Vec::new(),
+            policy: ManagerPolicyDecision::allow(),
+        });
+        view.records[0].fields = vec![
+            ManagerFieldView {
+                name: "id".to_string(),
+                label_key: "field.record_alpha.id.label".to_string(),
+                label: "Id".to_string(),
+                json_type: Some("uuid".to_string()),
+                rules: None,
+                generated: true,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "tenant_id".to_string(),
+                label_key: "field.record_alpha.tenant_id.label".to_string(),
+                label: "Tenant".to_string(),
+                json_type: Some("uuid".to_string()),
+                rules: None,
+                generated: false,
+                relationship: Some(ManagerFieldRelationshipView {
+                    relationship_id: "tenant_has_alpha".to_string(),
+                    to_record: "Tenant".to_string(),
+                    label: "Tenant".to_string(),
+                }),
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+        ];
+        view
+    }
+}

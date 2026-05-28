@@ -317,6 +317,7 @@ fn validation_runtime(
                         .collect()
                 })
                 .unwrap_or_default(),
+            record_access: Default::default(),
         },
         config.clone(),
         router,

@@ -17,7 +17,8 @@ pub use doctor::{
     doctor_sorla_pack, doctor_sorla_pack_from_bytes,
 };
 pub use inspect::{
-    SorxInspectOntology, SorxInspectPack, SorxInspectReport, SorxInspectSorla, SorxInspectSorx,
+    SorxInspectOntology, SorxInspectPack, SorxInspectReport, SorxInspectRole, SorxInspectSorla,
+    SorxInspectSorx,
 };
 pub use loader::{
     LoadedSorlaPack, SorlaAssets, SorxAssets, SorxPackError, ValidationSuiteStatus,

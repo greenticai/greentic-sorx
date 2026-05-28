@@ -240,10 +240,44 @@ pub struct EndpointDefinition {
     pub provider_binding: String,
     pub risk: RiskLevel,
     pub approval: Option<ApprovalRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<AuthorizationRequirement>,
     pub input_schema: Option<Value>,
     pub output_schema: Option<Value>,
     pub view: ViewTransform,
     pub query_plan: QueryPlan,
+    #[serde(default)]
+    pub record_selector: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationRequirement {
+    #[serde(default)]
+    pub roles: AuthorizationRoles,
+    #[serde(default)]
+    pub policies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationRoles {
+    #[serde(default)]
+    pub any_of: Vec<String>,
+    #[serde(default)]
+    pub all_of: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordAccessPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<AuthorizationRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create: Option<AuthorizationRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<AuthorizationRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete: Option<AuthorizationRequirement>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +374,8 @@ pub struct RuntimePack {
     pub digest: Option<String>,
     #[serde(default)]
     pub operational_indexes: Vec<RuntimeOperationalIndex>,
+    #[serde(default)]
+    pub record_access: BTreeMap<String, RecordAccessPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

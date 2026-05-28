@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::{
-    ApprovalRequirement, CommandSpec, CommandStep, EndpointDefinition, EndpointMethod,
-    IndexRequirement, OperationKind, QueryPlan, RiskLevel, SorxError, SorxResult,
-    TraversalRequirement, ViewTransform,
+    ApprovalRequirement, AuthorizationRequirement, AuthorizationRoles, CommandSpec, CommandStep,
+    EndpointDefinition, EndpointMethod, IndexRequirement, OperationKind, QueryPlan, RiskLevel,
+    SorxError, SorxResult, TraversalRequirement, ViewTransform,
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -127,8 +127,10 @@ fn parse_endpoint(
             }
         });
     let approval = parse_approval(value.get("approval"));
+    let authorization = parse_authorization(value.get("authorization"));
     let view = parse_view_transform(value.get("view"));
     let query_plan = parse_query_plan(value.get("requires").or_else(|| value.get("query_plan")));
+    let record_selector = parse_record_selector(value.get("execution"));
 
     Ok(EndpointDefinition {
         endpoint_id,
@@ -141,11 +143,78 @@ fn parse_endpoint(
         provider_binding,
         risk,
         approval,
+        authorization,
         input_schema: object.get("input_schema").cloned(),
         output_schema: object.get("output_schema").cloned(),
         view,
         query_plan,
+        record_selector,
     })
+}
+
+fn parse_record_selector(value: Option<&Value>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    value
+        .get("record_selector")
+        .or_else(|| value.get("recordSelector"))
+        .is_some()
+}
+
+fn parse_authorization(value: Option<&Value>) -> Option<AuthorizationRequirement> {
+    let object = value?.as_object()?;
+    Some(AuthorizationRequirement {
+        roles: parse_authorization_roles(object.get("roles")),
+        policies: object
+            .get("policies")
+            .and_then(Value::as_array)
+            .map(|policies| {
+                policies
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        conditions: object.get("conditions").cloned(),
+    })
+}
+
+fn parse_authorization_roles(value: Option<&Value>) -> AuthorizationRoles {
+    let Some(value) = value else {
+        return AuthorizationRoles::default();
+    };
+    if let Some(values) = value.as_array() {
+        return AuthorizationRoles {
+            any_of: values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect(),
+            all_of: Vec::new(),
+        };
+    }
+    let Some(object) = value.as_object() else {
+        return AuthorizationRoles::default();
+    };
+    AuthorizationRoles {
+        any_of: string_array(object.get("any_of").or_else(|| object.get("anyOf"))),
+        all_of: string_array(object.get("all_of").or_else(|| object.get("allOf"))),
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_approval(value: Option<&Value>) -> Option<ApprovalRequirement> {
