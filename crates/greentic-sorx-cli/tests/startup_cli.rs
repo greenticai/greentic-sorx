@@ -3,7 +3,14 @@ use std::fs::File;
 use std::io::Write;
 use std::process::Command;
 
+use greentic_sorx_pack::{PackLock, PackLockEntry};
+use greentic_types::{
+    PackId, PackKind as GpackKind, PackManifest as GpackManifest, PackSignatures,
+    encode_pack_manifest,
+};
+use semver::Version;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -75,6 +82,11 @@ fn valid_entries() -> BTreeMap<String, Vec<u8>> {
 
     let mut entries = BTreeMap::new();
     entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
+    entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
+    entries.insert(
+        "manifest.json".to_string(),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    );
     entries.insert(
         "assets/sorla/model.cbor".to_string(),
         vec![0xa1, 0x61, 0x78, 0x01],
@@ -87,13 +99,56 @@ fn valid_entries() -> BTreeMap<String, Vec<u8>> {
         "assets/sorx/start.schema.json".to_string(),
         serde_json::to_vec_pretty(&startup_schema()).unwrap(),
     );
+    entries.insert(
+        "pack.lock.cbor".to_string(),
+        encode_cbor(&lock_for_entries(&entries)),
+    );
     entries
 }
 
-fn encode_cbor(value: &Value) -> Vec<u8> {
+fn encode_cbor<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut out = Vec::new();
     ciborium::ser::into_writer(value, &mut out).unwrap();
     out
+}
+
+fn lock_for_entries(entries: &BTreeMap<String, Vec<u8>>) -> PackLock {
+    PackLock {
+        schema: "greentic.gtpack.lock.sorla.v1".to_string(),
+        entries: entries
+            .iter()
+            .filter(|(path, _)| path.as_str() != "pack.lock.cbor")
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    PackLockEntry {
+                        size: bytes.len() as u64,
+                        sha256: hex::encode(Sha256::digest(bytes)),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn gpack_manifest_bytes() -> Vec<u8> {
+    encode_pack_manifest(&GpackManifest {
+        schema_version: "pack-v1".to_string(),
+        pack_id: "landlord-tenant-sor".parse::<PackId>().unwrap(),
+        name: Some("landlord-tenant-sor".to_string()),
+        version: Version::parse("0.1.0").unwrap(),
+        kind: GpackKind::Application,
+        publisher: "greentic-sorx-tests".to_string(),
+        components: Vec::new(),
+        flows: Vec::new(),
+        dependencies: Vec::new(),
+        capabilities: Vec::new(),
+        secret_requirements: Vec::new(),
+        signatures: PackSignatures::default(),
+        bootstrap: None,
+        extensions: None,
+    })
+    .unwrap()
 }
 
 fn write_pack() -> (TempDir, std::path::PathBuf) {

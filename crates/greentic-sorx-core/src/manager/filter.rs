@@ -80,7 +80,7 @@ pub fn filter_manager_view(
         if action
             .record
             .as_ref()
-            .is_some_and(|record| !visible_records.contains(record))
+            .is_some_and(|record| record != "Record" && !visible_records.contains(record))
         {
             return false;
         }

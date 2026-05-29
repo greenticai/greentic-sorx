@@ -99,6 +99,8 @@ pub struct RuntimeMetric {
     pub kind: RuntimeMetricKind,
     #[serde(default)]
     pub dimensions: Vec<RuntimeMetricDimension>,
+    #[serde(default)]
+    pub filters: Vec<MetricQueryFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<RuntimeMetricCache>,
 }
@@ -496,6 +498,7 @@ mod tests {
                 field: field.map(ToString::to_string),
             },
             dimensions: Vec::new(),
+            filters: Vec::new(),
             cache: None,
         }
     }
@@ -512,6 +515,7 @@ mod tests {
                     .collect(),
             },
             dimensions: Vec::new(),
+            filters: Vec::new(),
             cache: None,
         }
     }

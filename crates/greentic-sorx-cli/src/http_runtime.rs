@@ -240,6 +240,10 @@ impl HttpRuntime {
     }
 
     fn handle_request(&self, request: HttpRequest) -> HttpResponse {
+        if request.method == "OPTIONS" {
+            return json_response(200, json!({ "ok": true }));
+        }
+
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/healthz") => return json_response(200, json!({ "ok": true })),
             ("GET", "/readyz") => return json_response(200, json!({ "ok": true })),
@@ -901,11 +905,7 @@ impl HttpRuntime {
                 let start = (page - 1).saturating_mul(page_size).min(total);
                 let end = (start + page_size).min(total);
                 let visible_rows = rows[start..end].to_vec();
-                let can_create = self.runtime.router.endpoints.values().any(|endpoint| {
-                    endpoint.entity.as_deref() == Some(record_name)
-                        && manager_endpoint_is_create_form(endpoint)
-                        && !endpoint.record_selector
-                });
+                let can_create = manager_view_has_record_action(&view, record_name, "create");
                 let can_update = manager_view_has_record_action(&view, record_name, "update");
                 let can_delete = manager_view_has_record_action(&view, record_name, "delete");
                 let card = render_runtime_record_list_card(
@@ -957,13 +957,30 @@ impl HttpRuntime {
     fn manager_metrics_card_response(&self, request: &HttpRequest) -> HttpResponse {
         match self.manager_view(request) {
             Ok(view) => {
-                let metrics = self
+                let metric_summaries = self
                     .metrics
                     .as_ref()
                     .as_ref()
-                    .map(|catalog| catalog.metrics.as_slice())
-                    .unwrap_or(&[]);
-                let card = render_runtime_metrics_card(&view, metrics);
+                    .map(|catalog| {
+                        catalog
+                            .metrics
+                            .iter()
+                            .map(|metric| RuntimeMetricCardRow {
+                                name: metric.name.clone(),
+                                label: metric.label.clone(),
+                                result: self
+                                    .manager_metric_query_result(
+                                        &view.tenant_id,
+                                        &metric.name,
+                                        Vec::new(),
+                                    )
+                                    .ok(),
+                                error: None,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let card = render_runtime_metrics_card(&view, &metric_summaries);
                 json_response(200, card)
             }
             Err(err) => sorx_error_response(400, err),
@@ -982,7 +999,16 @@ impl HttpRuntime {
                     .as_ref()
                     .as_ref()
                     .and_then(|catalog| catalog.metric(metric_name).ok());
-                let card = render_runtime_metric_detail_card(&view, metric_name, metric);
+                let result = metric.and_then(|metric| {
+                    self.manager_metric_query_result(
+                        &view.tenant_id,
+                        metric_name,
+                        default_metric_dimensions(metric),
+                    )
+                    .ok()
+                });
+                let card =
+                    render_runtime_metric_detail_card(&view, metric_name, metric, result.as_ref());
                 json_response(200, card)
             }
             Err(err) => sorx_error_response(400, err),
@@ -1046,13 +1072,31 @@ impl HttpRuntime {
                 scoped.locale = view.locale.clone();
                 apply_manager_ontology_metadata(&mut scoped, &self.manager_ontology);
                 carry_manager_field_relationships(&mut scoped, &view);
+                self.populate_manager_relationship_choices(&mut scoped, &context.tenant_id);
                 let policies = manager_authorization_policy_set(&self.runtime, &context.roles);
                 let mut scoped = filter_manager_view(scoped, &policies);
                 let locale = ManagerLocaleContext::new(context.locale.clone(), "en");
                 scoped = localize_manager_view(scoped, &locale, &builtin_manager_locale_bundle());
                 apply_builtin_manager_text_translations(&mut scoped, &locale.locale);
+                let parent_context = request_query_param(&request.path, "parent_record")
+                    .or_else(|| request_query_param(&request.path, "parentRecord"))
+                    .zip(
+                        request_query_param(&request.path, "parent_id")
+                            .or_else(|| request_query_param(&request.path, "parentId")),
+                    );
                 match render_record_create_card(&scoped, record_name) {
-                    Some(card) => json_response(200, card),
+                    Some(mut card) => {
+                        if let Some((parent_record, parent_id)) = parent_context {
+                            self.apply_manager_parent_create_context(
+                                &scoped,
+                                &mut card,
+                                record_name,
+                                &parent_record,
+                                &parent_id,
+                            );
+                        }
+                        json_response(200, card)
+                    }
                     None => {
                         error_response(404, "SORX_MANAGER_RECORD_NOT_FOUND", "record not found")
                     }
@@ -1101,9 +1145,15 @@ impl HttpRuntime {
                         field.value = row.data.get(&field.name).cloned();
                     }
                 }
-                let child_records =
-                    manager_descendant_record_links(&view, &self.manager_hierarchy, record_name);
-                match render_runtime_record_detail_card(&view, record_name, id, child_records) {
+                let related_sections =
+                    self.manager_direct_child_record_sections(&view, record_name, id);
+                match render_runtime_record_detail_card(
+                    &view,
+                    record_name,
+                    id,
+                    manager_record_action(&view, record_name, "delete"),
+                    related_sections,
+                ) {
                     Some(card) => json_response(200, card),
                     None => {
                         error_response(404, "SORX_MANAGER_RECORD_NOT_FOUND", "record not found")
@@ -1140,7 +1190,14 @@ impl HttpRuntime {
                         "delete action is not available for this record",
                     );
                 };
-                let card = render_runtime_record_delete_card(&view, record, id, action);
+                let business_id = self
+                    .manager_record_rows(&view.tenant_id, record_name)
+                    .into_iter()
+                    .find(|row| row.id == id)
+                    .and_then(|row| manager_business_record_id(record_name, &row.data))
+                    .unwrap_or_else(|| id.to_string());
+                let card =
+                    render_runtime_record_delete_card(&view, record, id, &business_id, action);
                 json_response(200, card)
             }
             Err(err) => sorx_error_response(400, err),
@@ -1241,12 +1298,42 @@ impl HttpRuntime {
             .take(25)
             .map(|record| {
                 let label = picker_choice_label(&record.data, &record.id);
+                let value = manager_business_record_id(record.entity.as_str(), &record.data)
+                    .unwrap_or_else(|| record.id.clone());
                 json!({
                     "title": label,
-                    "value": record.id,
+                    "value": value,
                 })
             })
             .collect()
+    }
+
+    fn populate_manager_relationship_choices(
+        &self,
+        view: &mut greentic_sorx_core::ManagerViewModel,
+        tenant_id: &str,
+    ) {
+        for record in &mut view.records {
+            for field in &mut record.fields {
+                let Some(relationship) = field.relationship.as_ref() else {
+                    continue;
+                };
+                if !is_uuid_field(field.json_type.as_deref()) {
+                    continue;
+                }
+                let choices = self.manager_picker_choices(tenant_id, &relationship.to_record);
+                if choices.is_empty() {
+                    continue;
+                }
+                let mut rules = field
+                    .rules
+                    .take()
+                    .and_then(|value| value.as_object().cloned())
+                    .unwrap_or_default();
+                rules.insert("choices".to_string(), Value::Array(choices));
+                field.rules = Some(Value::Object(rules));
+            }
+        }
     }
 
     fn manager_record_rows(&self, tenant_id: &str, record: &str) -> Vec<EntityRecord> {
@@ -1298,7 +1385,7 @@ impl HttpRuntime {
         else {
             return;
         };
-        let mut ids = BTreeSet::from([parent_id.to_string()]);
+        let mut ids = self.manager_record_context_ids(tenant_id, parent_record, parent_id);
         for step in path {
             let step_rows = self.manager_record_rows(tenant_id, &step.child);
             let next_ids = step_rows
@@ -1316,6 +1403,119 @@ impl HttpRuntime {
             }
         }
         rows.retain(|row| ids.contains(&row.id));
+    }
+
+    fn manager_record_context_ids(
+        &self,
+        tenant_id: &str,
+        record_name: &str,
+        id: &str,
+    ) -> BTreeSet<String> {
+        let mut ids = BTreeSet::from([id.to_string()]);
+        if let Some(row) = self
+            .manager_record_rows(tenant_id, record_name)
+            .into_iter()
+            .find(|row| row.id == id)
+        {
+            collect_manager_row_identifier_values(record_name, &row.data, &mut ids);
+        }
+        ids
+    }
+
+    fn apply_manager_parent_create_context(
+        &self,
+        view: &greentic_sorx_core::ManagerViewModel,
+        card: &mut Value,
+        child_record: &str,
+        parent_record: &str,
+        parent_id: &str,
+    ) {
+        let Some(path) =
+            manager_hierarchy_path(&self.manager_hierarchy, parent_record, child_record)
+        else {
+            return;
+        };
+        let Some(step) = path.first() else {
+            return;
+        };
+        let parent_value =
+            self.manager_record_parent_context_value(&view.tenant_id, parent_record, parent_id);
+        set_manager_card_submit_parent_context(
+            card,
+            child_record,
+            parent_record,
+            parent_id,
+            &step.field,
+            &parent_value,
+        );
+        remove_manager_card_input(card, &step.field);
+    }
+
+    fn manager_record_parent_context_value(
+        &self,
+        tenant_id: &str,
+        parent_record: &str,
+        parent_id: &str,
+    ) -> String {
+        if let Some(row) = self
+            .manager_record_rows(tenant_id, parent_record)
+            .into_iter()
+            .find(|row| row.id == parent_id)
+            && let Some(value) = manager_business_record_id(parent_record, &row.data)
+        {
+            return value;
+        }
+        self.manager_record_context_ids(tenant_id, parent_record, parent_id)
+            .into_iter()
+            .find(|value| value != parent_id)
+            .unwrap_or_else(|| parent_id.to_string())
+    }
+
+    fn manager_direct_child_record_sections(
+        &self,
+        view: &greentic_sorx_core::ManagerViewModel,
+        parent_record: &str,
+        parent_id: &str,
+    ) -> Vec<RuntimeRelatedRecordSection> {
+        manager_child_record_links(view, &self.manager_hierarchy, parent_record)
+            .into_iter()
+            .filter_map(|(child_record, _)| {
+                let record = view
+                    .records
+                    .iter()
+                    .find(|record| record.record == child_record)?
+                    .clone();
+                let mut rows = self.manager_record_rows(&view.tenant_id, &child_record);
+                self.filter_manager_rows_by_parent_context(
+                    &view.tenant_id,
+                    &mut rows,
+                    &child_record,
+                    parent_record,
+                    parent_id,
+                );
+                sort_manager_record_rows(&mut rows);
+                let page_size = 10usize;
+                let total = rows.len();
+                let end = page_size.min(total);
+                let rows = rows[..end].to_vec();
+                Some(RuntimeRelatedRecordSection {
+                    record,
+                    rows,
+                    state: RuntimeRecordListState {
+                        page: 1,
+                        page_size,
+                        total,
+                        start: 0,
+                        end,
+                        search: String::new(),
+                        can_create: manager_view_has_record_action(view, &child_record, "create"),
+                        can_update: manager_view_has_record_action(view, &child_record, "update"),
+                        can_delete: manager_view_has_record_action(view, &child_record, "delete"),
+                        parent_context: Some((parent_record.to_string(), parent_id.to_string())),
+                    },
+                })
+            })
+            .collect()
     }
 
     fn manager_submit_response(&self, request: &HttpRequest) -> HttpResponse {
@@ -1356,8 +1556,10 @@ impl HttpRuntime {
             && let Some(record) = endpoint.entity.as_deref()
             && let Ok(view) = self.manager_view(request)
         {
+            merge_manager_submit_fields(&mut input, &body, &view, record);
             fill_generated_manager_fields(&mut input, &view, record, &endpoint_id);
             combine_manager_datetime_inputs(&mut input, &view, record);
+            stamp_manager_created_at(&mut input, endpoint);
         }
         let idempotency_key = body
             .get("idempotency_key")
@@ -1652,6 +1854,32 @@ impl HttpRuntime {
             }
             Err(err) => sorx_error_response(400, err),
         }
+    }
+
+    fn manager_metric_query_result(
+        &self,
+        tenant_id: &str,
+        metric_name: &str,
+        dimensions: Vec<String>,
+    ) -> SorxResult<MetricQueryResult> {
+        let Some(metrics) = self.metrics.as_ref().as_ref() else {
+            return Err(SorxError::new("metric_missing", "metric not found"));
+        };
+        let runtime = MetricRuntime::new(metrics.clone(), self.metric_provider.as_ref());
+        runtime.query(
+            metric_name,
+            MetricQuery {
+                namespace: ProviderNamespace {
+                    tenant_id: tenant_id.to_string(),
+                    sor_name: self.runtime.config.deployment.sor_name.clone(),
+                },
+                from: None,
+                to: None,
+                grain: None,
+                dimensions,
+                filters: Vec::new(),
+            },
+        )
     }
 
     fn handle_business_action_request(&self, request: &HttpRequest) -> HttpResponse {
@@ -2724,36 +2952,6 @@ fn manager_child_record_links(
     children
 }
 
-fn manager_descendant_record_links(
-    view: &greentic_sorx_core::ManagerViewModel,
-    hierarchy: &ManagerRecordHierarchy,
-    parent: &str,
-) -> Vec<(String, String)> {
-    if hierarchy.records.is_empty() {
-        return Vec::new();
-    }
-    let mut seen = BTreeSet::new();
-    let mut queue = VecDeque::from([parent.to_string()]);
-    let mut descendants = Vec::new();
-    while let Some(current) = queue.pop_front() {
-        for (child, _) in manager_child_record_links(view, hierarchy, &current) {
-            if !seen.insert(child.clone()) {
-                continue;
-            }
-            if let Some(record) = view
-                .records
-                .iter()
-                .find(|candidate| candidate.record == child)
-            {
-                descendants.push((record.record.clone(), record.plural_label.clone()));
-            }
-            queue.push_back(child);
-        }
-    }
-    descendants.sort_by(|left, right| left.1.cmp(&right.1));
-    descendants
-}
-
 #[derive(Debug, Clone)]
 struct ManagerHierarchyPathStep {
     child: String,
@@ -3059,11 +3257,29 @@ fn runtime_metric_from_pack(metric: &MetricDefinition) -> SorxResult<RuntimeMetr
         label: metric.label.clone(),
         kind,
         dimensions,
+        filters: metric
+            .filters
+            .iter()
+            .map(|filter| MetricQueryFilter {
+                field: filter.field.clone(),
+                operator: normalize_metric_filter_operator(&filter.operator),
+                value: filter.value.clone().unwrap_or(Value::Null),
+            })
+            .collect(),
         cache: metric.cache.as_ref().map(|cache| RuntimeMetricCache {
             ttl_seconds: cache.ttl_seconds,
             scope: cache.scope.clone(),
         }),
     })
+}
+
+fn normalize_metric_filter_operator(operator: &str) -> String {
+    match operator {
+        "equals" => "eq",
+        "not_equals" => "ne",
+        value => value,
+    }
+    .to_string()
 }
 
 fn metric_aggregate(value: &str) -> SorxResult<MetricAggregate> {
@@ -3152,6 +3368,38 @@ fn fill_generated_manager_fields(
     }
 }
 
+fn merge_manager_submit_fields(
+    input: &mut Value,
+    body: &Map<String, Value>,
+    view: &greentic_sorx_core::ManagerViewModel,
+    record_name: &str,
+) {
+    let Some(object) = input.as_object_mut() else {
+        return;
+    };
+    let Some(record) = view
+        .records
+        .iter()
+        .find(|record| record.record == record_name)
+    else {
+        return;
+    };
+    let mut field_names = record
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<BTreeSet<_>>();
+    field_names.extend(record.create_field_names.iter().map(String::as_str));
+    for field_name in field_names {
+        if object.contains_key(field_name) {
+            continue;
+        }
+        if let Some(value) = body.get(field_name) {
+            object.insert(field_name.to_string(), value.clone());
+        }
+    }
+}
+
 fn generated_manager_uuid(endpoint_id: &str, record_name: &str, field_name: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3169,12 +3417,63 @@ fn generated_manager_uuid(endpoint_id: &str, record_name: &str, field_name: &str
     )
 }
 
+fn stamp_manager_created_at(input: &mut Value, endpoint: &EndpointDefinition) {
+    if !matches!(endpoint.operation, OperationKind::Create)
+        || !manager_endpoint_is_create_form(endpoint)
+    {
+        return;
+    }
+    let Some(object) = input.as_object_mut() else {
+        return;
+    };
+    let has_sortable_timestamp = [
+        "_greentic_manager_created_at",
+        "created_at",
+        "createdAt",
+        "submitted_at",
+        "submittedAt",
+        "timestamp",
+        "date",
+    ]
+    .iter()
+    .any(|field| {
+        object
+            .get(*field)
+            .is_some_and(manager_scalar_has_sort_value)
+    });
+    if has_sortable_timestamp {
+        return;
+    }
+    object.insert(
+        "_greentic_manager_created_at".to_string(),
+        Value::String(manager_now_sort_value()),
+    );
+}
+
+fn manager_now_sort_value() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{nanos:020}")
+}
+
 fn picker_choice_label(data: &Value, fallback: &str) -> String {
-    ["name", "title", "label", "summary", "email", "id"]
-        .iter()
-        .find_map(|field| data.get(field).and_then(Value::as_str))
-        .unwrap_or(fallback)
-        .to_string()
+    [
+        "name",
+        "title",
+        "label",
+        "summary",
+        "full_name",
+        "email",
+        "address",
+        "unit_number",
+        "id",
+    ]
+    .iter()
+    .find_map(|field| data.get(field).and_then(Value::as_str))
+    .unwrap_or(fallback)
+    .to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -3189,6 +3488,13 @@ struct RuntimeRecordListState {
     can_update: bool,
     can_delete: bool,
     parent_context: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeRelatedRecordSection {
+    record: ManagerRecordView,
+    rows: Vec<EntityRecord>,
+    state: RuntimeRecordListState,
 }
 
 fn render_runtime_record_list_card(
@@ -3282,34 +3588,166 @@ fn render_runtime_record_detail_card(
     view: &greentic_sorx_core::ManagerViewModel,
     record_name: &str,
     id: &str,
-    child_records: Vec<(String, String)>,
+    delete_action: Option<&greentic_sorx_core::ManagerActionView>,
+    related_sections: Vec<RuntimeRelatedRecordSection>,
 ) -> Option<Value> {
     let mut card = render_record_detail_card(view, record_name, id)?;
-    if !child_records.is_empty()
-        && let Some(body) = card.get_mut("body").and_then(Value::as_array_mut)
-    {
-        let mut actions = child_records
-            .into_iter()
-            .map(|(child_record, child_label)| {
-                manager_open_action(
-                    &child_label,
-                    &manager_record_context_target(&child_record, record_name, id),
-                    Value::Object(Map::new()),
-                )
-            })
-            .collect::<Vec<_>>();
-        actions.push(manager_open_action(
-            &format!("< {}", localized_manager_static(&view.locale, "Back")),
-            &format!("records/{record_name}"),
-            json!({ "_action_style": "secondary" }),
-        ));
+    if let Some(body) = card.get_mut("body").and_then(Value::as_array_mut) {
+        if let Some(delete_action) = delete_action {
+            append_manager_detail_delete_action(body, view, record_name, id, delete_action);
+        }
+        for section in related_sections {
+            body.push(render_runtime_related_record_section(&view.locale, section));
+        }
         body.push(json!({
             "type": "ActionSet",
             "spacing": "medium",
-            "actions": actions
+            "actions": [manager_open_action(
+            &format!("< {}", localized_manager_static(&view.locale, "Back")),
+            &format!("records/{record_name}"),
+            json!({ "_action_style": "secondary" }),
+            )]
         }));
     }
     Some(card)
+}
+
+fn append_manager_detail_delete_action(
+    body: &mut [Value],
+    view: &greentic_sorx_core::ManagerViewModel,
+    record_name: &str,
+    id: &str,
+    _delete_action: &greentic_sorx_core::ManagerActionView,
+) {
+    let Some(action_set) = body.iter_mut().find(|item| {
+        item.get("type").and_then(Value::as_str) == Some("ActionSet")
+            && item
+                .get("actions")
+                .and_then(Value::as_array)
+                .is_some_and(|actions| {
+                    actions.iter().any(|action| {
+                        action
+                            .get("data")
+                            .and_then(Value::as_object)
+                            .and_then(|data| data.get("action"))
+                            .and_then(Value::as_str)
+                            == Some("manager_submit")
+                    })
+                })
+    }) else {
+        return;
+    };
+    let Some(actions) = action_set.get_mut("actions").and_then(Value::as_array_mut) else {
+        return;
+    };
+    actions.push(manager_open_action(
+        localized_manager_static(&view.locale, "Delete"),
+        &format!("records/{record_name}/{id}/delete"),
+        json!({ "_action_style": "destructive" }),
+    ));
+}
+
+fn render_runtime_related_record_section(
+    locale: &str,
+    section: RuntimeRelatedRecordSection,
+) -> Value {
+    let fields = manager_table_fields(&section.record);
+    let mut items = vec![json!({
+        "type": "TextBlock",
+        "text": section.record.plural_label,
+        "wrap": true,
+        "size": "medium",
+        "weight": "Bolder"
+    })];
+    items.push(manager_record_context_search_row(
+        &section.record,
+        locale,
+        "",
+        section.state.parent_context.as_ref(),
+    ));
+    if let Some(summary) = manager_record_list_summary(locale, &section.state) {
+        items.push(json!({
+            "type": "TextBlock",
+            "text": summary,
+            "wrap": true,
+            "isSubtle": true,
+            "spacing": "small"
+        }));
+    }
+    items.push(manager_record_table_header(
+        &fields,
+        section.state.can_update || section.state.can_delete,
+        locale,
+    ));
+    if section.rows.is_empty() {
+        items.push(json!({
+            "type": "TextBlock",
+            "text": localized_manager_static(locale, "No records found."),
+            "wrap": true,
+            "spacing": "small",
+            "isSubtle": true
+        }));
+    } else {
+        for row in &section.rows {
+            items.push(manager_record_table_row(
+                &section.record,
+                &fields,
+                row,
+                section.state.can_update,
+                section.state.can_delete,
+                locale,
+            ));
+        }
+    }
+    items.push(manager_related_record_actions(
+        &section.record,
+        locale,
+        &section.state,
+    ));
+    json!({
+        "type": "Container",
+        "separator": true,
+        "spacing": "large",
+        "items": items
+    })
+}
+
+fn manager_related_record_actions(
+    record: &ManagerRecordView,
+    locale: &str,
+    state: &RuntimeRecordListState,
+) -> Value {
+    let mut actions = Vec::new();
+    if state.total > state.end {
+        actions.push(manager_open_action(
+            localized_manager_static(locale, "View All"),
+            &manager_record_list_target(record, 1, &state.search, state.parent_context.as_ref()),
+            Value::Object(Map::new()),
+        ));
+    }
+    if state.can_create {
+        let mut target = format!("records/{}/create", record.record);
+        if let Some((parent_record, parent_id)) = state.parent_context.as_ref() {
+            target.push_str("?parent_record=");
+            target.push_str(&percent_encode_query(parent_record));
+            target.push_str("&parent_id=");
+            target.push_str(&percent_encode_query(parent_id));
+        }
+        actions.push(manager_open_action(
+            &format!(
+                "{} {}",
+                localized_manager_static(locale, "Add"),
+                record.label
+            ),
+            &target,
+            json!({ "_action_style": "positive" }),
+        ));
+    }
+    json!({
+        "type": "ActionSet",
+        "spacing": "medium",
+        "actions": actions
+    })
 }
 
 fn manager_record_footer_actions(
@@ -3321,25 +3759,42 @@ fn manager_record_footer_actions(
     if state.page > 1 {
         actions.push(manager_open_action(
             localized_manager_static(locale, "Previous"),
-            &manager_record_list_target(record, state.page - 1, &state.search),
+            &manager_record_list_target(
+                record,
+                state.page - 1,
+                &state.search,
+                state.parent_context.as_ref(),
+            ),
             Value::Object(Map::new()),
         ));
     }
     if state.end < state.total {
         actions.push(manager_open_action(
             localized_manager_static(locale, "Next"),
-            &manager_record_list_target(record, state.page + 1, &state.search),
+            &manager_record_list_target(
+                record,
+                state.page + 1,
+                &state.search,
+                state.parent_context.as_ref(),
+            ),
             Value::Object(Map::new()),
         ));
     }
     if state.can_create {
+        let mut target = format!("records/{}/create", record.record);
+        if let Some((parent_record, parent_id)) = state.parent_context.as_ref() {
+            target.push_str("?parent_record=");
+            target.push_str(&percent_encode_query(parent_record));
+            target.push_str("&parent_id=");
+            target.push_str(&percent_encode_query(parent_id));
+        }
         actions.push(manager_open_action(
             &format!(
                 "{} {}",
                 localized_manager_static(locale, "Add"),
                 record.label
             ),
-            &format!("records/{}/create", record.record),
+            &target,
             json!({ "_action_style": "positive" }),
         ));
     }
@@ -3359,9 +3814,19 @@ fn render_runtime_record_delete_card(
     view: &greentic_sorx_core::ManagerViewModel,
     record: &ManagerRecordView,
     id: &str,
+    business_id: &str,
     action: &greentic_sorx_core::ManagerActionView,
 ) -> Value {
     let back_target = format!("records/{}", record.record);
+    let input = if action.record.as_deref() == Some("Record") {
+        json!({
+            "record_name": record.record,
+            "record_id": business_id,
+            "reason": "Deleted from manager WebChat"
+        })
+    } else {
+        json!({ "id": id })
+    };
     json!({
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "type": "AdaptiveCard",
@@ -3398,7 +3863,7 @@ fn render_runtime_record_delete_card(
                     "id": id,
                     "endpoint_id": action.endpoint_id,
                     "operation_id": action.operation_id,
-                    "input": { "id": id },
+                    "input": input,
                     "action": "manager_submit",
                     "manager_target": back_target,
                     "routeToCardId": manager_route_card_id(&back_target),
@@ -3415,24 +3880,25 @@ fn render_runtime_record_delete_card(
     })
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeMetricCardRow {
+    name: String,
+    label: Option<String>,
+    result: Option<MetricQueryResult>,
+    error: Option<String>,
+}
+
 fn render_runtime_metrics_card(
     view: &greentic_sorx_core::ManagerViewModel,
-    metrics: &[RuntimeMetric],
+    metrics: &[RuntimeMetricCardRow],
 ) -> Value {
-    let mut body = vec![
-        json!({
-            "type": "TextBlock",
-            "text": localized_manager_static(&view.locale, "Metrics"),
-            "wrap": true,
-            "size": "large",
-            "weight": "Bolder"
-        }),
-        json!({
-            "type": "TextBlock",
-            "text": localized_manager_static(&view.locale, "Select a metric to inspect or query."),
-            "wrap": true
-        }),
-    ];
+    let mut body = vec![json!({
+        "type": "TextBlock",
+        "text": localized_manager_static(&view.locale, "Metrics"),
+        "wrap": true,
+        "size": "large",
+        "weight": "Bolder"
+    })];
     if metrics.is_empty() {
         body.push(json!({
             "type": "TextBlock",
@@ -3440,6 +3906,8 @@ fn render_runtime_metrics_card(
             "wrap": true,
             "isSubtle": true
         }));
+    } else {
+        body.push(manager_metrics_summary_table(&view.locale, metrics));
     }
     let mut actions = metrics
         .iter()
@@ -3480,6 +3948,7 @@ fn render_runtime_metric_detail_card(
     view: &greentic_sorx_core::ManagerViewModel,
     metric_name: &str,
     metric: Option<&RuntimeMetric>,
+    result: Option<&MetricQueryResult>,
 ) -> Value {
     let title = metric
         .and_then(|metric| metric.label.as_deref())
@@ -3498,6 +3967,16 @@ fn render_runtime_metric_detail_card(
             "wrap": true,
             "isSubtle": true
         }));
+        if let Some(result) = result {
+            body.push(manager_metric_result_table(&view.locale, result));
+        } else {
+            body.push(json!({
+                "type": "TextBlock",
+                "text": localized_manager_static(&view.locale, "No metric data found."),
+                "wrap": true,
+                "isSubtle": true
+            }));
+        }
     } else {
         body.push(json!({
             "type": "TextBlock",
@@ -3531,6 +4010,130 @@ fn render_runtime_metric_detail_card(
         "body": body,
         "actions": []
     })
+}
+
+fn manager_metrics_summary_table(locale: &str, metrics: &[RuntimeMetricCardRow]) -> Value {
+    let mut rows = vec![metric_table_header(&[
+        localized_manager_static(locale, "Metric"),
+        localized_manager_static(locale, "Value"),
+        localized_manager_static(locale, "Rows"),
+    ])];
+    for metric in metrics {
+        let value = metric
+            .result
+            .as_ref()
+            .and_then(|result| result.rows.first())
+            .map(|row| format_metric_value(row.value))
+            .or_else(|| metric.error.clone())
+            .unwrap_or_else(|| "-".to_string());
+        let row_count = metric
+            .result
+            .as_ref()
+            .map(|result| result.rows.len().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        rows.push(metric_table_row(&[
+            metric.label.as_deref().unwrap_or(&metric.name).to_string(),
+            value,
+            row_count,
+        ]));
+    }
+    json!({
+        "type": "Container",
+        "spacing": "medium",
+        "items": rows
+    })
+}
+
+fn manager_metric_result_table(locale: &str, result: &MetricQueryResult) -> Value {
+    let mut dimension_names = result
+        .rows
+        .iter()
+        .flat_map(|row| row.dimensions.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    dimension_names.sort();
+    let mut headers = dimension_names.clone();
+    headers.push(localized_manager_static(locale, "Value").to_string());
+    let mut rows = vec![metric_table_header(&headers)];
+    if result.rows.is_empty() {
+        rows.push(metric_table_row(&[localized_manager_static(
+            locale,
+            "No metric data found.",
+        )
+        .to_string()]));
+    } else {
+        for row in result.rows.iter().take(10) {
+            let mut cells = dimension_names
+                .iter()
+                .map(|dimension| {
+                    row.dimensions
+                        .get(dimension)
+                        .map(metric_cell_value)
+                        .unwrap_or_else(|| "-".to_string())
+                })
+                .collect::<Vec<_>>();
+            cells.push(format_metric_value(row.value));
+            rows.push(metric_table_row(&cells));
+        }
+    }
+    json!({
+        "type": "Container",
+        "spacing": "medium",
+        "items": rows
+    })
+}
+
+fn metric_table_header(headers: &[impl AsRef<str>]) -> Value {
+    json!({
+        "type": "ColumnSet",
+        "spacing": "small",
+        "columns": headers.iter().map(|header| json!({
+            "type": "Column",
+            "width": "stretch",
+            "items": [{
+                "type": "TextBlock",
+                "text": header.as_ref(),
+                "wrap": true,
+                "weight": "Bolder"
+            }]
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn metric_table_row(cells: &[String]) -> Value {
+    json!({
+        "type": "ColumnSet",
+        "separator": true,
+        "spacing": "small",
+        "columns": cells.iter().map(|cell| json!({
+            "type": "Column",
+            "width": "stretch",
+            "items": [{
+                "type": "TextBlock",
+                "text": cell,
+                "wrap": true
+            }]
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn metric_cell_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "-".to_string(),
+        value => serde_json::to_string(value).unwrap_or_else(|_| "-".to_string()),
+    }
+}
+
+fn format_metric_value(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 fn manager_record_table_header(
@@ -3573,6 +4176,17 @@ fn manager_record_table_header(
 }
 
 fn manager_record_search_row(record: &ManagerRecordView, locale: &str, search: &str) -> Value {
+    manager_record_context_search_row(record, locale, search, None)
+}
+
+fn manager_record_context_search_row(
+    record: &ManagerRecordView,
+    locale: &str,
+    search: &str,
+    parent_context: Option<&(String, String)>,
+) -> Value {
+    let target = manager_record_list_target(record, 1, "", parent_context);
+    let input_id = format!("manager_search_{}", manager_route_card_id(&record.record));
     json!({
         "type": "ColumnSet",
         "spacing": "medium",
@@ -3582,7 +4196,7 @@ fn manager_record_search_row(record: &ManagerRecordView, locale: &str, search: &
                 "width": "stretch",
                 "items": [{
                     "type": "Input.Text",
-                    "id": "manager_search",
+                    "id": input_id.clone(),
                     "label": localized_manager_static(locale, "Search"),
                     "placeholder": record.plural_label,
                     "value": search
@@ -3596,9 +4210,9 @@ fn manager_record_search_row(record: &ManagerRecordView, locale: &str, search: &
                     "type": "ActionSet",
                     "actions": [manager_open_action(
                         localized_manager_static(locale, "Search Icon"),
-                        &format!("records/{}", record.record),
+                        &target,
                         json!({
-                            "manager_search_input": "manager_search",
+                            "manager_search_input": input_id,
                             "manager_page_size": 10
                         })
                     )]
@@ -3616,6 +4230,7 @@ fn manager_record_table_row(
     include_delete: bool,
     locale: &str,
 ) -> Value {
+    let target = format!("records/{}/{}", record.record, row.id);
     let mut columns = fields
         .iter()
         .map(|field| {
@@ -3631,7 +4246,6 @@ fn manager_record_table_row(
         })
         .collect::<Vec<_>>();
     if include_edit || include_delete {
-        let target = format!("records/{}/{}", record.record, row.id);
         let mut actions = Vec::new();
         if include_edit {
             actions.push(manager_open_action(
@@ -3665,6 +4279,11 @@ fn manager_record_table_row(
     json!({
         "type": "ColumnSet",
         "separator": true,
+        "selectAction": manager_open_action(
+            localized_manager_static(locale, "Open"),
+            &target,
+            json!({ "manager_action": "open" }),
+        ),
         "columns": columns
     })
 }
@@ -3710,6 +4329,160 @@ fn manager_table_cell_value(data: &Value, field: &ManagerFieldView) -> String {
     }
 }
 
+fn collect_manager_row_identifier_values(
+    record_name: &str,
+    data: &Value,
+    ids: &mut BTreeSet<String>,
+) {
+    let Some(object) = data.as_object() else {
+        return;
+    };
+    let record_id_field = manager_default_parent_field(record_name);
+    for (key, value) in object {
+        let key = key.to_ascii_lowercase();
+        let is_identifier =
+            key == "id" || key == "record_id" || key == record_id_field || key.ends_with("_uuid");
+        if is_identifier {
+            collect_manager_scalar_identifier_values(value, ids);
+        }
+    }
+}
+
+fn manager_business_record_id(record_name: &str, data: &Value) -> Option<String> {
+    let mut ids = BTreeSet::new();
+    collect_manager_row_identifier_values(record_name, data, &mut ids);
+    let record_id_field = manager_default_parent_field(record_name);
+    data.as_object()
+        .and_then(|object| object.get(&record_id_field))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| ids.into_iter().next())
+}
+
+fn collect_manager_scalar_identifier_values(value: &Value, ids: &mut BTreeSet<String>) {
+    match value {
+        Value::String(value) if !value.is_empty() => {
+            ids.insert(value.clone());
+        }
+        Value::Number(value) => {
+            ids.insert(value.to_string());
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_manager_scalar_identifier_values(value, ids);
+            }
+        }
+        Value::Object(object) => {
+            for key in ["id", "value", "record_id"] {
+                if let Some(value) = object.get(key) {
+                    collect_manager_scalar_identifier_values(value, ids);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remove_manager_card_input(card: &mut Value, input_id: &str) {
+    match card {
+        Value::Object(object) => {
+            for child in object.values_mut() {
+                remove_manager_card_input(child, input_id);
+            }
+        }
+        Value::Array(items) => {
+            items.retain(|item| !manager_card_element_contains_input(item, input_id));
+            for item in items {
+                remove_manager_card_input(item, input_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn manager_card_element_contains_input(value: &Value, input_id: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            if object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("Input."))
+                && object.get("id").and_then(Value::as_str) == Some(input_id)
+            {
+                return true;
+            }
+            object
+                .values()
+                .any(|child| manager_card_element_contains_input(child, input_id))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|item| manager_card_element_contains_input(item, input_id)),
+        _ => false,
+    }
+}
+
+fn set_manager_card_submit_parent_context(
+    card: &mut Value,
+    child_record: &str,
+    parent_record: &str,
+    parent_id: &str,
+    parent_field: &str,
+    parent_value: &str,
+) {
+    match card {
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("Action.Submit")
+                && let Some(data) = object.get_mut("data").and_then(Value::as_object_mut)
+                && data.get("record").and_then(Value::as_str) == Some(child_record)
+            {
+                let target = manager_record_context_target(child_record, parent_record, parent_id);
+                data.insert("manager_target".to_string(), Value::String(target.clone()));
+                data.insert(
+                    "routeToCardId".to_string(),
+                    Value::String(manager_route_card_id(&target)),
+                );
+                data.insert(
+                    "cardId".to_string(),
+                    Value::String(manager_route_card_id(&target)),
+                );
+                let input = data
+                    .entry("input")
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let Some(input) = input.as_object_mut() {
+                    input.insert(
+                        parent_field.to_string(),
+                        Value::String(parent_value.to_string()),
+                    );
+                }
+            }
+            for child in object.values_mut() {
+                set_manager_card_submit_parent_context(
+                    child,
+                    child_record,
+                    parent_record,
+                    parent_id,
+                    parent_field,
+                    parent_value,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                set_manager_card_submit_parent_context(
+                    item,
+                    child_record,
+                    parent_record,
+                    parent_id,
+                    parent_field,
+                    parent_value,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn manager_record_list_summary(locale: &str, state: &RuntimeRecordListState) -> Option<String> {
     if state.total == 0 {
         return None;
@@ -3724,11 +4497,22 @@ fn manager_record_list_summary(locale: &str, state: &RuntimeRecordListState) -> 
     ))
 }
 
-fn manager_record_list_target(record: &ManagerRecordView, page: usize, search: &str) -> String {
+fn manager_record_list_target(
+    record: &ManagerRecordView,
+    page: usize,
+    search: &str,
+    parent_context: Option<&(String, String)>,
+) -> String {
     let mut target = format!("records/{}?page={page}", record.record);
     if !search.is_empty() {
         target.push_str("&q=");
         target.push_str(&percent_encode_query(search));
+    }
+    if let Some((parent_record, parent_id)) = parent_context {
+        target.push_str("&parent_record=");
+        target.push_str(&percent_encode_query(parent_record));
+        target.push_str("&parent_id=");
+        target.push_str(&percent_encode_query(parent_id));
     }
     target
 }
@@ -3845,30 +4629,49 @@ fn manager_record_action<'a>(
     record: &str,
     operation: &str,
 ) -> Option<&'a greentic_sorx_core::ManagerActionView> {
-    let marker = format!(".{operation}");
-    let underscore_marker = format!("_{operation}");
-    let dash_marker = format!("-{operation}");
-    let slash_marker = format!("/{operation}");
+    let operations = if operation == "delete" {
+        vec!["delete", "remove"]
+    } else {
+        vec![operation]
+    };
     view.actions.iter().find(|action| {
-        action.record.as_deref() == Some(record)
-            && (action.label_key.ends_with(&format!("{marker}.label"))
-                || action.label_key.contains(&format!("{marker}."))
-                || action.label.eq_ignore_ascii_case(operation)
-                || action.endpoint_id.contains(&marker)
-                || action.endpoint_id.contains(&underscore_marker)
-                || action.endpoint_id.contains(&dash_marker)
-                || action.endpoint_id.contains(&slash_marker)
-                || action.endpoint_id.ends_with(operation)
-                || action.operation_id.contains(&marker)
-                || action.operation_id.contains(&underscore_marker)
-                || action.operation_id.contains(&dash_marker)
-                || action.operation_id.contains(&slash_marker)
-                || action.operation_id.ends_with(operation))
+        matches!(action.record.as_deref(), Some(action_record) if action_record == record || action_record == "Record")
+            && operations.iter().any(|operation| {
+                let marker = format!(".{operation}");
+                let underscore_marker = format!("_{operation}");
+                let dash_marker = format!("-{operation}");
+                let slash_marker = format!("/{operation}");
+                action.label_key.ends_with(&format!("{marker}.label"))
+                    || action.label_key.contains(&format!("{marker}."))
+                    || action.label.eq_ignore_ascii_case(operation)
+                    || action.endpoint_id.contains(&marker)
+                    || action.endpoint_id.contains(&underscore_marker)
+                    || action.endpoint_id.contains(&dash_marker)
+                    || action.endpoint_id.contains(&slash_marker)
+                    || action.endpoint_id.starts_with(&format!("{operation}_"))
+                    || action.endpoint_id.starts_with(&format!("{operation}-"))
+                    || action.endpoint_id.ends_with(operation)
+                    || action.operation_id.contains(&marker)
+                    || action.operation_id.contains(&underscore_marker)
+                    || action.operation_id.contains(&dash_marker)
+                    || action.operation_id.contains(&slash_marker)
+                    || action.operation_id.starts_with(&format!("{operation}_"))
+                    || action.operation_id.starts_with(&format!("{operation}-"))
+                    || action.operation_id.ends_with(operation)
+            })
     })
 }
 
 fn manager_endpoint_is_create_form(endpoint: &EndpointDefinition) -> bool {
     if matches!(endpoint.operation, OperationKind::Create) {
+        return true;
+    }
+    if let OperationKind::Command(spec) = &endpoint.operation
+        && spec
+            .kind
+            .as_deref()
+            .is_some_and(|kind| matches!(kind, "record-create" | "record_create"))
+    {
         return true;
     }
     endpoint_id_matches_operation(endpoint, "create")
@@ -3911,12 +4714,17 @@ fn manager_record_sort_key(record: &EntityRecord) -> String {
         "createdAt",
         "submitted_at",
         "submittedAt",
+        "_greentic_manager_created_at",
         "timestamp",
         "date",
     ]
     .iter()
     .find_map(|field| record.data.get(*field).map(manager_scalar_sort_value))
     .unwrap_or_default()
+}
+
+fn manager_scalar_has_sort_value(value: &Value) -> bool {
+    !manager_scalar_sort_value(value).is_empty()
 }
 
 fn manager_scalar_sort_value(value: &Value) -> String {
@@ -4041,6 +4849,7 @@ fn localized_manager_static<'a>(locale: &str, text: &'a str) -> &'a str {
         "Metric not found." => "No se encontro la metrica.",
         "Metrics" => "Metricas",
         "Next" => "Siguiente",
+        "No metric data found." => "No se encontraron datos de metrica.",
         "No metrics are declared." => "No se han declarado metricas.",
         "No records found." => "No se encontraron registros.",
         "of" => "de",
@@ -4051,6 +4860,8 @@ fn localized_manager_static<'a>(locale: &str, text: &'a str) -> &'a str {
             "Selecciona una metrica para inspeccionar o consultar."
         }
         "Showing" => "Mostrando",
+        "Rows" => "Filas",
+        "Value" => "Valor",
         _ => text,
     }
 }
@@ -4271,11 +5082,12 @@ impl MetricRuntimeProvider for StoreMetricProvider {
             .get(source_entity)
             .unwrap_or(&self.default_provider_id);
         let provider = self.providers.store(provider_id)?;
+        let filters = metric_query_filters(definition, query);
         let records = provider.query(QueryOp {
             namespace: query.namespace.clone(),
             entity: source_entity.clone(),
             collection: collection.clone(),
-            filter: equality_filter(query),
+            filter: equality_filter(&filters),
             order_by: Vec::new(),
         })?;
         let requested_dimensions = query.dimensions.clone();
@@ -4301,7 +5113,7 @@ impl MetricRuntimeProvider for StoreMetricProvider {
         for record in records
             .records
             .iter()
-            .filter(|record| metric_filters_match(&record.data, &query.filters))
+            .filter(|record| metric_filters_match(&record.data, &filters))
         {
             let key = dimension_defs
                 .iter()
@@ -4350,6 +5162,15 @@ impl MetricRuntimeProvider for StoreMetricProvider {
             rows,
         })
     }
+}
+
+fn metric_query_filters(definition: &RuntimeMetric, query: &MetricQuery) -> Vec<MetricQueryFilter> {
+    definition
+        .filters
+        .iter()
+        .cloned()
+        .chain(query.filters.iter().cloned())
+        .collect()
 }
 
 #[derive(Default)]
@@ -4404,9 +5225,9 @@ impl AggregateState {
     }
 }
 
-fn equality_filter(query: &MetricQuery) -> Value {
+fn equality_filter(filters: &[MetricQueryFilter]) -> Value {
     let mut filter = Map::new();
-    for metric_filter in &query.filters {
+    for metric_filter in filters {
         if metric_filter.operator == "eq" && !metric_filter.field.contains('.') {
             filter.insert(metric_filter.field.clone(), metric_filter.value.clone());
         }
@@ -4926,7 +5747,7 @@ impl HttpResponse {
             _ => "Internal Server Error",
         };
         let mut response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             self.status,
             reason,
             body.len()
@@ -5716,6 +6537,136 @@ mod tests {
     }
 
     #[test]
+    fn manager_submit_create_rows_sort_before_older_rows_without_user_timestamps() {
+        let runtime = runtime("local");
+        let first = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/manager/submit",
+            &tenant_headers(),
+            r#"{
+                "endpoint_id": "tenant.create",
+                "operation_id": "tenant.create",
+                "input": {"id":"tenant-z","name":"First Tenant","active":true}
+            }"#,
+        );
+        assert_eq!(first.status, 200);
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        let second = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/manager/submit",
+            &tenant_headers(),
+            r#"{
+                "endpoint_id": "tenant.create",
+                "operation_id": "tenant.create",
+                "input": {"id":"tenant-a","name":"Second Tenant","active":true}
+            }"#,
+        );
+        assert_eq!(second.status, 200);
+
+        let card = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/records/Tenant",
+            &tenant_headers(),
+            "",
+        );
+        let encoded = serde_json::to_string(&card).unwrap();
+        let second_position = encoded.find("Second Tenant").unwrap();
+        let first_position = encoded.find("First Tenant").unwrap();
+        assert!(second_position < first_position);
+    }
+
+    #[test]
+    fn manager_submit_accepts_webchat_top_level_input_fields() {
+        let runtime = runtime("local");
+        let submitted = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/manager/submit",
+            &tenant_headers(),
+            r#"{
+                "endpoint_id": "tenant.create",
+                "operation_id": "tenant.create",
+                "record": "Tenant",
+                "id": "tenant-top-level",
+                "name": "Top Level Tenant",
+                "active": true
+            }"#,
+        );
+        assert_eq!(submitted.status, 200);
+        assert_eq!(submitted.body["result"]["data"]["name"], "Top Level Tenant");
+        assert_eq!(submitted.body["result"]["data"]["active"], true);
+
+        let card = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/records/Tenant",
+            &tenant_headers(),
+            "",
+        );
+        assert!(card_contains_text(&card, "Top Level Tenant"));
+    }
+
+    #[test]
+    fn manager_submit_record_create_command_persists_webchat_fields() {
+        let runtime = runtime_with_gateway(json!({
+            "schema": "greentic.sorla.agent-gateway.v1",
+            "endpoints": [
+                {
+                    "endpoint_id": "create_landlord",
+                    "operation_id": "create_landlord",
+                    "operation": "command",
+                    "command": { "kind": "record-create", "record": "Landlord" },
+                    "method": "POST",
+                    "path": "/v1/agent/landlords/create",
+                    "entity": "Landlord",
+                    "collection": "landlords",
+                    "provider_binding": "store",
+                    "risk": "low",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["email", "full_name"],
+                        "properties": {
+                            "email": { "type": "email" },
+                            "full_name": { "type": "string" }
+                        }
+                    }
+                }
+            ]
+        }));
+
+        let submitted = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/manager/submit",
+            &tenant_headers(),
+            r#"{
+                "endpoint_id": "create_landlord",
+                "operation_id": "create_landlord",
+                "record": "Landlord",
+                "email": "webchat-landlord@example.com",
+                "full_name": "WebChat Landlord"
+            }"#,
+        );
+        assert_eq!(submitted.status, 200);
+        assert_eq!(submitted.body["result"]["result"]["created_count"], 1);
+
+        let card = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/records/Landlord",
+            &tenant_headers(),
+            "",
+        );
+        assert!(card_contains_text(&card, "webchat-landlord@example.com"));
+        assert!(card_contains_text(&card, "WebChat Landlord"));
+    }
+
+    #[test]
     fn manager_routes_serve_view_cards_graph_and_pickers() {
         let runtime = runtime("local");
         let mut headers = tenant_headers().to_vec();
@@ -5923,7 +6874,9 @@ mod tests {
             &headers,
             "",
         );
-        assert!(card_has_action_title(&building_detail, "Units"));
+        assert!(card_contains_text(&building_detail, "Units"));
+        assert!(card_contains_text(&building_detail, "Unit 1"));
+        assert!(!card_contains_text(&building_detail, "Unit 2"));
         let child_units = request(
             &runtime,
             "GET",
@@ -5934,6 +6887,21 @@ mod tests {
         assert_eq!(child_units["metadata"]["total"], 1);
         assert!(card_contains_text(&child_units, "Unit 1"));
         assert!(!card_contains_text(&child_units, "Unit 2"));
+        let child_create = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/records/Unit/create?parent_record=Building&parent_id=building-1",
+            &headers,
+            "",
+        );
+        assert!(card_contains_text(&child_create, "Address"));
+        assert!(!card_contains_text(&child_create, "Building Id"));
+        assert!(!card_contains_text(&child_create, "Search Building"));
+        assert!(
+            serde_json::to_string(&child_create)
+                .unwrap()
+                .contains("\"building_id\":\"building-1\"")
+        );
 
         let create = request(
             &runtime,
@@ -5945,6 +6913,158 @@ mod tests {
         assert!(card_contains_text(&create, "Address"));
         assert!(!card_contains_text(&create, "Patch Json"));
         assert!(!card_contains_text(&create, "Record Id"));
+    }
+
+    #[test]
+    fn manager_parent_create_and_pickers_use_business_record_ids() {
+        let runtime = runtime_with_gateway(json!({
+            "schema": "greentic.sorla.agent-gateway.v1",
+            "record_hierarchy": [
+                { "record": "Tenant", "main": true },
+                { "record": "Unit", "main": true },
+                {
+                    "record": "Tenancy",
+                    "main": false,
+                    "parents": [
+                        { "record": "Tenant", "field": "tenant_id" },
+                        { "record": "Unit", "field": "unit_id" }
+                    ]
+                }
+            ],
+            "endpoints": [
+                {
+                    "endpoint_id": "tenant.create",
+                    "operation_id": "tenant.create",
+                    "operation": "create",
+                    "method": "POST",
+                    "path": "/v1/agent/tenants/create",
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "provider_binding": "store",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["full_name", "email"],
+                        "properties": {
+                            "full_name": { "type": "string" },
+                            "email": { "type": "email" }
+                        }
+                    }
+                },
+                {
+                    "endpoint_id": "unit.create",
+                    "operation_id": "unit.create",
+                    "operation": "create",
+                    "method": "POST",
+                    "path": "/v1/agent/units/create",
+                    "entity": "Unit",
+                    "collection": "units",
+                    "provider_binding": "store",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["unit_number"],
+                        "properties": {
+                            "unit_number": { "type": "string" }
+                        }
+                    }
+                },
+                {
+                    "endpoint_id": "assign_tenant_to_unit",
+                    "operation_id": "assign_tenant_to_unit",
+                    "operation": "command",
+                    "command": { "kind": "record-create", "record": "Tenancy" },
+                    "method": "POST",
+                    "path": "/v1/agent/tenancies/assign_tenant_to_unit",
+                    "entity": "Tenancy",
+                    "collection": "tenancies",
+                    "provider_binding": "store",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["tenant_id", "unit_id", "start_date"],
+                        "properties": {
+                            "tenant_id": { "type": "uuid" },
+                            "unit_id": { "type": "uuid" },
+                            "start_date": { "type": "date" }
+                        }
+                    }
+                }
+            ]
+        }));
+        let provider = runtime.runtime.providers.store("store").unwrap();
+        let namespace = ProviderNamespace {
+            tenant_id: "tenant-a".to_string(),
+            sor_name: runtime.runtime.config.deployment.sor_name.clone(),
+        };
+        provider
+            .create(greentic_sorx_core::CreateOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                input: json!({
+                    "tenant_id": "9fda33b2-2ed6-43f7-8ab7-8d53a272b042",
+                    "email": "tenant@example.com",
+                    "full_name": "Tenant Picker"
+                }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: greentic_sorx_core::UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
+        provider
+            .create(greentic_sorx_core::CreateOp {
+                namespace,
+                entity: "Unit".to_string(),
+                collection: "units".to_string(),
+                input: json!({
+                    "unit_id": "6c393aba-02a0-461f-a084-49f813155d58",
+                    "unit_number": "A1"
+                }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: greentic_sorx_core::UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
+
+        let unit_picker = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/pickers/Unit",
+            &tenant_headers(),
+            "",
+        );
+        assert_eq!(
+            unit_picker["choices"][0]["value"],
+            "6c393aba-02a0-461f-a084-49f813155d58"
+        );
+
+        let tenant_create = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/records/Tenancy/create?parent_record=Tenant&parent_id=tenants-1",
+            &tenant_headers(),
+            "",
+        );
+        assert!(!card_contains_text(&tenant_create, "Tenant Id"));
+        assert!(card_contains_text(&tenant_create, "Unit Id"));
+        assert!(
+            serde_json::to_string(&tenant_create)
+                .unwrap()
+                .contains("\"tenant_id\":\"9fda33b2-2ed6-43f7-8ab7-8d53a272b042\"")
+        );
+
+        let unit_create = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/records/Tenancy/create?parent_record=Unit&parent_id=units-1",
+            &tenant_headers(),
+            "",
+        );
+        assert!(!card_contains_text(&unit_create, "Unit Id"));
+        assert!(card_contains_text(&unit_create, "Tenant Id"));
+        assert!(
+            serde_json::to_string(&unit_create)
+                .unwrap()
+                .contains("\"unit_id\":\"6c393aba-02a0-461f-a084-49f813155d58\"")
+        );
     }
 
     #[test]
@@ -6438,6 +7558,31 @@ mod tests {
             "example"
         );
         assert_eq!(waiting_list["result"]["rows"][0]["value"], 1.0);
+
+        let manager_metrics = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/metrics",
+            &tenant_headers(),
+            "",
+        );
+        assert_eq!(manager_metrics["metadata"]["kind"], "manager.metrics");
+        assert!(card_contains_text(&manager_metrics, "Metric"));
+        assert!(card_contains_text(&manager_metrics, "Value"));
+        assert!(card_contains_text(&manager_metrics, "monthly_revenue"));
+        assert!(card_contains_text(&manager_metrics, "1250"));
+
+        let manager_metric_detail = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/metrics/number_in_waiting_list",
+            &tenant_headers(),
+            "",
+        );
+        assert_eq!(manager_metric_detail["metadata"]["kind"], "manager.metric");
+        assert!(card_contains_text(&manager_metric_detail, "lab_id"));
+        assert!(card_contains_text(&manager_metric_detail, "example"));
+        assert!(card_contains_text(&manager_metric_detail, "1"));
 
         let tools = request(&runtime, "GET", "/v1/sorx/tools", &[], "");
         assert!(

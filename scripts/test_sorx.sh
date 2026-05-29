@@ -245,7 +245,6 @@ def translate_manager_text(value, locale):
         "Submit": "Enviar",
         "Search": "Buscar",
         "Search and dropdown choices will appear here when records are available.": "La busqueda y las opciones desplegables apareceran aqui cuando haya registros disponibles.",
-        "The form was submitted from WebChat.": "El formulario se envio desde WebChat.",
         "Metric": "Metrica",
         "Metric not found.": "No se encontro la metrica.",
         "Landlord Tenant Sor": "SOR de arrendadores e inquilinos",
@@ -384,6 +383,235 @@ PY
   echo "Installed Sorx handoff default.gtpack"
 }
 
+patch_webchat_manager_submit_hook() {
+  local provider_pack="${BUNDLE_DIR}/providers/messaging/messaging-webchat-gui.gtpack"
+  local provider_dir="${WORK_DIR}/webchat-provider-pack"
+  local hooks_path="${provider_dir}/assets/webchat-gui/skins/default/webchat/hooks.js"
+  if [ ! -f "${provider_pack}" ]; then
+    echo "WebChat provider pack was not generated: ${provider_pack}" >&2
+    exit 1
+  fi
+
+  rm -rf "${provider_dir}"
+  mkdir -p "${provider_dir}"
+  python3 - "${provider_pack}" "${provider_dir}" "${hooks_path}" <<'PY'
+import shutil
+import sys
+import zipfile
+from pathlib import Path
+
+pack_path = Path(sys.argv[1])
+provider_dir = Path(sys.argv[2])
+hooks_path = Path(sys.argv[3])
+
+with zipfile.ZipFile(pack_path, "r") as src:
+    src.extractall(provider_dir)
+
+source = hooks_path.read_text(encoding="utf-8")
+if "__greenticManagerSubmitHook" not in source:
+    needle = "    const result = next(action);\n"
+    replacement = """    if (isGreenticManagerSubmitAction(action)) {
+      handleGreenticManagerSubmit(store, action.payload.activity);
+      return;
+    }
+    if (isGreenticManagerOpenAction(action)) {
+      handleGreenticManagerOpen(store, action.payload.activity);
+      return;
+    }
+
+    const result = next(action);
+"""
+    if needle not in source:
+        raise SystemExit("Unable to find WebChat hook middleware insertion point")
+    source = source.replace(needle, replacement, 1)
+    source += r'''
+
+// Sorx manager Adaptive Cards are rendered as static WebChat card assets, but
+// their submit buttons need to persist through the live manager API.
+var __greenticManagerSubmitHook = true;
+
+function isGreenticManagerSubmitAction(action) {
+  var activity = action && action.payload && action.payload.activity;
+  var value = activity && activity.value;
+  return action && action.type === 'DIRECT_LINE/POST_ACTIVITY' &&
+    value && value.action === 'manager_submit';
+}
+
+function isGreenticManagerOpenAction(action) {
+  var activity = action && action.payload && action.payload.activity;
+  var value = activity && activity.value;
+  return action && action.type === 'DIRECT_LINE/POST_ACTIVITY' &&
+    value && value.manager_target && value.action !== 'manager_submit';
+}
+
+function greenticHeaderValue(value, fallback) {
+  return value == null || value === '' ? fallback : String(value);
+}
+
+function greenticManagerHeaders(value) {
+  var locale = document.documentElement.getAttribute('lang') ||
+    document.querySelector('[data-webchat-locale]')?.getAttribute('data-webchat-locale') ||
+    'en-GB';
+  return {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'X-Greentic-Tenant-Id': greenticHeaderValue(window.__TENANT__, 'demo'),
+    'X-Greentic-Caller-Id': greenticHeaderValue(window.__GUEST_ID__, 'webchat-user'),
+    'X-Greentic-Caller-Role': greenticHeaderValue(value.sorx_role, 'admin'),
+    'X-Greentic-Channel': 'webchat',
+    'X-Greentic-Locale': locale,
+    'Accept-Language': locale
+  };
+}
+
+function greenticManagerInput(value) {
+  var input = Object.assign({}, value.input || {});
+  Object.keys(value || {}).forEach(function (key) {
+    if (/^(action|cardId|routeToCardId|step|manager_|sorx_role|_)/.test(key)) return;
+    if (key === 'endpoint_id' || key === 'operation_id' || key === 'record') return;
+    if (input[key] === undefined) input[key] = value[key];
+  });
+  return input;
+}
+
+function greenticManagerCardsUrl(submitUrl, target) {
+  return String(submitUrl).replace(/\/submit(?:[?#].*)?$/, '/cards/' + String(target || 'dashboard'));
+}
+
+function greenticManagerDefaultTarget(value) {
+  return value.manager_target || (value.record ? 'records/' + value.record : 'dashboard');
+}
+
+function greenticManagerCardsBase(value) {
+  if (value.manager_cards_base_url) {
+    window.__GREENTIC_MANAGER_CARDS_BASE_URL__ = value.manager_cards_base_url;
+    return value.manager_cards_base_url;
+  }
+  if (value.manager_submit_url) {
+    var derived = greenticManagerCardsUrl(value.manager_submit_url, '').replace(/\/$/, '');
+    window.__GREENTIC_MANAGER_CARDS_BASE_URL__ = derived;
+    return derived;
+  }
+  return window.__GREENTIC_MANAGER_CARDS_BASE_URL__ || null;
+}
+
+function greenticManagerSubmitUrl(value) {
+  if (value.manager_submit_url) return value.manager_submit_url;
+  var base = greenticManagerCardsBase(value);
+  if (!base) return null;
+  return String(base).replace(/\/cards\/?$/, '/submit');
+}
+
+function greenticManagerCardUrl(value) {
+  var base = greenticManagerCardsBase(value);
+  if (!base) return null;
+  return String(base).replace(/\/+$/, '') + '/' + String(greenticManagerDefaultTarget(value));
+}
+
+function greenticIncomingCardActivity(card) {
+  return {
+    type: 'message',
+    id: 'greentic-manager-' + Date.now(),
+    timestamp: new Date().toISOString(),
+    from: { id: 'sorx-manager', name: 'Sorx Manager', role: 'bot' },
+    attachments: [{
+      contentType: 'application/vnd.microsoft.card.adaptive',
+      content: card
+    }]
+  };
+}
+
+function greenticIncomingTextActivity(text) {
+  return {
+    type: 'message',
+    id: 'greentic-manager-error-' + Date.now(),
+    timestamp: new Date().toISOString(),
+    from: { id: 'sorx-manager', name: 'Sorx Manager', role: 'bot' },
+    text: text
+  };
+}
+
+async function handleGreenticManagerSubmit(store, activity) {
+  var value = Object.assign({}, activity && activity.value || {});
+  var submitUrl = greenticManagerSubmitUrl(value);
+  if (!submitUrl) {
+    console.warn('[manager-submit] manager submit URL is not available');
+    return;
+  }
+  greenticManagerCardsBase(value);
+  var headers = greenticManagerHeaders(value);
+  var body = Object.assign({}, value, { input: greenticManagerInput(value) });
+  try {
+    var submitResponse = await fetch(submitUrl, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(body)
+    });
+    if (!submitResponse.ok) {
+      throw new Error('manager submit failed with HTTP ' + submitResponse.status);
+    }
+    var cardResponse = await fetch(greenticManagerCardsUrl(submitUrl, greenticManagerDefaultTarget(value)), {
+      method: 'GET',
+      headers: headers
+    });
+    if (!cardResponse.ok) {
+      throw new Error('manager card reload failed with HTTP ' + cardResponse.status);
+    }
+    var card = await cardResponse.json();
+    store.dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: { activity: greenticIncomingCardActivity(card) }
+    });
+  } catch (err) {
+    console.error('[manager-submit]', err);
+    store.dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: { activity: greenticIncomingTextActivity('Unable to submit this manager form. Please try again.') }
+    });
+  }
+}
+
+async function handleGreenticManagerOpen(store, activity) {
+  var value = Object.assign({}, activity && activity.value || {});
+  var cardUrl = greenticManagerCardUrl(value);
+  if (!cardUrl) {
+    console.warn('[manager-open] manager cards base URL is not available');
+    return;
+  }
+  try {
+    var cardResponse = await fetch(cardUrl, {
+      method: 'GET',
+      headers: greenticManagerHeaders(value)
+    });
+    if (!cardResponse.ok) {
+      throw new Error('manager card load failed with HTTP ' + cardResponse.status);
+    }
+    var card = await cardResponse.json();
+    store.dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: { activity: greenticIncomingCardActivity(card) }
+    });
+  } catch (err) {
+    console.error('[manager-open]', err);
+    store.dispatch({
+      type: 'DIRECT_LINE/INCOMING_ACTIVITY',
+      payload: { activity: greenticIncomingTextActivity('Unable to open this manager card. Please try again.') }
+    });
+  }
+}
+'''
+    hooks_path.write_text(source, encoding="utf-8")
+
+tmp_pack = pack_path.with_suffix(".gtpack.tmp")
+with zipfile.ZipFile(tmp_pack, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+    for path in sorted(provider_dir.rglob("*")):
+        if path.is_file():
+            dst.write(path, path.relative_to(provider_dir).as_posix())
+shutil.move(tmp_pack, pack_path)
+PY
+  echo "Patched WebChat manager submit hook"
+}
+
 refresh_sorx_dashboard_card() {
   local pack_path="${BUNDLE_DIR}/packs/default.gtpack"
   local fake_app_dir="${WORK_DIR}/fake-app-pack-live"
@@ -451,6 +679,7 @@ def normalize_actions(value, role):
                 data.setdefault("manager_submit_url", f"{base_url}/submit")
             target = data.get("manager_target")
             if isinstance(target, str) and target:
+                data.setdefault("manager_cards_base_url", f"{base_url}/cards")
                 card_id = role_card_id(role, target)
                 data["routeToCardId"] = card_id
                 data.setdefault("cardId", card_id)
@@ -540,7 +769,6 @@ def translate_manager_text(value, locale):
         "Select a metric to inspect or query.": "Selecciona una metrica para inspeccionar o consultar.",
         "No metrics are declared.": "No se han declarado metricas.",
         "Search and dropdown choices will appear here when records are available.": "La busqueda y las opciones desplegables apareceran aqui cuando haya registros disponibles.",
-        "The form was submitted from WebChat.": "El formulario se envio desde WebChat.",
         "Landlord Tenant Sor": "SOR de arrendadores e inquilinos",
         "This package exposes handoff metadata for business-safe agent endpoints.": "Este paquete expone metadatos de traspaso para endpoints de agentes empresariales seguros.",
         "Building": "Edificio",
@@ -607,8 +835,6 @@ def translate_manager_text(value, locale):
         return "⌕ Buscar " + value.removeprefix("⌕ Search ")
     if value.startswith("Add "):
         return "Anadir " + translate_manager_text(value.removeprefix("Add "), locale)
-    if value.endswith(" submitted"):
-        return value.removesuffix(" submitted") + " enviado"
     if value.endswith(" is required."):
         return "Se requiere " + value.removesuffix(" is required.") + "."
     return value
@@ -663,49 +889,10 @@ with zipfile.ZipFile(pack_path, "r") as src:
 cards = work_dir / "assets" / "cards"
 cards.mkdir(parents=True, exist_ok=True)
 
-def submitted_card(record_label, role):
-    dashboard_id = role_card_id(role, "dashboard")
-    return {
-        "type": "AdaptiveCard",
-        "version": "1.5",
-        "lang": base_card_locale,
-        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-        "metadata": {
-            "locale": base_card_locale,
-        },
-        "body": [
-            {
-                "type": "TextBlock",
-                "text": f"{record_label} submitted",
-                "size": "Large",
-                "weight": "Bolder",
-                "wrap": True,
-            },
-            {
-                "type": "TextBlock",
-                "text": "The form was submitted from WebChat.",
-                "wrap": True,
-            },
-        ],
-        "actions": [
-            {
-                "type": "Action.Submit",
-                "title": "Dashboard",
-                "data": {
-                    "manager_target": "dashboard",
-                    "routeToCardId": dashboard_id,
-                    "cardId": dashboard_id,
-                    "step": "open",
-                    "action": dashboard_id,
-                    "sorx_role": role,
-                },
-            }
-        ],
-    }
-
-def enhance_create_card(card, record, record_label, role, create_actions):
+def enhance_create_card(card, record, role, create_actions):
     create_card_id = role_card_id(role, f"records/{record}/create")
-    submitted_card_id = role_card_id(role, f"records/{record}/submitted")
+    list_target = f"records/{record}"
+    list_card_id = role_card_id(role, list_target)
     action_meta = create_actions.get(record, {})
     for action in iter_submit_actions(card):
         data = action.get("data")
@@ -716,10 +903,10 @@ def enhance_create_card(card, record, record_label, role, create_actions):
         data["action"] = "manager_submit"
         data["cardId"] = create_card_id
         data["step"] = "submit"
-        data["routeToCardId"] = submitted_card_id
+        data["manager_target"] = list_target
+        data["routeToCardId"] = list_card_id
         data["sorx_role"] = role
         data["manager_submit_url"] = f"{base_url}/submit"
-    return submitted_card_id
 
 def iter_submit_actions(value):
     if isinstance(value, dict):
@@ -803,14 +990,12 @@ for role in (available_roles or [selected_role]):
         if "/" in record:
             continue
         create_target = f"records/{record}/create"
-        record_label = card.get("body", [{}])[0].get("text", record)
         card = request_optional_json(f"{base_url}/cards/{create_target}", role)
         if card is None:
             continue
         normalize_card_for_webchat(card, role)
-        submitted_card_id = enhance_create_card(card, record, record_label, role, create_actions)
+        enhance_create_card(card, record, role, create_actions)
         write_card(cards / f"{role_card_id(role, create_target)}.json", card)
-        write_card(cards / f"{submitted_card_id}.json", submitted_card(record_label, role))
 
 write_card_i18n(cards, selected_locale)
 
@@ -1074,6 +1259,7 @@ JSON
 
 echo "Creating bundle workspace"
 greentic-bundle wizard apply --answers "${CREATE_ANSWERS}"
+patch_webchat_manager_submit_hook
 mkdir -p "${SORX_METADATA_DIR}"
 cp "${PACK_ABS}" "${SORX_METADATA_DIR}/${PACK_BASE}"
 

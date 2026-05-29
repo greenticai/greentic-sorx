@@ -1,0 +1,11 @@
+{
+  "name": "greentic-sorx",
+  "private": true,
+  "scripts": {
+    "test:webchat-e2e": "playwright test",
+    "test:complex-sorla-webchat": "bash scripts/e2e/run-complex-sorla-webchat.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.0"
+  }
+}

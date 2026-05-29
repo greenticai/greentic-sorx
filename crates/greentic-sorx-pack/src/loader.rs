@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{Cursor, Read, Seek};
-use std::path::{Component, Path, PathBuf};
+use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
 
+use greentic_pack::reader::{SigningPolicy, open_pack};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use zip::ZipArchive;
 
 use crate::business_actions::{
     BusinessActionAssets, BusinessActionCatalog, BusinessActionInspectSummary, BusinessActionLock,
@@ -156,22 +156,28 @@ pub fn load_sorla_pack(path: &Path) -> Result<LoadedSorlaPack, SorxPackError> {
 
 pub fn load_sorla_pack_from_bytes(bytes: &[u8]) -> Result<LoadedSorlaPack, SorxPackError> {
     let pack_digest = Some(format!("sha256:{}", sha256_hex(bytes)));
-    let archive = ZipArchive::new(Cursor::new(bytes)).map_err(|err| {
+    let mut temp = tempfile::NamedTempFile::new().map_err(|err| {
         SorxPackError::new(
-            "invalid_archive",
-            format!("failed to read gtpack archive from bytes: {err}"),
+            "tempfile_failed",
+            format!("failed to prepare temporary gtpack for pack-lib: {err}"),
         )
     })?;
+    temp.write_all(bytes).map_err(|err| {
+        SorxPackError::new(
+            "tempfile_failed",
+            format!("failed to write temporary gtpack for pack-lib: {err}"),
+        )
+    })?;
+    let archive = open_gtpack(temp.path())?;
     load_sorla_pack_archive(PathBuf::from("<bytes>"), pack_digest, archive)
 }
 
-fn load_sorla_pack_archive<R: Read + Seek>(
+fn load_sorla_pack_archive(
     pack_path: PathBuf,
     pack_digest: Option<String>,
-    mut archive: ZipArchive<R>,
+    archive: GtpackArchive,
 ) -> Result<LoadedSorlaPack, SorxPackError> {
-    let entries = zip_entry_names(&mut archive)?;
-    validate_entry_paths(&entries)?;
+    let entries = archive.entry_names();
 
     for required in REQUIRED_ENTRIES {
         if !entries.contains(*required) {
@@ -182,25 +188,24 @@ fn load_sorla_pack_archive<R: Read + Seek>(
         }
     }
 
-    let manifest = read_manifest(&mut archive)?;
+    let manifest = read_manifest(&archive)?;
     validate_sorx_extension(&manifest)?;
     validate_manifest_asset_paths(&manifest)?;
 
     let lock = if entries.contains("pack.lock.cbor") {
-        Some(read_lock(&mut archive)?)
+        Some(read_lock(&archive)?)
     } else {
         None
     };
     if let Some(lock) = &lock {
-        validate_lock(&mut archive, &entries, lock)?;
+        validate_lock(&archive, &entries, lock)?;
     }
 
     validate_extension_references(&manifest, &entries)?;
 
-    let (sorla_assets, business_action_errors) =
-        read_sorla_assets(&mut archive, &entries, &manifest)?;
+    let (sorla_assets, business_action_errors) = read_sorla_assets(&archive, &entries, &manifest)?;
     let (sorx_assets, validation_suite_status, validation_errors) =
-        read_sorx_assets(&mut archive, &entries)?;
+        read_sorx_assets(&archive, &entries)?;
 
     let mut doctor_errors = validation_errors;
     doctor_errors.extend(validate_mcp_tools(&sorla_assets));
@@ -364,99 +369,67 @@ fn validate_input_path(path: &Path) -> Result<(), SorxPackError> {
     Ok(())
 }
 
-fn open_gtpack(path: &Path) -> Result<ZipArchive<fs::File>, SorxPackError> {
-    let file = fs::File::open(path).map_err(|err| {
-        SorxPackError::new(
-            "open_failed",
-            format!("failed to open {}: {err}", path.display()),
-        )
-    })?;
-    ZipArchive::new(file).map_err(|err| {
+#[derive(Debug, Clone)]
+struct GtpackArchive {
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+impl GtpackArchive {
+    fn entry_names(&self) -> BTreeSet<String> {
+        self.files.keys().cloned().collect()
+    }
+
+    fn bytes(&self, name: &str) -> Result<Vec<u8>, SorxPackError> {
+        self.files.get(name).cloned().ok_or_else(|| {
+            SorxPackError::new("missing_entry", format!("gtpack is missing `{name}`"))
+        })
+    }
+
+    fn text(&self, name: &str) -> Result<String, SorxPackError> {
+        let bytes = self.bytes(name)?;
+        String::from_utf8(bytes).map_err(|err| {
+            SorxPackError::new("invalid_utf8", format!("`{name}` is not UTF-8: {err}"))
+        })
+    }
+}
+
+fn open_gtpack(path: &Path) -> Result<GtpackArchive, SorxPackError> {
+    let load = open_pack(path, SigningPolicy::DevOk).map_err(|err| {
         SorxPackError::new(
             "invalid_archive",
-            format!("failed to read gtpack archive {}: {err}", path.display()),
+            format!(
+                "greentic-pack-lib 0.5 failed to open gtpack {}: {}",
+                path.display(),
+                err.message
+            ),
         )
+    })?;
+    Ok(GtpackArchive {
+        files: load.files.into_iter().collect(),
     })
 }
 
-fn zip_entry_names<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-) -> Result<BTreeSet<String>, SorxPackError> {
-    let mut names = BTreeSet::new();
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|err| {
-            SorxPackError::new(
-                "archive_entry_failed",
-                format!("failed to inspect gtpack entry {index}: {err}"),
-            )
-        })?;
-        if !entry.is_dir() {
-            names.insert(entry.name().to_string());
-        }
-    }
-    Ok(names)
-}
-
-fn validate_entry_paths(entries: &BTreeSet<String>) -> Result<(), SorxPackError> {
-    for entry in entries {
-        validate_relative_pack_path(entry)?;
-    }
-    Ok(())
-}
-
 fn validate_relative_pack_path(path: &str) -> Result<(), SorxPackError> {
-    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
-        return Err(SorxPackError::new(
-            "unsafe_path",
-            format!("unsafe pack entry path `{path}`"),
-        ));
-    }
-    let path = Path::new(path);
-    for component in path.components() {
-        if matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        ) {
-            return Err(SorxPackError::new(
+    greentic_pack::path_safety::normalize_under_root(Path::new("/"), Path::new(path))
+        .map(|_| ())
+        .map_err(|err| {
+            SorxPackError::new(
                 "unsafe_path",
-                format!("unsafe pack entry path `{}`", path.display()),
-            ));
-        }
-    }
-    Ok(())
+                format!("unsafe pack entry path `{path}`: {err}"),
+            )
+        })
 }
 
-fn zip_bytes<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-    name: &str,
-) -> Result<Vec<u8>, SorxPackError> {
-    let mut entry = archive.by_name(name).map_err(|err| {
-        SorxPackError::new(
-            "missing_entry",
-            format!("gtpack is missing `{name}`: {err}"),
-        )
-    })?;
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).map_err(|err| {
-        SorxPackError::new(
-            "read_entry_failed",
-            format!("failed to read `{name}`: {err}"),
-        )
-    })?;
-    Ok(bytes)
+fn zip_bytes(archive: &GtpackArchive, name: &str) -> Result<Vec<u8>, SorxPackError> {
+    archive.bytes(name)
 }
 
-fn zip_text<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-    name: &str,
-) -> Result<String, SorxPackError> {
-    let bytes = zip_bytes(archive, name)?;
-    String::from_utf8(bytes)
-        .map_err(|err| SorxPackError::new("invalid_utf8", format!("`{name}` is not UTF-8: {err}")))
+fn zip_text(archive: &GtpackArchive, name: &str) -> Result<String, SorxPackError> {
+    archive.text(name)
 }
 
-fn optional_zip_bytes<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn optional_zip_bytes(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
     name: &str,
 ) -> Result<Option<Vec<u8>>, SorxPackError> {
@@ -467,8 +440,8 @@ fn optional_zip_bytes<R: Read + Seek>(
     }
 }
 
-fn optional_zip_text<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn optional_zip_text(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
     name: &str,
 ) -> Result<Option<String>, SorxPackError> {
@@ -479,9 +452,7 @@ fn optional_zip_text<R: Read + Seek>(
     }
 }
 
-fn read_manifest<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-) -> Result<PackManifest, SorxPackError> {
+fn read_manifest(archive: &GtpackArchive) -> Result<PackManifest, SorxPackError> {
     let bytes = zip_bytes(archive, "pack.cbor")?;
     ciborium::de::from_reader(Cursor::new(bytes)).map_err(|err| {
         SorxPackError::new(
@@ -491,7 +462,7 @@ fn read_manifest<R: Read + Seek>(
     })
 }
 
-fn read_lock<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<PackLock, SorxPackError> {
+fn read_lock(archive: &GtpackArchive) -> Result<PackLock, SorxPackError> {
     let bytes = zip_bytes(archive, "pack.lock.cbor")?;
     ciborium::de::from_reader(Cursor::new(bytes)).map_err(|err| {
         SorxPackError::new(
@@ -569,8 +540,8 @@ fn validate_extension_references(
     Ok(())
 }
 
-fn validate_lock<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn validate_lock(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
     lock: &PackLock,
 ) -> Result<(), SorxPackError> {
@@ -600,8 +571,8 @@ fn validate_lock<R: Read + Seek>(
     Ok(())
 }
 
-fn read_sorla_assets<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn read_sorla_assets(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
     manifest: &PackManifest,
 ) -> Result<(SorlaAssets, Vec<String>), SorxPackError> {
@@ -654,8 +625,8 @@ fn read_sorla_assets<R: Read + Seek>(
     ))
 }
 
-fn read_operational_index_assets<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn read_operational_index_assets(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
     manifest: &PackManifest,
 ) -> Result<Option<OperationalIndexAssets>, SorxPackError> {
@@ -721,8 +692,8 @@ fn validate_operational_indexes(catalog: &OperationalIndexCatalog) -> Result<(),
     Ok(())
 }
 
-fn read_metric_assets<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn read_metric_assets(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
     manifest: &PackManifest,
 ) -> Result<Option<MetricAssets>, SorxPackError> {
@@ -747,8 +718,8 @@ fn read_metric_assets<R: Read + Seek>(
     }))
 }
 
-fn read_ontology_assets<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn read_ontology_assets(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
 ) -> Result<Option<OntologyAssets>, SorxPackError> {
     if !entries.contains("assets/sorla/ontology.graph.json") {
@@ -788,8 +759,8 @@ fn read_ontology_assets<R: Read + Seek>(
     }))
 }
 
-fn read_business_action_assets<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn read_business_action_assets(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
     manifest: &PackManifest,
     agent_gateway_json: &Value,
@@ -853,8 +824,8 @@ fn extension_asset_path<'a>(
         .as_str()
 }
 
-fn read_sorx_assets<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
+fn read_sorx_assets(
+    archive: &GtpackArchive,
     entries: &BTreeSet<String>,
 ) -> Result<(SorxAssets, ValidationSuiteStatus, Vec<String>), SorxPackError> {
     let start_schema_json = parse_json(archive, "assets/sorx/start.schema.json")?;
@@ -1138,10 +1109,7 @@ fn validate_mcp_tools(sorla_assets: &SorlaAssets) -> Vec<String> {
     errors
 }
 
-fn parse_json<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-    name: &str,
-) -> Result<Value, SorxPackError> {
+fn parse_json(archive: &GtpackArchive, name: &str) -> Result<Value, SorxPackError> {
     let text = zip_text(archive, name)?;
     serde_json::from_str(&text).map_err(|err| {
         SorxPackError::new("invalid_json", format!("`{name}` is invalid JSON: {err}"))
@@ -1216,6 +1184,11 @@ mod tests {
         BusinessActionLockEntry, contract_hash,
     };
     use crate::doctor::doctor_sorla_pack;
+    use greentic_types::{
+        PackId, PackKind as GpackKind, PackManifest as GpackManifest, PackSignatures,
+        encode_pack_manifest,
+    };
+    use semver::Version;
 
     fn valid_entries() -> BTreeMap<String, Vec<u8>> {
         let extension = serde_json::json!({
@@ -1249,7 +1222,7 @@ mod tests {
         };
         let mut entries = BTreeMap::new();
         entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
-        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
         entries.insert(
             "manifest.json".to_string(),
             serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -1284,6 +1257,26 @@ mod tests {
         let mut out = Vec::new();
         ciborium::ser::into_writer(value, &mut out).unwrap();
         out
+    }
+
+    fn gpack_manifest_bytes() -> Vec<u8> {
+        encode_pack_manifest(&GpackManifest {
+            schema_version: "pack-v1".to_string(),
+            pack_id: "landlord-tenant-sor".parse::<PackId>().unwrap(),
+            name: Some("landlord-tenant-sor".to_string()),
+            version: Version::parse("0.1.0").unwrap(),
+            kind: GpackKind::Application,
+            publisher: "greentic-sorx-tests".to_string(),
+            components: Vec::new(),
+            flows: Vec::new(),
+            dependencies: Vec::new(),
+            capabilities: Vec::new(),
+            secret_requirements: Vec::new(),
+            signatures: PackSignatures::default(),
+            bootstrap: None,
+            extensions: None,
+        })
+        .unwrap()
     }
 
     fn lock_for_entries(entries: &BTreeMap<String, Vec<u8>>) -> PackLock {
@@ -1345,7 +1338,7 @@ mod tests {
             Value::String("assets/sorla/retrieval-bindings.json".to_string()),
         );
         entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
-        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
         entries.insert(
             "manifest.json".to_string(),
             serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -1435,7 +1428,7 @@ mod tests {
             Value::String("assets/sorla/business-actions.lock.json".to_string()),
         );
         entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
-        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
         entries.insert(
             "manifest.json".to_string(),
             serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -1464,7 +1457,7 @@ mod tests {
             Value::String("assets/sorla/metrics.json".to_string()),
         );
         entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
-        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
         entries.insert(
             "manifest.json".to_string(),
             serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -1500,7 +1493,7 @@ mod tests {
             Value::String("assets/sorla/operational-indexes.json".to_string()),
         );
         entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
-        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
         entries.insert(
             "manifest.json".to_string(),
             serde_json::to_vec_pretty(&manifest).unwrap(),
@@ -1705,7 +1698,8 @@ mod tests {
         let (_temp, path) = write_pack(entries);
         let report = doctor_sorla_pack(&path);
         assert!(!report.ok);
-        assert_eq!(report.errors[0].code, "unsafe_path");
+        assert_eq!(report.errors[0].code, "invalid_archive");
+        assert!(report.errors[0].message.contains("greentic-pack-lib"));
     }
 
     #[test]
@@ -1804,7 +1798,7 @@ mod tests {
             .unwrap()
             .remove("mcp_tools");
         entries.insert("pack.cbor".to_string(), encode_cbor(&manifest));
-        entries.insert("manifest.cbor".to_string(), encode_cbor(&manifest));
+        entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
         entries.insert(
             "manifest.json".to_string(),
             serde_json::to_vec_pretty(&manifest).unwrap(),

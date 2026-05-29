@@ -16,6 +16,7 @@
   "bindings": {
     "entities": {
       "Landlord": { "provider": "store", "collection": "landlords" },
+      "Building": { "provider": "store", "collection": "buildings" },
       "Property": { "provider": "store", "collection": "properties" },
       "Unit": { "provider": "store", "collection": "units" },
       "Tenant": { "provider": "store", "collection": "tenants" },

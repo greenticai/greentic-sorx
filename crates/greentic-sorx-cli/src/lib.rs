@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod http_runtime;
+mod test_runtime;
 mod validation;
 
 const TRANSIENT_HTTP_INGEST_SECRET_ENV: &str = "GREENTIC_SORX_TRANSIENT_HTTP_INGEST_SECRET";
@@ -240,6 +241,47 @@ pub enum Commands {
     RuntimeHost {
         #[command(subcommand)]
         command: RuntimeHostCommands,
+    },
+    /// Build and run a local WebChat/SORX test bundle for a SoRLa .gtpack.
+    Test {
+        /// Path to a SoRLa .gtpack archive.
+        pack: PathBuf,
+
+        /// Path to greentic-sorx startup answers JSON.
+        #[arg(long = "sorx-answers")]
+        sorx_answers: Option<PathBuf>,
+
+        /// Path to gtc setup answers JSON.
+        #[arg(long)]
+        answers: Option<PathBuf>,
+
+        /// Bundle workspace directory to create or reuse.
+        #[arg(long = "bundle-dir")]
+        bundle_dir: Option<PathBuf>,
+
+        /// SORX runtime base URL.
+        #[arg(long = "sorx-url", default_value = "http://127.0.0.1:8787")]
+        sorx_url: String,
+
+        /// WebChat base URL.
+        #[arg(long = "webchat-url", default_value = "http://127.0.0.1:8080")]
+        webchat_url: String,
+
+        /// Principal role id used for manager-card requests.
+        #[arg(long)]
+        role: Option<String>,
+
+        /// Initial WebChat locale.
+        #[arg(long, default_value = "en-GB")]
+        locale: String,
+
+        /// Recreate the generated bundle directory when it already exists.
+        #[arg(long)]
+        force: bool,
+
+        /// Stop after bundle creation and setup.
+        #[arg(long = "no-start")]
+        no_start: bool,
     },
     /// Start a SORX runtime from a SoRLa .gtpack and startup answers.
     Start {
@@ -975,6 +1017,29 @@ fn dispatch(
         Commands::Validation { command } => run_validation_command(command, registry_path),
         Commands::Migrate { command } => run_migrate(command),
         Commands::RuntimeHost { command } => run_runtime_host(command),
+        Commands::Test {
+            pack,
+            sorx_answers,
+            answers,
+            bundle_dir,
+            sorx_url,
+            webchat_url,
+            role,
+            locale,
+            force,
+            no_start,
+        } => run_test_bundle(TestBundleOptions::new(test_runtime::TestOptions {
+            pack,
+            sorx_answers,
+            setup_answers: answers,
+            bundle_dir,
+            sorx_url,
+            webchat_url,
+            role,
+            locale,
+            force,
+            no_start,
+        })),
         Commands::Start {
             pack,
             schema,
@@ -999,6 +1064,19 @@ fn dispatch(
             run_start(pack, false, answers, false, false, false, _context)
         }
     }
+}
+
+#[derive(Debug)]
+struct TestBundleOptions(test_runtime::TestOptions);
+
+impl TestBundleOptions {
+    fn new(options: test_runtime::TestOptions) -> Self {
+        Self(options)
+    }
+}
+
+fn run_test_bundle(options: TestBundleOptions) -> CliResult<()> {
+    test_runtime::run(options.0).map_err(CliError::generic)
 }
 
 fn run_runtime_host(command: RuntimeHostCommands) -> CliResult<()> {
@@ -4047,6 +4125,59 @@ mod tests {
     fn parses_run_alias_without_answers_for_interactive_prompting() {
         let cli = parse_from(["greentic-sorx", "run", "landlord.gtpack"]).unwrap();
         assert!(matches!(cli.command, Commands::Run { answers: None, .. }));
+    }
+
+    #[test]
+    fn parses_test_command() {
+        let cli = parse_from([
+            "greentic-sorx",
+            "test",
+            "landlord.gtpack",
+            "--sorx-answers",
+            "runtime.answers.json",
+            "--answers",
+            "setup.answers.json",
+            "--bundle-dir",
+            "/tmp/sorx-test",
+            "--sorx-url",
+            "http://127.0.0.1:8787",
+            "--webchat-url",
+            "http://127.0.0.1:8080",
+            "--role",
+            "operations",
+            "--locale",
+            "nl-BE",
+            "--force",
+            "--no-start",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Test {
+                pack,
+                sorx_answers,
+                answers,
+                bundle_dir,
+                sorx_url,
+                webchat_url,
+                role,
+                locale,
+                force,
+                no_start,
+            } => {
+                assert_eq!(pack, PathBuf::from("landlord.gtpack"));
+                assert_eq!(sorx_answers, Some(PathBuf::from("runtime.answers.json")));
+                assert_eq!(answers, Some(PathBuf::from("setup.answers.json")));
+                assert_eq!(bundle_dir, Some(PathBuf::from("/tmp/sorx-test")));
+                assert_eq!(sorx_url, "http://127.0.0.1:8787");
+                assert_eq!(webchat_url, "http://127.0.0.1:8080");
+                assert_eq!(role, Some("operations".to_string()));
+                assert_eq!(locale, "nl-BE");
+                assert!(force);
+                assert!(no_start);
+            }
+            other => panic!("expected test command, got {other:?}"),
+        }
     }
 
     #[test]

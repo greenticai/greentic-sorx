@@ -1,7 +1,12 @@
 use std::process::Command;
 
 use greentic_sorx_core::default_start_schema;
-use greentic_sorx_pack::{PackIdentity, PackManifest};
+use greentic_sorx_pack::{PackIdentity, PackLock, PackLockEntry, PackManifest as SorxPackManifest};
+use greentic_types::{
+    PackId, PackKind as GpackKind, PackManifest as GpackManifest, PackSignatures,
+    encode_pack_manifest,
+};
+use semver::Version;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
@@ -984,6 +989,24 @@ impl PackFixture {
     fn from_entries(entries: Vec<(String, Vec<u8>)>) -> Self {
         let temp = TempDir::new().unwrap();
         let pack = temp.path().join("landlord.gtpack");
+        let mut entries = entries
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if let Some(manifest) = entries.get("pack.cbor").cloned() {
+            entries.insert("manifest.cbor".to_string(), manifest.clone());
+            entries.insert(
+                "manifest.json".to_string(),
+                serde_json::to_vec_pretty(
+                    &ciborium::de::from_reader::<SorxPackManifest, _>(manifest.as_slice()).unwrap(),
+                )
+                .unwrap(),
+            );
+            entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
+        }
+        entries.insert(
+            "pack.lock.cbor".to_string(),
+            encode_cbor(&lock_for_entries(&entries)),
+        );
         let file = std::fs::File::create(&pack).unwrap();
         let mut writer = ZipWriter::new(file);
         let options = SimpleFileOptions::default()
@@ -1033,6 +1056,31 @@ impl PackFixture {
         });
         std::fs::write(&path, serde_json::to_vec_pretty(&artifact).unwrap()).unwrap();
         path
+    }
+}
+
+fn encode_cbor<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    let mut out = Vec::new();
+    ciborium::ser::into_writer(value, &mut out).unwrap();
+    out
+}
+
+fn lock_for_entries(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> PackLock {
+    PackLock {
+        schema: "greentic.gtpack.lock.sorla.v1".to_string(),
+        entries: entries
+            .iter()
+            .filter(|(path, _)| path.as_str() != "pack.lock.cbor")
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    PackLockEntry {
+                        size: bytes.len() as u64,
+                        sha256: hex::encode(Sha256::digest(bytes)),
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
@@ -1174,7 +1222,7 @@ fn pack_entries_with_metrics() -> Vec<(String, Vec<u8>)> {
 }
 
 fn pack_entries() -> Vec<(String, Vec<u8>)> {
-    let manifest = PackManifest {
+    let manifest = SorxPackManifest {
         schema: "greentic.gtpack.manifest.sorla.v1".to_string(),
         pack: PackIdentity {
             name: "landlord".to_string(),
@@ -1237,6 +1285,26 @@ fn pack_entries() -> Vec<(String, Vec<u8>)> {
             br#"{"id":"tenant-2","name":"Acme"}"#.to_vec(),
         ),
     ]
+}
+
+fn gpack_manifest_bytes() -> Vec<u8> {
+    encode_pack_manifest(&GpackManifest {
+        schema_version: "pack-v1".to_string(),
+        pack_id: "landlord".parse::<PackId>().unwrap(),
+        name: Some("landlord".to_string()),
+        version: Version::parse("0.1.0").unwrap(),
+        kind: GpackKind::Application,
+        publisher: "greentic-sorx-tests".to_string(),
+        components: Vec::new(),
+        flows: Vec::new(),
+        dependencies: Vec::new(),
+        capabilities: Vec::new(),
+        secret_requirements: Vec::new(),
+        signatures: PackSignatures::default(),
+        bootstrap: None,
+        extensions: None,
+    })
+    .unwrap()
 }
 
 fn ontology_answers() -> &'static str {
