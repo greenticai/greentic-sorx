@@ -1,0 +1,1593 @@
+# --- BEGIN GREENTIC-SORLA GENERATED ---
+package:
+  name: landlord-tenant-sor
+  version: 0.1.0
+  i18n_key: examples.landlord_tenant_sor.package
+roles:
+  - id: admin
+    i18n_key: examples.landlord_tenant_sor.roles.admin
+    label: Admin
+    description: "Full administrative access to landlord, building, unit, tenancy, payment, and maintenance records."
+    grants:
+      - "records.landlord.*"
+      - "records.building.*"
+      - "records.unit.*"
+      - "records.tenant.*"
+      - "records.tenancy.*"
+      - "records.payment.*"
+      - "records.maintenance_request.*"
+      - "agent_endpoints.admin.*"
+  - id: maintenance
+    i18n_key: examples.landlord_tenant_sor.roles.maintenance
+    label: Maintenance
+    description: "Handle maintenance request intake and lifecycle updates."
+    grants:
+      - records.building.read
+      - records.unit.read
+      - records.maintenance_request.read
+      - records.maintenance_request.create
+      - records.maintenance_request.update
+  - id: finance
+    i18n_key: examples.landlord_tenant_sor.roles.finance
+    label: Finance
+    description: "Record and update tenancy payments."
+    grants:
+      - records.tenancy.read
+      - records.payment.read
+      - records.payment.create
+      - records.payment.update
+  - id: operations
+    i18n_key: examples.landlord_tenant_sor.roles.operations
+    label: Operations
+    description: "Manage tenants and tenancy contracts."
+    grants:
+      - records.landlord.read
+      - records.building.read
+      - records.unit.read
+      - records.tenant.read
+      - records.tenant.create
+      - records.tenant.update
+      - records.tenancy.read
+      - records.tenancy.create
+      - records.tenancy.update
+records:
+  - name: Landlord
+    i18n_key: examples.landlord_tenant_sor.records.landlord
+    source: native
+    access:
+      read:
+        roles:
+          - admin
+          - operations
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+      create:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+      update:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+      delete:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+    fields:
+      - name: id
+        i18n_key: examples.landlord_tenant_sor.records.landlord.fields.id
+        type: uuid
+        rules:
+          unique: true
+      - name: full_name
+        i18n_key: examples.landlord_tenant_sor.records.landlord.fields.full_name
+        type: string
+      - name: email
+        i18n_key: examples.landlord_tenant_sor.records.landlord.fields.email
+        type: email
+        rules:
+          max_length: 320
+  - name: Building
+    i18n_key: examples.landlord_tenant_sor.records.building
+    source: native
+    access:
+      read:
+        roles:
+          - admin
+          - operations
+          - maintenance
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+          - MaintenanceRolePolicy
+      create:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+      update:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+      delete:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+    fields:
+      - name: id
+        i18n_key: examples.landlord_tenant_sor.records.building.fields.id
+        type: uuid
+        rules:
+          unique: true
+      - name: landlord_id
+        i18n_key: examples.landlord_tenant_sor.records.building.fields.landlord_id
+        type: uuid
+        references:
+          record: Landlord
+          field: id
+      - name: address
+        i18n_key: examples.landlord_tenant_sor.records.building.fields.address
+        type: string
+  - name: Unit
+    i18n_key: examples.landlord_tenant_sor.records.unit
+    source: native
+    access:
+      read:
+        roles:
+          - admin
+          - operations
+          - maintenance
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+          - MaintenanceRolePolicy
+      create:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+      update:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+      delete:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+    fields:
+      - name: id
+        i18n_key: examples.landlord_tenant_sor.records.unit.fields.id
+        type: uuid
+        rules:
+          unique: true
+      - name: building_id
+        i18n_key: examples.landlord_tenant_sor.records.unit.fields.building_id
+        type: uuid
+        references:
+          record: Building
+          field: id
+      - name: unit_number
+        i18n_key: examples.landlord_tenant_sor.records.unit.fields.unit_number
+        type: string
+      - name: rent_amount
+        i18n_key: examples.landlord_tenant_sor.records.unit.fields.rent_amount
+        type: decimal
+        rules:
+          min: 0
+          precision: 12
+          scale: 2
+      - name: status
+        i18n_key: examples.landlord_tenant_sor.records.unit.fields.status
+        type: string
+  - name: Tenant
+    i18n_key: examples.landlord_tenant_sor.records.tenant
+    source: native
+    access:
+      read:
+        roles:
+          - admin
+          - operations
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+      create:
+        roles:
+          - admin
+          - operations
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+      update:
+        roles:
+          - admin
+          - operations
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+      delete:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+    fields:
+      - name: id
+        i18n_key: examples.landlord_tenant_sor.records.tenant.fields.id
+        type: uuid
+        rules:
+          unique: true
+      - name: full_name
+        i18n_key: examples.landlord_tenant_sor.records.tenant.fields.full_name
+        type: string
+      - name: email
+        i18n_key: examples.landlord_tenant_sor.records.tenant.fields.email
+        type: email
+        rules:
+          max_length: 320
+      - name: phone
+        i18n_key: examples.landlord_tenant_sor.records.tenant.fields.phone
+        type: string
+  - name: Tenancy
+    i18n_key: examples.landlord_tenant_sor.records.tenancy
+    source: native
+    access:
+      read:
+        roles:
+          - admin
+          - operations
+          - finance
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+          - FinanceRolePolicy
+      create:
+        roles:
+          - admin
+          - operations
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+          - TenancyWritePolicy
+      update:
+        roles:
+          - admin
+          - operations
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+          - TenancyWritePolicy
+      delete:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+    fields:
+      - name: id
+        i18n_key: examples.landlord_tenant_sor.records.tenancy.fields.id
+        type: uuid
+        rules:
+          unique: true
+      - name: tenant_id
+        i18n_key: examples.landlord_tenant_sor.records.tenancy.fields.tenant_id
+        type: uuid
+        references:
+          record: Tenant
+          field: id
+      - name: unit_id
+        i18n_key: examples.landlord_tenant_sor.records.tenancy.fields.unit_id
+        type: uuid
+        references:
+          record: Unit
+          field: id
+      - name: start_date
+        i18n_key: examples.landlord_tenant_sor.records.tenancy.fields.start_date
+        type: date
+      - name: end_date
+        i18n_key: examples.landlord_tenant_sor.records.tenancy.fields.end_date
+        type: date
+      - name: status
+        i18n_key: examples.landlord_tenant_sor.records.tenancy.fields.status
+        type: string
+  - name: Payment
+    i18n_key: examples.landlord_tenant_sor.records.payment
+    source: native
+    access:
+      read:
+        roles:
+          - admin
+          - finance
+        policies:
+          - AdminRolePolicy
+          - FinanceRolePolicy
+      create:
+        roles:
+          - admin
+          - finance
+        policies:
+          - AdminRolePolicy
+          - FinanceRolePolicy
+      update:
+        roles:
+          - admin
+          - finance
+        policies:
+          - AdminRolePolicy
+          - FinanceRolePolicy
+      delete:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+    fields:
+      - name: id
+        i18n_key: examples.landlord_tenant_sor.records.payment.fields.id
+        type: uuid
+        rules:
+          unique: true
+      - name: tenancy_id
+        i18n_key: examples.landlord_tenant_sor.records.payment.fields.tenancy_id
+        type: uuid
+        references:
+          record: Tenancy
+          field: id
+      - name: amount
+        i18n_key: examples.landlord_tenant_sor.records.payment.fields.amount
+        type: decimal
+        rules:
+          min: 0
+          precision: 12
+          scale: 2
+      - name: paid_on
+        i18n_key: examples.landlord_tenant_sor.records.payment.fields.paid_on
+        type: date
+      - name: status
+        i18n_key: examples.landlord_tenant_sor.records.payment.fields.status
+        type: string
+  - name: MaintenanceRequest
+    i18n_key: examples.landlord_tenant_sor.records.maintenancerequest
+    source: native
+    access:
+      read:
+        roles:
+          - admin
+          - operations
+          - maintenance
+        policies:
+          - AdminRolePolicy
+          - OperationsRolePolicy
+          - MaintenanceRolePolicy
+      create:
+        roles:
+          - admin
+          - maintenance
+        policies:
+          - AdminRolePolicy
+          - MaintenanceRolePolicy
+      update:
+        roles:
+          - admin
+          - maintenance
+        policies:
+          - AdminRolePolicy
+          - MaintenanceRolePolicy
+      delete:
+        roles:
+          - admin
+        policies:
+          - AdminRolePolicy
+    fields:
+      - name: id
+        i18n_key: examples.landlord_tenant_sor.records.maintenancerequest.fields.id
+        type: uuid
+        rules:
+          unique: true
+      - name: unit_id
+        i18n_key: examples.landlord_tenant_sor.records.maintenancerequest.fields.unit_id
+        type: uuid
+        references:
+          record: Unit
+          field: id
+      - name: building_id
+        i18n_key: examples.landlord_tenant_sor.records.maintenancerequest.fields.building_id
+        type: uuid
+        references:
+          record: Building
+          field: id
+      - name: tenant_id
+        i18n_key: examples.landlord_tenant_sor.records.maintenancerequest.fields.tenant_id
+        type: uuid
+        references:
+          record: Tenant
+          field: id
+      - name: summary
+        i18n_key: examples.landlord_tenant_sor.records.maintenancerequest.fields.summary
+        type: string
+      - name: status
+        i18n_key: examples.landlord_tenant_sor.records.maintenancerequest.fields.status
+        type: string
+ontology:
+  schema: greentic.sorla.ontology.v1
+  concepts:
+    - id: Party
+      i18n_key: examples.landlord_tenant_sor.ontology.concepts.party
+      kind: abstract
+      description: "A legal or natural actor in the domain."
+    - id: Landlord
+      i18n_key: examples.landlord_tenant_sor.ontology.concepts.landlord
+      kind: entity
+      extends:
+        - Party
+      backed_by:
+        record: Landlord
+      sensitivity:
+        classification: confidential
+        pii: true
+    - id: Tenant
+      i18n_key: examples.landlord_tenant_sor.ontology.concepts.tenant
+      kind: entity
+      extends:
+        - Party
+      backed_by:
+        record: Tenant
+      sensitivity:
+        classification: confidential
+        pii: true
+    - id: Building
+      i18n_key: examples.landlord_tenant_sor.ontology.concepts.building
+      kind: entity
+      backed_by:
+        record: Building
+    - id: Unit
+      i18n_key: examples.landlord_tenant_sor.ontology.concepts.unit
+      kind: entity
+      backed_by:
+        record: Unit
+    - id: Tenancy
+      i18n_key: examples.landlord_tenant_sor.ontology.concepts.tenancy
+      kind: entity
+      backed_by:
+        record: Tenancy
+  relationships:
+    - id: owns
+      i18n_key: examples.landlord_tenant_sor.ontology.relationships.owns
+      label: owns
+      from: Landlord
+      to: Building
+      cardinality:
+        from: one
+        to: many
+      backed_by:
+        record: Building
+        from_field: landlord_id
+        to_field: id
+    - id: contains
+      i18n_key: examples.landlord_tenant_sor.ontology.relationships.contains
+      label: contains
+      from: Building
+      to: Unit
+      cardinality:
+        from: one
+        to: many
+      backed_by:
+        record: Unit
+        from_field: building_id
+        to_field: id
+    - id: occupies
+      i18n_key: examples.landlord_tenant_sor.ontology.relationships.occupies
+      label: occupies
+      from: Tenant
+      to: Unit
+      cardinality:
+        from: many
+        to: one
+      backed_by:
+        record: Tenancy
+        from_field: tenant_id
+        to_field: unit_id
+  constraints:
+    - id: tenant_data_policy
+      applies_to:
+        concept: Tenant
+      requires_policy: TenancyWritePolicy
+semantic_aliases:
+  concepts:
+    Building:
+      - property
+      - "rental building"
+    Landlord:
+      - owner
+      - "property owner"
+    Tenancy:
+      - lease
+      - "rental agreement"
+    Tenant:
+      - occupant
+      - renter
+  relationships:
+    contains:
+      - "has unit"
+      - "includes unit"
+    occupies:
+      - "lives in"
+      - rents
+    owns:
+      - "belongs to"
+      - "owned by"
+entity_linking:
+  strategies:
+    - id: tenant_email_match
+      applies_to: Tenant
+      match:
+        source_field: email
+        target_field: email
+      confidence: 0.95
+      sensitivity:
+        classification: confidential
+        pii: true
+    - id: unit_id_match
+      applies_to: Unit
+      match:
+        source_field: unit_id
+        target_field: id
+      confidence: 1.0
+actions:
+  - name: CreateLandlord
+  - name: CreateBuilding
+  - name: CreateUnit
+  - name: AdminUpdateRecord
+  - name: AdminRemoveRecord
+  - name: CreateTenant
+  - name: AssignTenantToUnit
+  - name: UpdateTenancyContract
+  - name: EndTenancyContract
+  - name: RecordRentPayment
+  - name: UpdateRentPayment
+  - name: AddMaintenanceRequest
+  - name: HandleMaintenanceRequest
+  - name: ListActiveTenants
+  - name: UpdateTenantContactPreference
+events:
+  - name: LandlordCreated
+    i18n_key: examples.landlord_tenant_sor.events.landlordcreated
+    record: Landlord
+    kind: domain
+    emits:
+      - name: id
+        type: uuid
+      - name: full_name
+        type: string
+  - name: BuildingCreated
+    i18n_key: examples.landlord_tenant_sor.events.buildingcreated
+    record: Building
+    kind: domain
+    emits:
+      - name: id
+        type: uuid
+      - name: landlord_id
+        type: uuid
+      - name: address
+        type: string
+  - name: UnitCreated
+    i18n_key: examples.landlord_tenant_sor.events.unitcreated
+    record: Unit
+    kind: domain
+    emits:
+      - name: id
+        type: uuid
+      - name: building_id
+        type: uuid
+      - name: unit_number
+        type: string
+  - name: TenantCreated
+    i18n_key: examples.landlord_tenant_sor.events.tenantcreated
+    record: Tenant
+    kind: domain
+    emits:
+      - name: id
+        type: uuid
+      - name: full_name
+        type: string
+      - name: email
+        type: email
+  - name: TenantContactPreferenceUpdated
+    i18n_key: examples.landlord_tenant_sor.events.tenantcontactpreferenceupdated
+    record: Tenant
+    kind: domain
+    emits:
+      - name: tenant_id
+        type: uuid
+      - name: preferred_contact_method
+        type: string
+  - name: RecordUpdated
+    i18n_key: examples.landlord_tenant_sor.events.recordupdated
+    record: Landlord
+    kind: domain
+    emits:
+      - name: record_name
+        type: string
+      - name: record_id
+        type: uuid
+      - name: changed_by_role
+        type: string
+  - name: RecordRemoved
+    i18n_key: examples.landlord_tenant_sor.events.recordremoved
+    record: Landlord
+    kind: domain
+    emits:
+      - name: record_name
+        type: string
+      - name: record_id
+        type: uuid
+      - name: removed_by_role
+        type: string
+      - name: reason
+        type: string
+  - name: TenancyCreated
+    i18n_key: examples.landlord_tenant_sor.events.tenancycreated
+    record: Tenancy
+    kind: domain
+    emits:
+      - name: id
+        type: uuid
+      - name: tenant_id
+        type: uuid
+      - name: unit_id
+        type: uuid
+  - name: TenancyContractUpdated
+    i18n_key: examples.landlord_tenant_sor.events.tenancycontractupdated
+    record: Tenancy
+    kind: domain
+    emits:
+      - name: tenancy_id
+        type: uuid
+      - name: status
+        type: string
+  - name: PaymentRecorded
+    i18n_key: examples.landlord_tenant_sor.events.paymentrecorded
+    record: Payment
+    kind: domain
+    emits:
+      - name: id
+        type: uuid
+      - name: tenancy_id
+        type: uuid
+      - name: amount
+        type: decimal
+  - name: PaymentUpdated
+    i18n_key: examples.landlord_tenant_sor.events.paymentupdated
+    record: Payment
+    kind: domain
+    emits:
+      - name: payment_id
+        type: uuid
+      - name: status
+        type: string
+  - name: MaintenanceRequestCreated
+    i18n_key: examples.landlord_tenant_sor.events.maintenancerequestcreated
+    record: MaintenanceRequest
+    kind: domain
+    emits:
+      - name: id
+        type: uuid
+      - name: unit_id
+        type: uuid
+      - name: building_id
+        type: uuid
+      - name: summary
+        type: string
+  - name: MaintenanceRequestHandled
+    i18n_key: examples.landlord_tenant_sor.events.maintenancerequesthandled
+    record: MaintenanceRequest
+    kind: domain
+    emits:
+      - name: maintenance_request_id
+        type: uuid
+      - name: status
+        type: string
+projections:
+  - name: LandlordPortfolio
+    i18n_key: examples.landlord_tenant_sor.projections.landlordportfolio
+    record: Landlord
+    source_event: LandlordCreated
+    mode: current-state
+  - name: ActiveTenants
+    i18n_key: examples.landlord_tenant_sor.projections.activetenants
+    record: Tenant
+    source_event: TenancyCreated
+    mode: current-state
+  - name: MaintenanceBoard
+    i18n_key: examples.landlord_tenant_sor.projections.maintenanceboard
+    record: MaintenanceRequest
+    source_event: MaintenanceRequestCreated
+    mode: current-state
+metrics:
+  - name: total_tenants
+    i18n_key: examples.landlord_tenant_sor.metrics.total_tenants
+    label: "Total Tenants"
+    source:
+      kind: record
+      name: Tenant
+    measure:
+      aggregate: count
+    depends_on: []
+  - name: active_tenancies
+    i18n_key: examples.landlord_tenant_sor.metrics.active_tenancies
+    label: "Active Tenancies"
+    source:
+      kind: record
+      name: Tenancy
+    measure:
+      aggregate: count
+    filters:
+      - field: status
+        operator: equals
+        value: active
+    depends_on: []
+  - name: total_units
+    i18n_key: examples.landlord_tenant_sor.metrics.total_units
+    label: "Total Units"
+    source:
+      kind: record
+      name: Unit
+    measure:
+      aggregate: count
+    dimensions:
+      - building_id
+    depends_on: []
+  - name: monthly_tenancy_revenue
+    i18n_key: examples.landlord_tenant_sor.metrics.monthly_tenancy_revenue
+    label: "Monthly Tenancy Revenue"
+    source:
+      kind: record
+      name: Payment
+    measure:
+      aggregate: sum
+      field: amount
+    filters:
+      - field: status
+        operator: equals
+        value: settled
+    time:
+      field: paid_on
+      grain: month
+    unit: EUR
+    dimensions:
+      - tenancy_id
+    depends_on: []
+  - name: occupancy_rate
+    i18n_key: examples.landlord_tenant_sor.metrics.occupancy_rate
+    label: "Occupancy Rate"
+    unit: percent
+    dimensions:
+      - building_id
+    formula: "active_tenancies / total_units"
+    depends_on:
+      - active_tenancies
+      - total_units
+  - name: open_maintenance_records_per_building
+    i18n_key: examples.landlord_tenant_sor.metrics.open_maintenance_records_per_building
+    label: "Open Maintenance Records per Building"
+    source:
+      kind: record
+      name: MaintenanceRequest
+    measure:
+      aggregate: count
+    filters:
+      - field: status
+        operator: equals
+        value: open
+    dimensions:
+      - building_id
+    depends_on: []
+provider_requirements:
+  - category: storage
+    capabilities:
+      - event-log
+      - projections
+  - category: event-store
+    capabilities:
+      - append
+      - read-stream
+policies:
+  - name: AdminRolePolicy
+  - name: MaintenanceRolePolicy
+  - name: FinanceRolePolicy
+  - name: OperationsRolePolicy
+  - name: TenancyWritePolicy
+approvals:
+  - name: AdminRecordApproval
+  - name: LandlordRecordApproval
+migrations:
+  - name: landlord-tenant-sor-compatibility
+    compatibility: additive
+    projection_updates: []
+agent_endpoints:
+  - id: create_landlord
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_landlord
+    title: "Create landlord"
+    intent: "Admin-only creation of a landlord record."
+    inputs:
+      - name: full_name
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_landlord.inputs.full_name
+        type: string
+        required: true
+      - name: email
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_landlord.inputs.email
+        type: email
+        required: true
+        sensitive: true
+    outputs:
+      - name: landlord_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_landlord.outputs.landlord_id
+        type: uuid
+    side_effects:
+      - event.LandlordCreated
+    emits:
+      event: LandlordCreated
+      stream: landlord-tenant-sor/admin
+      payload:
+        email: "$input.email"
+        full_name: "$input.full_name"
+        id: "$generated.landlord_id"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - CreateLandlord
+      events:
+        - LandlordCreated
+      policies:
+        - AdminRolePolicy
+      approvals:
+        - AdminRecordApproval
+    authorization:
+      roles:
+        any_of:
+          - admin
+        all_of: []
+      policies:
+        - AdminRolePolicy
+    execution:
+      kind: record-create
+      record: Landlord
+  - id: create_building
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_building
+    title: "Create building"
+    intent: "Admin-only creation of a building and association to a landlord."
+    inputs:
+      - name: landlord_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_building.inputs.landlord_id
+        type: uuid
+        required: true
+      - name: address
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_building.inputs.address
+        type: string
+        required: true
+    outputs:
+      - name: building_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_building.outputs.building_id
+        type: uuid
+    side_effects:
+      - event.BuildingCreated
+    emits:
+      event: BuildingCreated
+      stream: landlord-tenant-sor/{landlord_id}
+      payload:
+        address: "$input.address"
+        id: "$generated.building_id"
+        landlord_id: "$input.landlord_id"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - CreateBuilding
+      events:
+        - BuildingCreated
+      policies:
+        - AdminRolePolicy
+      approvals:
+        - AdminRecordApproval
+    authorization:
+      roles:
+        any_of:
+          - admin
+        all_of: []
+      policies:
+        - AdminRolePolicy
+    execution:
+      kind: record-create
+      record: Building
+  - id: create_unit
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_unit
+    title: "Create unit"
+    intent: "Admin-only creation of a unit and association to a building."
+    inputs:
+      - name: building_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_unit.inputs.building_id
+        type: uuid
+        required: true
+      - name: unit_number
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_unit.inputs.unit_number
+        type: string
+        required: true
+      - name: rent_amount
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_unit.inputs.rent_amount
+        type: decimal
+        required: true
+    outputs:
+      - name: unit_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_unit.outputs.unit_id
+        type: uuid
+    side_effects:
+      - event.UnitCreated
+    emits:
+      event: UnitCreated
+      stream: landlord-tenant-sor/{building_id}
+      payload:
+        building_id: "$input.building_id"
+        id: "$generated.unit_id"
+        rent_amount: "$input.rent_amount"
+        status: available
+        unit_number: "$input.unit_number"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - CreateUnit
+      events:
+        - UnitCreated
+      policies:
+        - AdminRolePolicy
+      approvals:
+        - AdminRecordApproval
+    authorization:
+      roles:
+        any_of:
+          - admin
+        all_of: []
+      policies:
+        - AdminRolePolicy
+    execution:
+      kind: record-create
+      record: Unit
+  - id: admin_update_record
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_update_record
+    title: "Admin update record"
+    intent: "Admin-only controlled update for any landlord-tenant system record."
+    inputs:
+      - name: record_name
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_update_record.inputs.record_name
+        type: string
+        required: true
+        enum_values:
+          - Landlord
+          - Building
+          - Unit
+          - Tenant
+          - Tenancy
+          - Payment
+          - MaintenanceRequest
+      - name: record_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_update_record.inputs.record_id
+        type: uuid
+        required: true
+      - name: patch_json
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_update_record.inputs.patch_json
+        type: string
+        required: true
+    outputs:
+      - name: record_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_update_record.outputs.record_id
+        type: uuid
+    side_effects:
+      - event.RecordUpdated
+    emits:
+      event: RecordUpdated
+      stream: landlord-tenant-sor/admin
+      payload:
+        changed_by_role: admin
+        record_id: "$input.record_id"
+        record_name: "$input.record_name"
+    risk: high
+    approval: required
+    backing:
+      actions:
+        - AdminUpdateRecord
+      events:
+        - RecordUpdated
+      policies:
+        - AdminRolePolicy
+      approvals:
+        - AdminRecordApproval
+    authorization:
+      roles:
+        any_of:
+          - admin
+        all_of: []
+      policies:
+        - AdminRolePolicy
+    execution:
+      kind: record-update
+      record_selector: "$input.record_name"
+  - id: admin_remove_record
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_remove_record
+    title: "Admin remove record"
+    intent: "Admin-only controlled removal for any landlord-tenant system record."
+    inputs:
+      - name: record_name
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_remove_record.inputs.record_name
+        type: string
+        required: true
+        enum_values:
+          - Landlord
+          - Building
+          - Unit
+          - Tenant
+          - Tenancy
+          - Payment
+          - MaintenanceRequest
+      - name: record_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_remove_record.inputs.record_id
+        type: uuid
+        required: true
+      - name: reason
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_remove_record.inputs.reason
+        type: string
+        required: true
+    outputs:
+      - name: record_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.admin_remove_record.outputs.record_id
+        type: uuid
+    side_effects:
+      - event.RecordRemoved
+    emits:
+      event: RecordRemoved
+      stream: landlord-tenant-sor/admin
+      payload:
+        reason: "$input.reason"
+        record_id: "$input.record_id"
+        record_name: "$input.record_name"
+        removed_by_role: admin
+    risk: high
+    approval: required
+    backing:
+      actions:
+        - AdminRemoveRecord
+      events:
+        - RecordRemoved
+      policies:
+        - AdminRolePolicy
+      approvals:
+        - AdminRecordApproval
+    authorization:
+      roles:
+        any_of:
+          - admin
+        all_of: []
+      policies:
+        - AdminRolePolicy
+    execution:
+      kind: record-remove
+      record_selector: "$input.record_name"
+  - id: create_tenant
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_tenant
+    title: "Create tenant"
+    intent: "Create a tenant record from structured agent input."
+    inputs:
+      - name: full_name
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_tenant.inputs.full_name
+        type: string
+        required: true
+      - name: email
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_tenant.inputs.email
+        type: email
+        required: true
+        sensitive: true
+      - name: phone
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_tenant.inputs.phone
+        type: string
+        required: false
+    outputs:
+      - name: tenant_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.create_tenant.outputs.tenant_id
+        type: uuid
+    side_effects:
+      - event.TenantCreated
+    emits:
+      event: TenantCreated
+      stream: landlord-tenant-sor/tenants
+      payload:
+        email: "$input.email"
+        full_name: "$input.full_name"
+        id: "$generated.tenant_id"
+        phone: "$input.phone"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - CreateTenant
+      events:
+        - TenantCreated
+      policies:
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+      approvals:
+        - LandlordRecordApproval
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - operations
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+    execution:
+      kind: record-create
+      record: Tenant
+  - id: assign_tenant_to_unit
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.assign_tenant_to_unit
+    title: "Assign tenant to unit"
+    intent: "Create an active tenancy for a tenant and rental unit."
+    inputs:
+      - name: tenant_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.assign_tenant_to_unit.inputs.tenant_id
+        type: uuid
+        required: true
+      - name: unit_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.assign_tenant_to_unit.inputs.unit_id
+        type: uuid
+        required: true
+      - name: start_date
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.assign_tenant_to_unit.inputs.start_date
+        type: date
+        required: true
+    outputs:
+      - name: tenancy_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.assign_tenant_to_unit.outputs.tenancy_id
+        type: uuid
+    side_effects:
+      - event.TenancyCreated
+    emits:
+      event: TenancyCreated
+      stream: landlord-tenant-sor/{tenant_id}
+      payload:
+        id: "$generated.tenancy_id"
+        start_date: "$input.start_date"
+        status: active
+        tenant_id: "$input.tenant_id"
+        unit_id: "$input.unit_id"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - AssignTenantToUnit
+      events:
+        - TenancyCreated
+      policies:
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - operations
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+    execution:
+      kind: record-create
+      record: Tenancy
+  - id: record_rent_payment
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.record_rent_payment
+    title: "Record rent payment"
+    intent: "Record a rent payment against an active tenancy."
+    inputs:
+      - name: tenancy_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.record_rent_payment.inputs.tenancy_id
+        type: uuid
+        required: true
+      - name: amount
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.record_rent_payment.inputs.amount
+        type: decimal
+        required: true
+    outputs:
+      - name: payment_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.record_rent_payment.outputs.payment_id
+        type: string
+    side_effects:
+      - event.PaymentRecorded
+    emits:
+      event: PaymentRecorded
+      stream: landlord-tenant-sor/{tenancy_id}
+      payload:
+        amount: "$input.amount"
+        id: "$generated.payment_id"
+        tenancy_id: "$input.tenancy_id"
+    risk: low
+    approval: optional
+    backing:
+      actions:
+        - RecordRentPayment
+      events:
+        - PaymentRecorded
+      policies:
+        - FinanceRolePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - finance
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - FinanceRolePolicy
+    execution:
+      kind: record-create
+      record: Payment
+  - id: add_maintenance_request
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.add_maintenance_request
+    title: "Add maintenance request"
+    intent: "Add a maintenance request for a rental unit."
+    inputs:
+      - name: unit_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.add_maintenance_request.inputs.unit_id
+        type: uuid
+        required: true
+      - name: building_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.add_maintenance_request.inputs.building_id
+        type: uuid
+        required: true
+      - name: summary
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.add_maintenance_request.inputs.summary
+        type: string
+        required: true
+    outputs:
+      - name: maintenance_request_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.add_maintenance_request.outputs.maintenance_request_id
+        type: string
+    side_effects:
+      - event.MaintenanceRequestCreated
+    emits:
+      event: MaintenanceRequestCreated
+      stream: landlord-tenant-sor/{unit_id}
+      payload:
+        id: "$generated.maintenance_request_id"
+        building_id: "$input.building_id"
+        summary: "$input.summary"
+        unit_id: "$input.unit_id"
+    risk: low
+    approval: optional
+    backing:
+      actions:
+        - AddMaintenanceRequest
+      events:
+        - MaintenanceRequestCreated
+      policies:
+        - MaintenanceRolePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - maintenance
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - MaintenanceRolePolicy
+    execution:
+      kind: record-create
+      record: MaintenanceRequest
+  - id: update_tenancy_contract
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenancy_contract
+    title: "Update tenancy contract"
+    intent: "Operations role update of tenancy contract dates or status."
+    inputs:
+      - name: tenancy_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenancy_contract.inputs.tenancy_id
+        type: uuid
+        required: true
+      - name: status
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenancy_contract.inputs.status
+        type: string
+        required: true
+        enum_values:
+          - draft
+          - active
+          - ending
+          - ended
+      - name: end_date
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenancy_contract.inputs.end_date
+        type: date
+        required: false
+    outputs:
+      - name: tenancy_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenancy_contract.outputs.tenancy_id
+        type: uuid
+    side_effects:
+      - event.TenancyContractUpdated
+    emits:
+      event: TenancyContractUpdated
+      stream: landlord-tenant-sor/{tenancy_id}
+      payload:
+        status: "$input.status"
+        tenancy_id: "$input.tenancy_id"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - UpdateTenancyContract
+      events:
+        - TenancyContractUpdated
+      policies:
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - operations
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+    execution:
+      kind: record-update
+      record: Tenancy
+  - id: end_tenancy_contract
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.end_tenancy_contract
+    title: "End tenancy contract"
+    intent: "Operations role termination of an active tenancy contract."
+    inputs:
+      - name: tenancy_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.end_tenancy_contract.inputs.tenancy_id
+        type: uuid
+        required: true
+      - name: end_date
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.end_tenancy_contract.inputs.end_date
+        type: date
+        required: true
+    outputs:
+      - name: tenancy_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.end_tenancy_contract.outputs.tenancy_id
+        type: uuid
+    side_effects:
+      - event.TenancyContractUpdated
+    emits:
+      event: TenancyContractUpdated
+      stream: landlord-tenant-sor/{tenancy_id}
+      payload:
+        status: ended
+        tenancy_id: "$input.tenancy_id"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - EndTenancyContract
+      events:
+        - TenancyContractUpdated
+      policies:
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - operations
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - OperationsRolePolicy
+        - TenancyWritePolicy
+    execution:
+      kind: record-update
+      record: Tenancy
+  - id: update_rent_payment
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_rent_payment
+    title: "Update rent payment"
+    intent: "Finance role update of a rent payment status."
+    inputs:
+      - name: payment_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_rent_payment.inputs.payment_id
+        type: uuid
+        required: true
+      - name: status
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_rent_payment.inputs.status
+        type: string
+        required: true
+        enum_values:
+          - pending
+          - settled
+          - failed
+          - refunded
+    outputs:
+      - name: payment_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_rent_payment.outputs.payment_id
+        type: uuid
+    side_effects:
+      - event.PaymentUpdated
+    emits:
+      event: PaymentUpdated
+      stream: landlord-tenant-sor/{payment_id}
+      payload:
+        payment_id: "$input.payment_id"
+        status: "$input.status"
+    risk: medium
+    approval: policy-driven
+    backing:
+      actions:
+        - UpdateRentPayment
+      events:
+        - PaymentUpdated
+      policies:
+        - FinanceRolePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - finance
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - FinanceRolePolicy
+    execution:
+      kind: record-update
+      record: Payment
+  - id: handle_maintenance_request
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.handle_maintenance_request
+    title: "Handle maintenance request"
+    intent: "Maintenance role update of a maintenance request lifecycle status."
+    inputs:
+      - name: maintenance_request_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.handle_maintenance_request.inputs.maintenance_request_id
+        type: uuid
+        required: true
+      - name: status
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.handle_maintenance_request.inputs.status
+        type: string
+        required: true
+        enum_values:
+          - open
+          - in_progress
+          - resolved
+          - closed
+      - name: resolution_note
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.handle_maintenance_request.inputs.resolution_note
+        type: string
+        required: false
+    outputs:
+      - name: maintenance_request_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.handle_maintenance_request.outputs.maintenance_request_id
+        type: uuid
+    side_effects:
+      - event.MaintenanceRequestHandled
+    emits:
+      event: MaintenanceRequestHandled
+      stream: landlord-tenant-sor/{maintenance_request_id}
+      payload:
+        maintenance_request_id: "$input.maintenance_request_id"
+        status: "$input.status"
+    risk: low
+    approval: policy-driven
+    backing:
+      actions:
+        - HandleMaintenanceRequest
+      events:
+        - MaintenanceRequestHandled
+      policies:
+        - MaintenanceRolePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - maintenance
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - MaintenanceRolePolicy
+    execution:
+      kind: record-update
+      record: MaintenanceRequest
+  - id: list_active_tenants
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.list_active_tenants
+    title: "List active tenants"
+    intent: "Show all active tenants for a landlord."
+    inputs:
+      - name: landlord_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.list_active_tenants.inputs.landlord_id
+        type: uuid
+        required: true
+    outputs:
+      - name: active_tenants
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.list_active_tenants.outputs.active_tenants
+        type: array
+    side_effects: []
+    risk: low
+    approval: none
+    backing:
+      actions:
+        - ListActiveTenants
+      events: []
+      policies:
+        - OperationsRolePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - operations
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - OperationsRolePolicy
+    execution:
+      kind: record-query
+      record: Tenant
+  - id: update_tenant_contact_preference
+    i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenant_contact_preference
+    title: "Update tenant contact preference"
+    intent: "Update a tenant preferred contact method after schema migration."
+    inputs:
+      - name: tenant_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenant_contact_preference.inputs.tenant_id
+        type: uuid
+        required: true
+      - name: preferred_contact_method
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenant_contact_preference.inputs.preferred_contact_method
+        type: string
+        required: true
+        enum_values:
+          - email
+          - phone
+    outputs:
+      - name: tenant_id
+        i18n_key: examples.landlord_tenant_sor.agent_endpoints.update_tenant_contact_preference.outputs.tenant_id
+        type: uuid
+    side_effects:
+      - event.TenantContactPreferenceUpdated
+    emits:
+      event: TenantContactPreferenceUpdated
+      stream: landlord-tenant-sor/{tenant_id}
+      payload:
+        preferred_contact_method: "$input.preferred_contact_method"
+        tenant_id: "$input.tenant_id"
+    risk: low
+    approval: optional
+    backing:
+      actions:
+        - UpdateTenantContactPreference
+      events:
+        - TenantContactPreferenceUpdated
+      policies:
+        - OperationsRolePolicy
+      approvals: []
+    authorization:
+      roles:
+        any_of:
+          - admin
+          - operations
+        all_of: []
+      policies:
+        - AdminRolePolicy
+        - OperationsRolePolicy
+    execution:
+      kind: record-update
+      record: Tenant
+# --- END GREENTIC-SORLA GENERATED ---

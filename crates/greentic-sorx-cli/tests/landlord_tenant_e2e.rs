@@ -6,10 +6,16 @@ use std::time::{Duration, Instant};
 use greentic_sorx_core::default_start_schema;
 use greentic_sorx_pack::{
     BusinessAction, BusinessActionCatalog, BusinessActionExecution, BusinessActionIdempotency,
-    BusinessActionLock, BusinessActionLockEntry, BusinessActionRisk, PackIdentity, PackManifest,
-    contract_hash,
+    BusinessActionLock, BusinessActionLockEntry, BusinessActionRisk, PackIdentity, PackLock,
+    PackLockEntry, PackManifest as SorxPackManifest, contract_hash,
 };
+use greentic_types::{
+    PackId, PackKind as GpackKind, PackManifest as GpackManifest, PackSignatures,
+    encode_pack_manifest,
+};
+use semver::Version;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -226,12 +232,29 @@ impl LandlordTenantFixture {
     fn new() -> Self {
         let temp = TempDir::new().unwrap();
         let pack = temp.path().join("landlord-tenant.gtpack");
+        let mut entries = pack_entries()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if let Some(manifest) = entries.get("pack.cbor").cloned() {
+            entries.insert("manifest.cbor".to_string(), gpack_manifest_bytes());
+            entries.insert(
+                "manifest.json".to_string(),
+                serde_json::to_vec_pretty(
+                    &ciborium::de::from_reader::<SorxPackManifest, _>(manifest.as_slice()).unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        entries.insert(
+            "pack.lock.cbor".to_string(),
+            encode_cbor(&lock_for_entries(&entries)),
+        );
         let file = std::fs::File::create(&pack).unwrap();
         let mut writer = ZipWriter::new(file);
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .unix_permissions(0o644);
-        for (name, bytes) in pack_entries() {
+        for (name, bytes) in entries {
             writer.start_file(name, options).unwrap();
             writer.write_all(&bytes).unwrap();
         }
@@ -259,7 +282,7 @@ fn pack_entries() -> Vec<(String, Vec<u8>)> {
             contract_hash: contract_hash(&business_action),
         }],
     };
-    let manifest = PackManifest {
+    let manifest = SorxPackManifest {
         schema: "greentic.gtpack.manifest.sorla.v1".to_string(),
         pack: PackIdentity {
             name: "landlord-tenant-sor".to_string(),
@@ -322,6 +345,51 @@ fn pack_entries() -> Vec<(String, Vec<u8>)> {
             serde_json::to_vec_pretty(&default_start_schema()).unwrap(),
         ),
     ]
+}
+
+fn encode_cbor<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    let mut out = Vec::new();
+    ciborium::ser::into_writer(value, &mut out).unwrap();
+    out
+}
+
+fn lock_for_entries(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> PackLock {
+    PackLock {
+        schema: "greentic.gtpack.lock.sorla.v1".to_string(),
+        entries: entries
+            .iter()
+            .filter(|(path, _)| path.as_str() != "pack.lock.cbor")
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    PackLockEntry {
+                        size: bytes.len() as u64,
+                        sha256: hex::encode(Sha256::digest(bytes)),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn gpack_manifest_bytes() -> Vec<u8> {
+    encode_pack_manifest(&GpackManifest {
+        schema_version: "pack-v1".to_string(),
+        pack_id: "landlord-tenant-sor".parse::<PackId>().unwrap(),
+        name: Some("landlord-tenant-sor".to_string()),
+        version: Version::parse("0.1.0").unwrap(),
+        kind: GpackKind::Application,
+        publisher: "greentic-sorx-tests".to_string(),
+        components: Vec::new(),
+        flows: Vec::new(),
+        dependencies: Vec::new(),
+        capabilities: Vec::new(),
+        secret_requirements: Vec::new(),
+        signatures: PackSignatures::default(),
+        bootstrap: None,
+        extensions: None,
+    })
+    .unwrap()
 }
 
 fn business_action() -> BusinessAction {

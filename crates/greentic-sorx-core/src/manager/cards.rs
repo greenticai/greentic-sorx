@@ -68,18 +68,29 @@ pub fn render_record_detail_card(
         .records
         .iter()
         .find(|record| record.record == record_name)?;
-    let mut body = form_body(&record.label, record, FormScope::Record);
-    body.push(text_block(&format!("id: {id}"), "default", false));
-    Some(adaptive_card(
-        view,
-        "manager.record.detail",
-        body,
-        submit_actions(
+    let can_update = update_action(view, &record.record).is_some();
+    let mut body = form_body(
+        &record.label,
+        record,
+        if can_update {
+            FormScope::RecordEditable
+        } else {
+            FormScope::RecordReadOnly
+        },
+    );
+    if can_update {
+        body.push(form_action_set(
             &view.locale,
             &record.record,
             Some(id),
             update_action(view, &record.record),
-        ),
+        ));
+    }
+    Some(adaptive_card(
+        view,
+        "manager.record.detail",
+        body,
+        Vec::new(),
     ))
 }
 
@@ -182,7 +193,8 @@ fn adaptive_card(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormScope {
     Create,
-    Record,
+    RecordEditable,
+    RecordReadOnly,
 }
 
 fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<Value> {
@@ -203,10 +215,16 @@ fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<V
                 "Default",
                 false,
             ));
-        } else if field.generated && field.value.is_none() {
+        } else if field.generated && field.value.is_none()
+            || (matches!(scope, FormScope::RecordEditable | FormScope::RecordReadOnly)
+                && is_uuid_detail_field(field))
+        {
             continue;
-        } else if field.read_only {
-            body.push(text_block(&field.label, "Default", false));
+        } else if scope == FormScope::RecordReadOnly
+            || field.read_only
+            || (scope == FormScope::RecordEditable && is_uuid_detail_field(field))
+        {
+            body.push(read_only_field_block(field));
         } else {
             body.push(input_for_field(field));
         }
@@ -214,8 +232,36 @@ fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<V
     body
 }
 
+fn read_only_field_block(field: &ManagerFieldView) -> Value {
+    text_block(
+        &format!(
+            "{}: {}",
+            field.label,
+            field
+                .value
+                .as_ref()
+                .map(input_value_string)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        "Default",
+        false,
+    )
+}
+
+fn is_uuid_detail_field(field: &ManagerFieldView) -> bool {
+    let name = field.name.to_ascii_lowercase();
+    name == "id"
+        || name.ends_with("_id")
+        || name.ends_with("_uuid")
+        || canonical_scalar_type(field.json_type.as_deref()) == "uuid"
+}
+
 fn input_for_field(field: &ManagerFieldView) -> Value {
     if field.relationship.is_some() && canonical_scalar_type(field.json_type.as_deref()) == "uuid" {
+        if let Some(choices) = choice_values(field) {
+            return choice_input(field, choices);
+        }
         return relationship_picker_input(field);
     }
     if let Some(choices) = choice_values(field) {
@@ -550,10 +596,10 @@ fn canonical_scalar_type(value: Option<&str>) -> &'static str {
 }
 
 fn submit_actions(
-    locale: &str,
     record: &str,
     id: Option<&str>,
     action: Option<&ManagerActionView>,
+    title: &str,
 ) -> Vec<Value> {
     let mut data = json!({
         "record": record
@@ -568,7 +614,7 @@ fn submit_actions(
     }
     vec![json!({
         "type": "Action.Submit",
-        "title": localized_static(locale, "Submit"),
+        "title": title,
         "data": data
     })]
 }
@@ -579,7 +625,12 @@ fn form_action_set(
     id: Option<&str>,
     action: Option<&ManagerActionView>,
 ) -> Value {
-    let mut actions = submit_actions(locale, record, id, action);
+    let title = if id.is_some() {
+        localized_static(locale, "Save")
+    } else {
+        localized_static(locale, "Submit")
+    };
+    let mut actions = submit_actions(record, id, action, title);
     let target = format!("records/{record}");
     actions.push(json!({
         "type": "Action.Submit",
@@ -615,6 +666,7 @@ fn localized_static<'a>(locale: &str, text: &'a str) -> &'a str {
         "Cancel" => "Cancelar",
         "Dashboard" => "Panel",
         "Submit" => "Enviar",
+        "Save" => "Guardar",
         "Search" => "Buscar",
         "Select" => "Seleccionar",
         "Relationships" => "Relaciones",
@@ -660,7 +712,8 @@ fn create_action<'a>(view: &'a ManagerViewModel, record: &str) -> Option<&'a Man
 
 fn update_action<'a>(view: &'a ManagerViewModel, record: &str) -> Option<&'a ManagerActionView> {
     view.actions.iter().find(|action| {
-        action.record.as_deref() == Some(record) && action_matches_operation(action, "update")
+        matches!(action.record.as_deref(), Some(action_record) if action_record == record || action_record == "Record")
+            && action_matches_operation(action, "update")
     })
 }
 
@@ -866,6 +919,77 @@ mod tests {
         assert!(!body.iter().any(|item| item["id"] == "patch_json"));
         assert!(!body.iter().any(|item| item["id"] == "reason"));
         assert!(!body.iter().any(|item| item["id"] == "record_id"));
+    }
+
+    #[test]
+    fn detail_card_is_read_only_without_update_action() {
+        let mut view = view();
+        view.records[0].fields[0].value = Some(json!("record-1"));
+
+        let card = render_record_detail_card(&view, "RecordAlpha", "record-1").unwrap();
+        let body = card["body"].as_array().unwrap();
+        assert!(!body.iter().any(|item| item["text"] == "Id: record-1"));
+        assert!(!body.iter().any(|item| item["type"] == "Input.Text"));
+        assert!(card["actions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn detail_card_allows_save_but_never_edits_uuid_fields() {
+        let mut view = view();
+        view.actions.push(crate::manager::ManagerActionView {
+            action_id: "record_alpha.update".to_string(),
+            endpoint_id: "record_alpha.update".to_string(),
+            operation_id: "record_alpha.update".to_string(),
+            record: Some("RecordAlpha".to_string()),
+            label_key: "action.record_alpha.update.label".to_string(),
+            label: "Update Record Alpha".to_string(),
+            risk: "low".to_string(),
+            approval_required: false,
+            policy: ManagerPolicyDecision::allow(),
+        });
+        view.records[0].fields = vec![
+            ManagerFieldView {
+                name: "id".to_string(),
+                label_key: "field.record_alpha.id.label".to_string(),
+                label: "Id".to_string(),
+                json_type: Some("uuid".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: Some(json!("record-1")),
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "name".to_string(),
+                label_key: "field.record_alpha.name.label".to_string(),
+                label: "Name".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: Some(json!("Alpha")),
+                policy: ManagerPolicyDecision::allow(),
+            },
+        ];
+
+        let card = render_record_detail_card(&view, "RecordAlpha", "record-1").unwrap();
+        let body = card["body"].as_array().unwrap();
+        assert!(!body.iter().any(|item| item["text"] == "Id: record-1"));
+        assert!(!body.iter().any(|item| item["id"] == "id"));
+        assert!(body.iter().any(|item| item["id"] == "name"));
+        assert!(body.iter().any(|item| {
+            item["type"] == "ActionSet"
+                && item["actions"]
+                    .as_array()
+                    .is_some_and(|actions| actions.iter().any(|action| action["title"] == "Save"))
+        }));
+        assert!(card["actions"].as_array().unwrap().is_empty());
     }
 
     fn view() -> ManagerViewModel {

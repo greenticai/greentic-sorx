@@ -121,6 +121,31 @@ pub fn generate_manager_view(
 
     for endpoint in router.endpoints.values() {
         if endpoint.record_selector {
+            let decision = policy.decide(endpoint);
+            actions.push(ManagerActionView {
+                action_id: endpoint.endpoint_id.clone(),
+                endpoint_id: endpoint.endpoint_id.clone(),
+                operation_id: endpoint.operation_id.clone(),
+                record: endpoint.entity.clone(),
+                label_key: action_label_key(endpoint),
+                label: humanize_identifier(&endpoint.endpoint_id),
+                risk: format!("{:?}", endpoint.risk).to_ascii_lowercase(),
+                approval_required: matches!(decision.action, PolicyAction::RequireApproval)
+                    || endpoint
+                        .approval
+                        .as_ref()
+                        .is_some_and(|approval| approval.required),
+                policy: ManagerPolicyDecision {
+                    effect: match decision.action {
+                        PolicyAction::Execute => ManagerPolicyEffect::Allow,
+                        PolicyAction::RequireApproval => ManagerPolicyEffect::RequiresApproval,
+                        PolicyAction::Deny => ManagerPolicyEffect::Deny,
+                    },
+                    reason_code: Some(decision.reason),
+                    message_key: None,
+                    audit_hint: None,
+                },
+            });
             continue;
         }
         let Some(record) = endpoint.entity.clone() else {
@@ -131,13 +156,18 @@ pub fn generate_manager_view(
             .or_insert_with(|| RecordBuilder::new(&record, &endpoint.collection));
         builder.collection = endpoint.collection.clone();
         builder.endpoint_ids.insert(endpoint.endpoint_id.clone());
-        if !endpoint.record_selector {
+        if !matches!(endpoint.operation, OperationKind::Query) {
             builder.collect_schema_fields(
                 endpoint.input_schema.as_ref(),
                 matches!(endpoint.operation, OperationKind::Create),
             );
         }
-        builder.collect_schema(endpoint.output_schema.as_ref());
+        if !matches!(
+            endpoint.operation,
+            OperationKind::Query | OperationKind::Command(_)
+        ) {
+            builder.collect_schema(endpoint.output_schema.as_ref());
+        }
 
         let decision = policy.decide(endpoint);
         actions.push(ManagerActionView {
@@ -321,9 +351,22 @@ fn action_label_key(endpoint: &EndpointDefinition) -> String {
                 .map(manager_key)
                 .unwrap_or_else(|| manager_key(&endpoint.endpoint_id))
         ),
-        OperationKind::Command(_) => {
-            format!("action.{}.label", manager_key(&endpoint.endpoint_id))
+        OperationKind::Command(ref spec)
+            if spec
+                .kind
+                .as_deref()
+                .is_some_and(|kind| matches!(kind, "record-create" | "record_create")) =>
+        {
+            format!(
+                "action.{}.create.label",
+                endpoint
+                    .entity
+                    .as_deref()
+                    .map(manager_key)
+                    .unwrap_or_else(|| manager_key(&endpoint.endpoint_id))
+            )
         }
+        OperationKind::Command(_) => format!("action.{}.label", manager_key(&endpoint.endpoint_id)),
     }
 }
 

@@ -85,6 +85,9 @@ cargo test --workspace --all-targets --all-features
 step "cargo build"
 cargo build --all-features
 
+step "complex SoRLa WebChat e2e"
+bash scripts/e2e/run-complex-sorla-webchat.sh
+
 step "cargo doc"
 cargo doc --no-deps --all-features
 

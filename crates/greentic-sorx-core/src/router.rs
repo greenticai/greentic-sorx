@@ -288,6 +288,9 @@ fn parse_command_spec(value: Option<&Value>, path: &str) -> SorxResult<CommandSp
             &format!("{path}.command.steps[{index}]"),
         )?);
     }
+    if steps.is_empty() {
+        steps = parse_command_shorthand(object, path)?;
+    }
     Ok(CommandSpec {
         kind: string_field(value, "kind"),
         action: string_field(value, "action"),
@@ -312,6 +315,43 @@ fn parse_command_spec(value: Option<&Value>, path: &str) -> SorxResult<CommandSp
             .or_else(|| object.get("output"))
             .cloned(),
     })
+}
+
+fn parse_command_shorthand(
+    object: &serde_json::Map<String, Value>,
+    path: &str,
+) -> SorxResult<Vec<CommandStep>> {
+    let Some(kind) = object.get("kind").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    match kind {
+        "record-create" | "record_create" => {
+            let record = object
+                .get("record")
+                .or_else(|| object.get("entity"))
+                .or_else(|| object.get("target"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SorxError::at_path(
+                        "invalid_gateway",
+                        "record-create command is missing record",
+                        format!("{path}.command.record"),
+                    )
+                })?
+                .to_string();
+            Ok(vec![CommandStep::Create {
+                as_name: Some("record".to_string()),
+                when: object.get("when").cloned(),
+                entity: Some(record),
+                collection: string_field_from_object(object, "collection"),
+                input: object
+                    .get("input")
+                    .or_else(|| object.get("values"))
+                    .cloned(),
+            }])
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 fn parse_command_step(value: &Value, path: &str) -> SorxResult<CommandStep> {
@@ -531,6 +571,10 @@ fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(ToString::to_string)
+}
+
+fn string_field_from_object(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    object.get(key)?.as_str().map(ToString::to_string)
 }
 
 fn infer_operation(operation_id: &str) -> Option<OperationKind> {
