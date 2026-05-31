@@ -965,17 +965,20 @@ impl HttpRuntime {
                         catalog
                             .metrics
                             .iter()
-                            .map(|metric| RuntimeMetricCardRow {
-                                name: metric.name.clone(),
-                                label: metric.label.clone(),
-                                result: self
-                                    .manager_metric_query_result(
-                                        &view.tenant_id,
-                                        &metric.name,
-                                        Vec::new(),
-                                    )
-                                    .ok(),
-                                error: None,
+                            .map(|metric| {
+                                let query_result = self.manager_metric_query_result(
+                                    &view.tenant_id,
+                                    &metric.name,
+                                    Vec::new(),
+                                );
+                                RuntimeMetricCardRow {
+                                    name: metric.name.clone(),
+                                    label: metric.label.clone(),
+                                    result: query_result.as_ref().ok().cloned(),
+                                    error: query_result
+                                        .err()
+                                        .map(|err| metric_query_error_message(&err)),
+                                }
                             })
                             .collect::<Vec<_>>()
                     })
@@ -999,16 +1002,27 @@ impl HttpRuntime {
                     .as_ref()
                     .as_ref()
                     .and_then(|catalog| catalog.metric(metric_name).ok());
-                let result = metric.and_then(|metric| {
+                let query_result = metric.map(|metric| {
                     self.manager_metric_query_result(
                         &view.tenant_id,
                         metric_name,
                         default_metric_dimensions(metric),
                     )
-                    .ok()
                 });
-                let card =
-                    render_runtime_metric_detail_card(&view, metric_name, metric, result.as_ref());
+                let result = query_result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok());
+                let error = query_result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().err())
+                    .map(metric_query_error_message);
+                let card = render_runtime_metric_detail_card(
+                    &view,
+                    metric_name,
+                    metric,
+                    result,
+                    error.as_deref(),
+                );
                 json_response(200, card)
             }
             Err(err) => sorx_error_response(400, err),
@@ -3949,6 +3963,7 @@ fn render_runtime_metric_detail_card(
     metric_name: &str,
     metric: Option<&RuntimeMetric>,
     result: Option<&MetricQueryResult>,
+    error: Option<&str>,
 ) -> Value {
     let title = metric
         .and_then(|metric| metric.label.as_deref())
@@ -3969,6 +3984,17 @@ fn render_runtime_metric_detail_card(
         }));
         if let Some(result) = result {
             body.push(manager_metric_result_table(&view.locale, result));
+        } else if let Some(error) = error {
+            body.push(json!({
+                "type": "TextBlock",
+                "text": format!(
+                    "{}: {}",
+                    localized_manager_static(&view.locale, "Metric query failed."),
+                    error
+                ),
+                "wrap": true,
+                "isSubtle": true
+            }));
         } else {
             body.push(json!({
                 "type": "TextBlock",
@@ -4010,6 +4036,10 @@ fn render_runtime_metric_detail_card(
         "body": body,
         "actions": []
     })
+}
+
+fn metric_query_error_message(err: &SorxError) -> String {
+    format!("{} ({})", err.message, err.code)
 }
 
 fn manager_metrics_summary_table(locale: &str, metrics: &[RuntimeMetricCardRow]) -> Value {
@@ -4847,6 +4877,7 @@ fn localized_manager_static<'a>(locale: &str, text: &'a str) -> &'a str {
         "Main Menu" => "Menu principal",
         "Metric" => "Metrica",
         "Metric not found." => "No se encontro la metrica.",
+        "Metric query failed." => "Error al consultar la metrica.",
         "Metrics" => "Metricas",
         "Next" => "Siguiente",
         "No metric data found." => "No se encontraron datos de metrica.",
@@ -6117,6 +6148,14 @@ mod tests {
                     "formula": {
                         "expression": "monthly_revenue - monthly_cost",
                         "dependencies": ["monthly_revenue", "monthly_cost"]
+                    }
+                },
+                {
+                    "name": "lab_click_rate",
+                    "dimensions": [{ "name": "lab_id", "field": "lab_id" }],
+                    "formula": {
+                        "expression": "daily_clicks / number_in_waiting_list",
+                        "dependencies": ["daily_clicks", "number_in_waiting_list"]
                     }
                 },
                 {
@@ -7583,6 +7622,30 @@ mod tests {
         assert!(card_contains_text(&manager_metric_detail, "lab_id"));
         assert!(card_contains_text(&manager_metric_detail, "example"));
         assert!(card_contains_text(&manager_metric_detail, "1"));
+
+        let failed_manager_metric_detail = request(
+            &runtime,
+            "GET",
+            "/v1/sorx/manager/cards/metrics/lab_click_rate",
+            &tenant_headers(),
+            "",
+        );
+        assert_eq!(
+            failed_manager_metric_detail["metadata"]["kind"],
+            "manager.metric"
+        );
+        assert!(card_contains_text(
+            &failed_manager_metric_detail,
+            "Metric query failed."
+        ));
+        assert!(card_contains_text(
+            &failed_manager_metric_detail,
+            "does not define dimension `lab_id`"
+        ));
+        assert!(!card_contains_text(
+            &failed_manager_metric_detail,
+            "No metric data found."
+        ));
 
         let tools = request(&runtime, "GET", "/v1/sorx/tools", &[], "");
         assert!(
