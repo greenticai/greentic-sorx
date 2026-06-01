@@ -75,6 +75,8 @@ pub struct RuntimeHealth {
 pub struct CapabilityOffer {
     pub capability: String,
     pub contracts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +102,7 @@ impl RuntimeCapabilities {
             offers: vec![CapabilityOffer {
                 capability: CAP_RUNTIME_HOST_V1.to_string(),
                 contracts: runtime_contracts(),
+                metadata: None,
             }],
             requires: vec![
                 optional_requirement(CAP_SECRETS_V1),

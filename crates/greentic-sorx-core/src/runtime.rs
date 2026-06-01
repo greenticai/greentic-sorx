@@ -1114,6 +1114,8 @@ impl SorxRuntime {
                             .unwrap_or_else(|| endpoint.operation_id.clone())
                     }),
                     event_type: event.clone(),
+                    capability: Some(business_event_capability(&self.pack.name, event)),
+                    producer: Some(format!("sorx:{}:{}", self.pack.name, self.pack.version)),
                     subject_entity: binding.entity.clone(),
                     subject_id: command
                         .resolve_string("$input.id")
@@ -1919,6 +1921,34 @@ fn event(
         endpoint_id: endpoint.endpoint_id.clone(),
         operation_id: endpoint.operation_id.clone(),
         provider_binding: endpoint.provider_binding.clone(),
+    }
+}
+
+fn business_event_capability(pack_name: &str, event_type: &str) -> String {
+    format!(
+        "cap://greentic/events/{}/{}",
+        clean_capability_segment(pack_name),
+        clean_capability_segment(event_type)
+    )
+}
+
+fn clean_capability_segment(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if cleaned.is_empty() {
+        "unnamed".to_string()
+    } else {
+        cleaned
     }
 }
 

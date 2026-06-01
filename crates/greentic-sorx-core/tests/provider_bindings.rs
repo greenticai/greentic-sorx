@@ -255,12 +255,21 @@ fn memory_provider_implements_canonical_store_contract() {
             namespace: namespace.clone(),
             stream: "tenant-1".to_string(),
             event_type: "tenant.created".to_string(),
+            capability: Some("cap://greentic/events/landlord/tenant.created".to_string()),
+            producer: Some("sorx:landlord:0.1.0".to_string()),
             subject_entity: "Tenant".to_string(),
             subject_id: "tenant-1".to_string(),
             data: json!({ "source": "test" }),
         })
         .unwrap();
     assert_eq!(event.sequence, 1);
+    assert_eq!(event.envelope["event_id"], "tenant-1-1");
+    assert_eq!(
+        event.envelope["capability"],
+        "cap://greentic/events/landlord/tenant.created"
+    );
+    assert_eq!(event.envelope["subject"]["id"], "tenant-1");
+    assert_eq!(event.envelope["payload"]["source"], "test");
 
     let indexed = provider
         .query_index(IndexQueryOp {
@@ -398,6 +407,8 @@ fn foundationdb_adapter_persists_store_operations() {
             namespace: namespace.clone(),
             stream: "tenant-1".to_string(),
             event_type: "tenant.updated".to_string(),
+            capability: None,
+            producer: None,
             subject_entity: "Tenant".to_string(),
             subject_id: "tenant-1".to_string(),
             data: json!({"active": true}),
