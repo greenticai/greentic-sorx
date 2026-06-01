@@ -6,22 +6,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentic_sorx_core::{
     AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface,
-    AuthorizationRequirement, AuthorizationRoles, CallerContext, ControlDecisionAction,
-    EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter, EndpointStatus,
-    EntityRecord, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
-    ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle,
-    ManagerLocaleCatalog, ManagerLocaleContext, ManagerPolicyDecision, ManagerPolicyEffect,
-    ManagerPolicySet, ManagerRecordView, ManagerRelationshipView, McpToolDefinition, McpToolList,
-    MemoryStoreProvider, MetricAggregate, MetricQuery, MetricQueryFilter, MetricQueryResult,
-    MetricResultRow, MetricRuntime, MetricRuntimeProvider, OperationKind, PolicyAction,
-    ProviderNamespace, ProviderRegistry, QueryOp, RecordAccessPolicy, RiskLevel, RuntimeConfig,
-    RuntimeInfo, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
-    RuntimeMetricKind, RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment,
-    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
-    StoreProviderKind, TrafficUpdateRequest, apply_value_patch, filter_manager_view,
-    generate_manager_view, humanize_identifier, localize_manager_view, render_dashboard_card,
-    render_record_create_card, render_record_detail_card, render_record_picker_card,
-    render_relationship_summary_card, resolve_manager_context,
+    AuthorizationRequirement, AuthorizationRoles, CallerContext, CapabilityOffer,
+    ControlDecisionAction, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter,
+    EndpointStatus, EntityRecord, FoundationDbProviderAdapter, FoundationDbProviderConfig,
+    InvocationSource, ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView,
+    ManagerLocaleBundle, ManagerLocaleCatalog, ManagerLocaleContext, ManagerPolicyDecision,
+    ManagerPolicyEffect, ManagerPolicySet, ManagerRecordView, ManagerRelationshipView,
+    McpToolDefinition, McpToolList, MemoryStoreProvider, MetricAggregate, MetricQuery,
+    MetricQueryFilter, MetricQueryResult, MetricResultRow, MetricRuntime, MetricRuntimeProvider,
+    OperationKind, PolicyAction, ProviderNamespace, ProviderRegistry, QueryOp, RecordAccessPolicy,
+    RiskLevel, RuntimeCapabilities, RuntimeConfig, RuntimeInfo, RuntimeMetric, RuntimeMetricCache,
+    RuntimeMetricCatalog, RuntimeMetricDimension, RuntimeMetricKind, RuntimeOperationalIndex,
+    RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult, SorxRuntime,
+    SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink, StoreProviderKind,
+    TrafficUpdateRequest, apply_value_patch, filter_manager_view, generate_manager_view,
+    humanize_identifier, localize_manager_view, render_dashboard_card, render_record_create_card,
+    render_record_detail_card, render_record_picker_card, render_relationship_summary_card,
+    resolve_manager_context,
 };
 use greentic_sorx_pack::{
     BusinessAction, BusinessActionAssets, LoadedSorlaPack, MetricDefinition, contract_hash,
@@ -596,11 +597,11 @@ impl HttpRuntime {
             ("GET", "/admin/v1/capabilities") => {
                 return json_response(
                     200,
-                    serde_json::to_value(
-                        greentic_sorx_core::RuntimeCapabilities::sorx_runtime_host(),
-                    )
-                    .unwrap(),
+                    serde_json::to_value(self.runtime_capabilities()).unwrap(),
                 );
+            }
+            ("POST", "/admin/v1/capabilities/invoke") => {
+                return self.invoke_capability(request);
             }
             ("GET", "/admin/v1/deployments") => {
                 return self.with_snapshot_read(|snapshot| {
@@ -794,6 +795,240 @@ impl HttpRuntime {
                 "RUNTIME_SNAPSHOT_LOCKED",
                 "runtime snapshot lock poisoned",
             ),
+        }
+    }
+
+    fn runtime_capabilities(&self) -> RuntimeCapabilities {
+        let mut capabilities = RuntimeCapabilities::sorx_runtime_host();
+        capabilities.offers.extend(self.business_action_offers());
+        capabilities
+            .offers
+            .extend(self.business_event_topic_offers());
+        capabilities
+    }
+
+    fn business_action_offers(&self) -> Vec<CapabilityOffer> {
+        let Some(assets) = self.business_actions.as_ref() else {
+            return Vec::new();
+        };
+        assets
+            .catalog
+            .actions
+            .iter()
+            .map(|action| {
+                let endpoint = self.execution_endpoint(action);
+                let locked_contract_hash = self.locked_contract_hash(action);
+                CapabilityOffer {
+                    capability: business_action_capability(&self.runtime.pack.name, action),
+                    contracts: vec!["greentic.sorx.business-action.invoke.v1".to_string()],
+                    metadata: Some(json!({
+                        "kind": "business_function",
+                        "pack": {
+                            "name": self.runtime.pack.name,
+                            "version": self.runtime.pack.version,
+                            "digest": self.runtime.pack.digest
+                        },
+                        "action": {
+                            "id": action.id,
+                            "version": action.version,
+                            "label": action.label,
+                            "aliases": action.aliases,
+                            "contract_hash": locked_contract_hash.unwrap_or_else(|| contract_hash(action)),
+                            "risk": action.risk,
+                            "approval": action.approval,
+                            "idempotency": action.idempotency
+                        },
+                        "execution": {
+                            "endpoint_id": endpoint.map(|endpoint| endpoint.endpoint_id.clone()),
+                            "operation_id": endpoint.map(|endpoint| endpoint.operation_id.clone()),
+                            "tool_name": action.execution.tool_name
+                        }
+                    })),
+                }
+            })
+            .collect()
+    }
+
+    fn business_event_topic_offers(&self) -> Vec<CapabilityOffer> {
+        let mut event_topics = BTreeMap::<String, Value>::new();
+        for endpoint in self.runtime.router.endpoints.values() {
+            let OperationKind::Command(spec) = &endpoint.operation else {
+                continue;
+            };
+            let mut events = Vec::new();
+            collect_command_event_topics(&spec.steps, &mut events);
+            for event in events {
+                event_topics.entry(event.clone()).or_insert_with(|| {
+                    json!({
+                        "kind": "business_event_topic",
+                        "pack": {
+                            "name": self.runtime.pack.name,
+                            "version": self.runtime.pack.version,
+                            "digest": self.runtime.pack.digest
+                        },
+                        "event_type": event,
+                        "producer": format!("sorx:{}:{}", self.runtime.pack.name, self.runtime.pack.version),
+                        "source_endpoint_id": endpoint.endpoint_id,
+                        "source_operation_id": endpoint.operation_id
+                    })
+                });
+            }
+        }
+        event_topics
+            .into_iter()
+            .map(|(event_type, metadata)| CapabilityOffer {
+                capability: business_event_capability(&self.runtime.pack.name, &event_type),
+                contracts: vec!["greentic.sorx.business-event-topic.v1".to_string()],
+                metadata: Some(metadata),
+            })
+            .collect()
+    }
+
+    fn invoke_capability(&self, request: &HttpRequest) -> HttpResponse {
+        let body = match request_json(request, &BTreeMap::new(), None) {
+            Ok(value) => value,
+            Err(err) => return error_response(400, "RUNTIME_CAPABILITY_INVOKE_INVALID", &err),
+        };
+        let Some(capability) = body.get("capability").and_then(Value::as_str) else {
+            return error_response(
+                400,
+                "RUNTIME_CAPABILITY_INVOKE_INVALID",
+                "capability is required",
+            );
+        };
+        let Some(action) = self.find_business_action_by_capability(capability) else {
+            return error_response(
+                404,
+                "RUNTIME_CAPABILITY_NOT_FOUND",
+                "capability does not resolve to a business action",
+            );
+        };
+        let Some(endpoint) = self.execution_endpoint(action) else {
+            return error_response(
+                404,
+                "RUNTIME_CAPABILITY_TARGET_MISSING",
+                "capability execution target is missing",
+            );
+        };
+        let values = body.get("input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(schema) = &action.input_schema
+            && let Err(err) = validate_action_schema(schema, &values)
+        {
+            return error_response(400, "RUNTIME_CAPABILITY_INPUT_INVALID", &err);
+        }
+        let idempotency_key = body
+            .get("idempotency_key")
+            .or_else(|| {
+                body.get("options")
+                    .and_then(|options| options.get("idempotency_key"))
+            })
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        if action
+            .idempotency
+            .as_ref()
+            .is_some_and(|idempotency| idempotency.required)
+            && idempotency_key.is_none()
+        {
+            return error_response(
+                400,
+                "RUNTIME_CAPABILITY_IDEMPOTENCY_REQUIRED",
+                "idempotency key is required",
+            );
+        }
+        let dry_run = body
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let policy_decision = self.runtime.policy.decide(endpoint);
+        if dry_run {
+            return json_response(
+                200,
+                json!({
+                    "valid": true,
+                    "capability": capability,
+                    "canonical_payload": values,
+                    "policy_decision": policy_decision_label(&policy_decision.action),
+                    "approval_required": matches!(policy_decision.action, PolicyAction::RequireApproval),
+                    "execution_target": execution_target_json(action, endpoint)
+                }),
+            );
+        }
+        let context = body.get("context").and_then(Value::as_object);
+        let tenant_id = context
+            .and_then(|context| context.get("tenant_id").and_then(Value::as_str))
+            .or_else(|| body.get("tenant_id").and_then(Value::as_str))
+            .or_else(|| {
+                request
+                    .headers
+                    .get("x-greentic-tenant-id")
+                    .map(String::as_str)
+            })
+            .unwrap_or(&self.runtime.config.tenant_id)
+            .to_string();
+        let caller_id = context
+            .and_then(|context| context.get("caller_id").and_then(Value::as_str))
+            .or_else(|| body.get("caller_id").and_then(Value::as_str))
+            .or_else(|| {
+                request
+                    .headers
+                    .get("x-greentic-caller-id")
+                    .map(String::as_str)
+            })
+            .unwrap_or("capability")
+            .to_string();
+        let roles = context
+            .and_then(|context| context.get("roles"))
+            .and_then(string_array)
+            .filter(|roles| !roles.is_empty())
+            .unwrap_or_else(|| request_roles(&request.headers));
+        let invocation = EndpointInvocation {
+            tenant_id,
+            endpoint_id: endpoint.endpoint_id.clone(),
+            operation_id: endpoint.operation_id.clone(),
+            input: values,
+            caller: CallerContext {
+                subject: caller_id,
+                roles,
+            },
+            idempotency_key,
+            source: InvocationSource::Direct,
+        };
+        match self.runtime.invoke(invocation) {
+            Ok(result) if result.status == EndpointStatus::ApprovalRequired => json_response(
+                202,
+                json!({
+                    "ok": false,
+                    "status": "approval_required",
+                    "capability": capability,
+                    "approval": result.output["approval"],
+                    "action_ref": capability_action_ref_json(action, self.locked_contract_hash(action))
+                }),
+            ),
+            Ok(result) if result.status == EndpointStatus::Denied => json_response(
+                403,
+                json!({
+                    "ok": false,
+                    "error": {
+                        "code": "RUNTIME_CAPABILITY_DENIED",
+                        "message": result.output["reason"].as_str().unwrap_or("capability invocation denied"),
+                        "details": result.output
+                    }
+                }),
+            ),
+            Ok(result) => json_response(
+                200,
+                json!({
+                    "ok": true,
+                    "schema": "greentic.sorx.capability-invoke-result.v1",
+                    "capability": capability,
+                    "action_ref": capability_action_ref_json(action, self.locked_contract_hash(action)),
+                    "status": format!("{:?}", result.status).to_ascii_lowercase(),
+                    "result": result.output,
+                    "events": result.events
+                }),
+            ),
+            Err(err) => sorx_error_response(400, err),
         }
     }
 
@@ -2174,6 +2409,31 @@ impl HttpRuntime {
             .actions
             .iter()
             .find(|action| action.id == id && action.version == version)
+    }
+
+    fn find_business_action_by_capability(&self, capability: &str) -> Option<&BusinessAction> {
+        self.business_actions
+            .as_ref()
+            .as_ref()?
+            .catalog
+            .actions
+            .iter()
+            .find(|action| {
+                business_action_capability(&self.runtime.pack.name, action) == capability
+            })
+    }
+
+    fn locked_contract_hash(&self, action: &BusinessAction) -> Option<String> {
+        self.business_actions
+            .as_ref()
+            .as_ref()
+            .and_then(|assets| assets.lock.as_ref())
+            .and_then(|lock| {
+                lock.entries
+                    .iter()
+                    .find(|entry| entry.id == action.id && entry.version == action.version)
+                    .map(|entry| entry.contract_hash.clone())
+            })
     }
 
     fn contract_hash_matches(&self, action: &BusinessAction, expected_hash: &str) -> bool {
@@ -5423,6 +5683,17 @@ fn action_ref_json(action: &BusinessAction, contract_hash: &str) -> Value {
     })
 }
 
+fn capability_action_ref_json(
+    action: &BusinessAction,
+    locked_contract_hash: Option<String>,
+) -> Value {
+    json!({
+        "id": action.id,
+        "version": action.version,
+        "contract_hash": locked_contract_hash.unwrap_or_else(|| contract_hash(action))
+    })
+}
+
 fn execution_target_json(action: &BusinessAction, endpoint: &EndpointDefinition) -> Value {
     json!({
         "endpoint_id": endpoint.endpoint_id,
@@ -5452,6 +5723,81 @@ fn request_roles(headers: &BTreeMap<String, String>) -> Vec<String> {
         })
         .filter(|roles| !roles.is_empty())
         .unwrap_or_else(|| vec!["local".to_string()])
+}
+
+fn string_array(value: &Value) -> Option<Vec<String>> {
+    Some(
+        value
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect(),
+    )
+}
+
+fn business_action_capability(pack_name: &str, action: &BusinessAction) -> String {
+    format!(
+        "cap://greentic/business-functions/{}/{}/v{}",
+        clean_capability_segment(pack_name),
+        clean_capability_segment(&action.id),
+        clean_capability_segment(&action.version)
+    )
+}
+
+fn business_event_capability(pack_name: &str, event_type: &str) -> String {
+    format!(
+        "cap://greentic/events/{}/{}",
+        clean_capability_segment(pack_name),
+        clean_capability_segment(event_type)
+    )
+}
+
+fn clean_capability_segment(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if cleaned.is_empty() {
+        "unnamed".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn collect_command_event_topics(
+    steps: &[greentic_sorx_core::CommandStep],
+    events: &mut Vec<String>,
+) {
+    for step in steps {
+        match step {
+            greentic_sorx_core::CommandStep::EmitEvent { event, .. } => {
+                if !events.contains(event) {
+                    events.push(event.clone());
+                }
+            }
+            greentic_sorx_core::CommandStep::Foreach { steps, .. } => {
+                collect_command_event_topics(steps, events);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn policy_decision_label(action: &PolicyAction) -> &'static str {
+    match action {
+        PolicyAction::Execute => "allow",
+        PolicyAction::RequireApproval => "require_approval",
+        PolicyAction::Deny => "deny",
+    }
 }
 
 fn manager_submit_roles(body: &Map<String, Value>) -> Option<Vec<String>> {
@@ -5986,6 +6332,14 @@ mod tests {
                                             "$generated.short_code"
                                         ]
                                     }
+                                }
+                            },
+                            {
+                                "op": "emit_event",
+                                "event": "tenant.code_generated",
+                                "payload": {
+                                    "tenant_id": "$input.id",
+                                    "code": "$steps.update.records.0.data.code"
                                 }
                             }
                         ],
@@ -7865,6 +8219,67 @@ mod tests {
     }
 
     #[test]
+    fn capability_invoke_uses_business_action_runtime_path() {
+        let runtime = runtime("local");
+        let capability =
+            "cap://greentic/business-functions/landlord-tenant-sor/record_rent_payment/v0.1.0";
+        let dry_run = request(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": capability,
+                "dry_run": true,
+                "input": { "id": "tenant-cap-1", "name": "Capstone", "active": true },
+                "idempotency_key": "capability-action-1",
+                "context": {
+                    "tenant_id": "tenant-a",
+                    "caller_id": "capability-client",
+                    "roles": ["local"]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(dry_run["valid"], true);
+        assert_eq!(dry_run["execution_target"]["endpoint_id"], "tenant.create");
+        let missing_after_dry_run = request(
+            &runtime,
+            "GET",
+            "/v1/agent/tenants/tenant-cap-1",
+            &tenant_headers(),
+            "",
+        );
+        assert!(missing_after_dry_run["result"].is_null());
+
+        let invoked = request(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": capability,
+                "input": { "id": "tenant-cap-1", "name": "Capstone", "active": true },
+                "idempotency_key": "capability-action-1",
+                "context": {
+                    "tenant_id": "tenant-a",
+                    "caller_id": "capability-client",
+                    "roles": ["local"]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(invoked["ok"], true);
+        assert_eq!(
+            invoked["schema"],
+            "greentic.sorx.capability-invoke-result.v1"
+        );
+        assert_eq!(invoked["capability"], capability);
+        assert_eq!(invoked["action_ref"]["id"], "record_rent_payment");
+        assert_eq!(invoked["result"]["id"], "tenant-cap-1");
+    }
+
+    #[test]
     fn business_action_rejects_bad_version_hash_payload_and_missing_idempotency() {
         let runtime = runtime("local");
         let unknown_version = request(
@@ -8131,6 +8546,23 @@ mod tests {
             capabilities["offers"][0]["capability"],
             "greentic.cap.runtime.host.v1"
         );
+        let offers = capabilities["offers"].as_array().unwrap();
+        let business_offer = offers
+            .iter()
+            .find(|offer| offer["metadata"]["kind"] == "business_function")
+            .unwrap();
+        assert_eq!(
+            business_offer["capability"],
+            "cap://greentic/business-functions/landlord-tenant-sor/record_rent_payment/v0.1.0"
+        );
+        assert_eq!(
+            business_offer["metadata"]["action"]["contract_hash"],
+            business_action_hash()
+        );
+        assert!(offers.iter().any(|offer| {
+            offer["capability"] == "cap://greentic/events/landlord-tenant-sor/tenant.code_generated"
+                && offer["metadata"]["kind"] == "business_event_topic"
+        }));
 
         let health = request(&runtime, "GET", "/admin/v1/health", &[], "");
         assert_eq!(health["schema"], "greentic.runtime.health.v1");

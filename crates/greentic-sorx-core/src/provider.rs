@@ -246,6 +246,10 @@ pub struct AppendEventOp {
     pub namespace: ProviderNamespace,
     pub stream: String,
     pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
     pub subject_entity: String,
     pub subject_id: String,
     pub data: Value,
@@ -259,6 +263,8 @@ pub struct EventRecord {
     pub subject_entity: String,
     pub subject_id: String,
     pub data: Value,
+    #[serde(default)]
+    pub envelope: Value,
     pub sequence: u64,
 }
 

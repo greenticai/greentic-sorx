@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::{
     AppendEventOp, CreateOp, DeleteOp, DeleteResult, EntityRecord, EventRecord, EvidenceResult,
@@ -241,13 +241,27 @@ impl SorxCanonicalStore for MemoryStoreProvider {
         );
         let stream = state.events.entry(stream_key).or_default();
         let sequence = stream.len() as u64 + 1;
+        let event_id = format!("{}-{}", clean_key(&op.stream), sequence);
+        let envelope = json!({
+            "event_id": event_id.clone(),
+            "event_type": op.event_type.clone(),
+            "capability": op.capability.clone(),
+            "producer": op.producer.clone(),
+            "tenant": op.namespace.tenant_id.clone(),
+            "subject": {
+                "type": op.subject_entity.clone(),
+                "id": op.subject_id.clone()
+            },
+            "payload": op.data.clone()
+        });
         let record = EventRecord {
-            event_id: format!("{}-{}", clean_key(&op.stream), sequence),
+            event_id,
             stream: op.stream,
             event_type: op.event_type,
             subject_entity: op.subject_entity,
             subject_id: op.subject_id,
             data: op.data,
+            envelope,
             sequence,
         };
         stream.push(record.clone());
