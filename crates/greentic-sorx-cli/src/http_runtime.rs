@@ -3288,9 +3288,15 @@ fn runtime_metric_from_pack(metric: &MetricDefinition) -> SorxResult<RuntimeMetr
 }
 
 fn normalize_metric_filter_operator(operator: &str) -> String {
-    match operator {
-        "equals" => "eq",
-        "not_equals" => "ne",
+    let normalized = operator.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "eq" | "equal" | "equals" => "eq",
+        "ne" | "not_equal" | "not_equals" => "ne",
+        "gt" | "greater_than" => "gt",
+        "gte" | "greater_than_or_equal" | "greater_than_or_equals" => "gte",
+        "lt" | "less_than" => "lt",
+        "lte" | "less_than_or_equal" | "less_than_or_equals" => "lte",
+        "in" | "one_of" => "in",
         value => value,
     }
     .to_string()
@@ -5029,8 +5035,8 @@ fn metric_query_from_json(value: Value, namespace: ProviderNamespace) -> MetricQ
                         operator: filter
                             .get("operator")
                             .and_then(Value::as_str)
-                            .unwrap_or("eq")
-                            .to_string(),
+                            .map(normalize_metric_filter_operator)
+                            .unwrap_or_else(|| "eq".to_string()),
                         value: filter.get("value").cloned().unwrap_or(Value::Null),
                     })
                 })
@@ -5165,7 +5171,7 @@ impl MetricRuntimeProvider for StoreMetricProvider {
                 .1
                 .push(record_value(&record.data, field));
         }
-        if groups.is_empty() {
+        if groups.is_empty() && requested_dimensions.is_empty() {
             groups.insert("[]".to_string(), (Vec::new(), AggregateState::default()));
         }
         let rows = groups
@@ -5259,7 +5265,9 @@ impl AggregateState {
 fn equality_filter(filters: &[MetricQueryFilter]) -> Value {
     let mut filter = Map::new();
     for metric_filter in filters {
-        if metric_filter.operator == "eq" && !metric_filter.field.contains('.') {
+        if normalize_metric_filter_operator(&metric_filter.operator) == "eq"
+            && !metric_filter.field.contains('.')
+        {
             filter.insert(metric_filter.field.clone(), metric_filter.value.clone());
         }
     }
@@ -5271,7 +5279,7 @@ fn metric_filters_match(data: &Value, filters: &[MetricQueryFilter]) -> bool {
         let Some(actual) = field_value(data, &filter.field) else {
             return false;
         };
-        match filter.operator.as_str() {
+        match normalize_metric_filter_operator(&filter.operator).as_str() {
             "eq" => actual == &filter.value,
             "ne" => actual != &filter.value,
             "gt" => compare_numbers(actual, &filter.value, |left, right| left > right),
@@ -7597,6 +7605,20 @@ mod tests {
             "example"
         );
         assert_eq!(waiting_list["result"]["rows"][0]["value"], 1.0);
+        let empty_dimensioned_query = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/metrics/number_in_waiting_list/query",
+            &tenant_headers(),
+            r#"{"dimensions":["lab_id"],"filters":[{"field":"lab_id","operator":"equals","value":"missing"}]}"#,
+        );
+        assert_eq!(
+            empty_dimensioned_query["result"]["rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
 
         let manager_metrics = request(
             &runtime,
@@ -7706,6 +7728,18 @@ mod tests {
             r#"{"dimensions":[]}"#,
         );
         assert_eq!(allowed["result"]["rows"][0]["value"], 1.0);
+
+        let allowed_with_sorla_operator = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/metrics/daily_clicks/query",
+            &tenant_headers(),
+            r#"{"filters":[{"field":"id","operator":"equals","value":"click-1"}]}"#,
+        );
+        assert_eq!(
+            allowed_with_sorla_operator["result"]["rows"][0]["value"],
+            1.0
+        );
 
         let events = audit.events().unwrap();
         assert!(
