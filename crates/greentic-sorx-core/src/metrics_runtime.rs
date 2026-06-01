@@ -227,31 +227,57 @@ impl<'a> MetricRuntime<'a> {
                 expression,
                 dependencies,
             } => {
-                let mut values = BTreeMap::new();
+                let mut dependency_results = BTreeMap::new();
                 for dependency in dependencies {
                     let dependency_metric = self.catalog.metric(dependency)?;
                     let result = self.query_definition(dependency_metric, query, stack)?;
-                    let value = result.rows.first().map(|row| row.value).ok_or_else(|| {
-                        SorxError::new(
-                            "metric_dependency_empty",
-                            format!("metric `{dependency}` returned no rows"),
-                        )
-                    })?;
-                    values.insert(dependency.clone(), value);
+                    dependency_results.insert(dependency.clone(), result);
                 }
-                let value = evaluate_formula(expression, &values)?;
-                Ok(MetricQueryResult {
-                    metric: metric.name.clone(),
-                    rows: vec![MetricResultRow {
-                        dimensions: BTreeMap::new(),
-                        value,
-                    }],
-                })
+                evaluate_formula_rows(&metric.name, expression, &dependency_results)
             }
         };
         stack.remove(&metric.name);
         result
     }
+}
+
+type FormulaGroupValues = BTreeMap<String, f64>;
+type FormulaRowsByGroup = BTreeMap<String, (BTreeMap<String, Value>, FormulaGroupValues)>;
+
+fn evaluate_formula_rows(
+    metric_name: &str,
+    expression: &str,
+    dependency_results: &BTreeMap<String, MetricQueryResult>,
+) -> SorxResult<MetricQueryResult> {
+    let mut rows_by_key: FormulaRowsByGroup = BTreeMap::new();
+    for (dependency, result) in dependency_results {
+        for row in &result.rows {
+            let key = serde_json::to_string(&row.dimensions).map_err(|err| {
+                SorxError::new("metric_formula_group_key_failed", err.to_string())
+            })?;
+            rows_by_key
+                .entry(key)
+                .or_insert_with(|| (row.dimensions.clone(), BTreeMap::new()))
+                .1
+                .insert(dependency.clone(), row.value);
+        }
+    }
+    let rows = rows_by_key
+        .into_values()
+        .map(|(dimensions, mut values)| {
+            for dependency in dependency_results.keys() {
+                values.entry(dependency.clone()).or_insert(0.0);
+            }
+            Ok(MetricResultRow {
+                dimensions,
+                value: evaluate_formula(expression, &values)?,
+            })
+        })
+        .collect::<SorxResult<Vec<_>>>()?;
+    Ok(MetricQueryResult {
+        metric: metric_name.to_string(),
+        rows,
+    })
 }
 
 fn evaluate_formula(expression: &str, values: &BTreeMap<String, f64>) -> SorxResult<f64> {
@@ -433,6 +459,31 @@ mod tests {
         }
     }
 
+    struct GroupedMetricProvider {
+        rows: HashMap<String, Vec<MetricResultRow>>,
+    }
+
+    impl MetricRuntimeProvider for GroupedMetricProvider {
+        fn query_metric(
+            &self,
+            definition: &RuntimeMetric,
+            _query: &MetricQuery,
+        ) -> SorxResult<MetricQueryResult> {
+            Ok(MetricQueryResult {
+                metric: definition.name.clone(),
+                rows: self.rows.get(&definition.name).cloned().ok_or_else(|| {
+                    SorxError::new(
+                        "metric_unsupported",
+                        format!(
+                            "metric `{}` is not supported by grouped provider",
+                            definition.name
+                        ),
+                    )
+                })?,
+            })
+        }
+    }
+
     #[test]
     fn aggregate_metric_delegates_to_provider() {
         let provider = FakeMetricProvider {
@@ -455,6 +506,81 @@ mod tests {
         let runtime = MetricRuntime::new(catalog().unwrap(), &provider);
         let result = runtime.query("gross_margin", query()).unwrap();
         assert_eq!(result.rows[0].value, 65.0);
+    }
+
+    #[test]
+    fn formula_metric_preserves_dependency_dimensions() {
+        let provider = GroupedMetricProvider {
+            rows: HashMap::from([
+                (
+                    "active_tenancies".to_string(),
+                    vec![
+                        metric_row("building-1", 18.0),
+                        metric_row("building-2", 12.0),
+                    ],
+                ),
+                (
+                    "total_units".to_string(),
+                    vec![
+                        metric_row("building-1", 20.0),
+                        metric_row("building-2", 15.0),
+                    ],
+                ),
+            ]),
+        };
+        let runtime = MetricRuntime::new(
+            RuntimeMetricCatalog::new(vec![
+                aggregate_with_dimension("active_tenancies", MetricAggregate::Count),
+                aggregate_with_dimension("total_units", MetricAggregate::Count),
+                formula(
+                    "occupancy_rate",
+                    "active_tenancies / total_units",
+                    &["active_tenancies", "total_units"],
+                ),
+            ])
+            .unwrap(),
+            &provider,
+        );
+        let mut query = query();
+        query.dimensions = vec!["building_id".to_string()];
+        let result = runtime.query("occupancy_rate", query).unwrap();
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].dimensions["building_id"], "building-1");
+        assert_eq!(result.rows[0].value, 0.9);
+        assert_eq!(result.rows[1].dimensions["building_id"], "building-2");
+        assert_eq!(result.rows[1].value, 0.8);
+    }
+
+    #[test]
+    fn formula_metric_treats_empty_dimensioned_dependency_as_zero() {
+        let provider = GroupedMetricProvider {
+            rows: HashMap::from([
+                ("active_tenancies".to_string(), Vec::new()),
+                (
+                    "total_units".to_string(),
+                    vec![metric_row("building-1", 20.0)],
+                ),
+            ]),
+        };
+        let runtime = MetricRuntime::new(
+            RuntimeMetricCatalog::new(vec![
+                aggregate_with_dimension("active_tenancies", MetricAggregate::Count),
+                aggregate_with_dimension("total_units", MetricAggregate::Count),
+                formula(
+                    "occupancy_rate",
+                    "active_tenancies / total_units",
+                    &["active_tenancies", "total_units"],
+                ),
+            ])
+            .unwrap(),
+            &provider,
+        );
+        let mut query = query();
+        query.dimensions = vec!["building_id".to_string()];
+        let result = runtime.query("occupancy_rate", query).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].dimensions["building_id"], "building-1");
+        assert_eq!(result.rows[0].value, 0.0);
     }
 
     #[test]
@@ -503,6 +629,16 @@ mod tests {
         }
     }
 
+    fn aggregate_with_dimension(name: &str, aggregate_kind: MetricAggregate) -> RuntimeMetric {
+        let mut metric = aggregate(name, aggregate_kind, None);
+        metric.dimensions.push(RuntimeMetricDimension {
+            name: "building_id".to_string(),
+            field: Some("building_id".to_string()),
+            sensitive: false,
+        });
+        metric
+    }
+
     fn formula(name: &str, expression: &str, dependencies: &[&str]) -> RuntimeMetric {
         RuntimeMetric {
             name: name.to_string(),
@@ -517,6 +653,16 @@ mod tests {
             dimensions: Vec::new(),
             filters: Vec::new(),
             cache: None,
+        }
+    }
+
+    fn metric_row(building_id: &str, value: f64) -> MetricResultRow {
+        MetricResultRow {
+            dimensions: BTreeMap::from([(
+                "building_id".to_string(),
+                Value::String(building_id.to_string()),
+            )]),
+            value,
         }
     }
 
