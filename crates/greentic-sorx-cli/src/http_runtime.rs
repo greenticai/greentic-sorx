@@ -6434,10 +6434,8 @@ fn collect_command_event_topics(
 ) {
     for step in steps {
         match step {
-            greentic_sorx_core::CommandStep::EmitEvent { event, .. } => {
-                if !events.contains(event) {
-                    events.push(event.clone());
-                }
+            greentic_sorx_core::CommandStep::EmitEvent { event, .. } if !events.contains(event) => {
+                events.push(event.clone());
             }
             greentic_sorx_core::CommandStep::Foreach { steps, .. } => {
                 collect_command_event_topics(steps, events);
