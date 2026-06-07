@@ -623,3 +623,129 @@ fn direct_provider_config_is_only_allowed_in_local_or_test_mode() {
             .any(|issue| issue.path == "providers.store.config")
     );
 }
+// ---------------------------------------------------------------------------
+// S1: restart-resilience for the persistent provider
+// ---------------------------------------------------------------------------
+
+fn landlord_namespace() -> ProviderNamespace {
+    ProviderNamespace {
+        tenant_id: "tenant-a".to_string(),
+        sor_name: "landlord".to_string(),
+    }
+}
+
+#[test]
+fn restart_preserves_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let namespace = landlord_namespace();
+
+    {
+        let provider = MemoryStoreProvider::persistent(&path).unwrap();
+        provider
+            .create(CreateOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                input: json!({ "id": "tenant-1", "name": "Acme" }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
+        provider
+            .append_event(AppendEventOp {
+                namespace: namespace.clone(),
+                stream: "tenant-1".to_string(),
+                event_type: "tenant.created".to_string(),
+                capability: None,
+                producer: None,
+                subject_entity: "Tenant".to_string(),
+                subject_id: "tenant-1".to_string(),
+                data: json!({ "source": "test" }),
+            })
+            .unwrap();
+        provider
+            .store_evidence(StoreEvidenceOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                id: "tenant-1".to_string(),
+                evidence: json!({ "evidence_id": "ev-1" }),
+            })
+            .unwrap();
+        // provider dropped here, simulating a restart
+    }
+
+    let restarted = MemoryStoreProvider::persistent(&path).unwrap();
+    let fetched = restarted
+        .get(GetOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.data["name"], "Acme");
+
+    let queried = restarted
+        .query(QueryOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            filter: json!({ "name": "Acme" }),
+            order_by: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(queried.records.len(), 1);
+    assert_eq!(queried.records[0].id, "tenant-1");
+
+    let evidence = restarted
+        .get_evidence(ExternalRefsOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(evidence.evidence[0]["evidence_id"], "ev-1");
+}
+
+#[test]
+fn restart_preserves_idempotency() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let namespace = landlord_namespace();
+
+    let original = {
+        let provider = MemoryStoreProvider::persistent(&path).unwrap();
+        provider
+            .create(CreateOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                input: json!({ "name": "Acme" }),
+                idempotency_key: Some("create-acme".to_string()),
+                unique_indexes: Vec::new(),
+                unique_behavior: UniqueConflictBehavior::Reject,
+            })
+            .unwrap()
+    };
+
+    let restarted = MemoryStoreProvider::persistent(&path).unwrap();
+    let replayed = restarted
+        .create(CreateOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            input: json!({ "name": "Acme" }),
+            idempotency_key: Some("create-acme".to_string()),
+            unique_indexes: Vec::new(),
+            unique_behavior: UniqueConflictBehavior::Reject,
+        })
+        .unwrap();
+
+    assert_eq!(replayed.id, original.id);
+    assert_eq!(replayed.version, original.version);
+}
