@@ -3,7 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{EndpointDefinition, EndpointRouter, OperationKind, PolicyAction, PolicyEngine};
+use crate::{
+    CommandSpec, CommandStep, EndpointDefinition, EndpointRouter, OperationKind, PolicyAction,
+    PolicyEngine,
+};
 
 use super::{ManagerPolicyDecision, ManagerPolicyEffect, SorxManagerContext};
 
@@ -159,7 +162,7 @@ pub fn generate_manager_view(
         if !matches!(endpoint.operation, OperationKind::Query) {
             builder.collect_schema_fields(
                 endpoint.input_schema.as_ref(),
-                matches!(endpoint.operation, OperationKind::Create),
+                endpoint_creates_record(endpoint),
             );
         }
         if !matches!(
@@ -311,14 +314,10 @@ impl RecordBuilder {
 
 fn action_label_key(endpoint: &EndpointDefinition) -> String {
     match endpoint.operation {
-        OperationKind::Create => format!(
-            "action.{}.create.label",
-            endpoint
-                .entity
-                .as_deref()
-                .map(manager_key)
-                .unwrap_or_else(|| manager_key(&endpoint.endpoint_id))
-        ),
+        OperationKind::Create => create_action_label_key(endpoint),
+        OperationKind::Command(ref spec) if command_creates_endpoint_record(endpoint, spec) => {
+            create_action_label_key(endpoint)
+        }
         OperationKind::Get => format!(
             "action.{}.view.label",
             endpoint
@@ -351,22 +350,63 @@ fn action_label_key(endpoint: &EndpointDefinition) -> String {
                 .map(manager_key)
                 .unwrap_or_else(|| manager_key(&endpoint.endpoint_id))
         ),
-        OperationKind::Command(ref spec)
-            if spec
-                .kind
-                .as_deref()
-                .is_some_and(|kind| matches!(kind, "record-create" | "record_create")) =>
-        {
-            format!(
-                "action.{}.create.label",
-                endpoint
-                    .entity
-                    .as_deref()
-                    .map(manager_key)
-                    .unwrap_or_else(|| manager_key(&endpoint.endpoint_id))
-            )
-        }
         OperationKind::Command(_) => format!("action.{}.label", manager_key(&endpoint.endpoint_id)),
+    }
+}
+
+fn create_action_label_key(endpoint: &EndpointDefinition) -> String {
+    format!(
+        "action.{}.create.label",
+        endpoint
+            .entity
+            .as_deref()
+            .map(manager_key)
+            .unwrap_or_else(|| manager_key(&endpoint.endpoint_id))
+    )
+}
+
+fn endpoint_creates_record(endpoint: &EndpointDefinition) -> bool {
+    match &endpoint.operation {
+        OperationKind::Create => true,
+        OperationKind::Command(spec) => command_creates_endpoint_record(endpoint, spec),
+        _ => false,
+    }
+}
+
+fn command_creates_endpoint_record(endpoint: &EndpointDefinition, spec: &CommandSpec) -> bool {
+    if spec
+        .kind
+        .as_deref()
+        .is_some_and(|kind| matches!(kind, "record-create" | "record_create"))
+    {
+        return true;
+    }
+    if !spec
+        .kind
+        .as_deref()
+        .is_some_and(|kind| matches!(kind, "record-mutation" | "record_mutation"))
+    {
+        return false;
+    }
+    spec.steps
+        .iter()
+        .any(|step| command_step_creates_endpoint_record(step, endpoint))
+}
+
+fn command_step_creates_endpoint_record(step: &CommandStep, endpoint: &EndpointDefinition) -> bool {
+    match step {
+        CommandStep::Create {
+            entity, collection, ..
+        } => {
+            entity
+                .as_deref()
+                .is_some_and(|entity| endpoint.entity.as_deref() == Some(entity))
+                || endpoint.collection == collection.as_deref().unwrap_or_default()
+        }
+        CommandStep::Foreach { steps, .. } => steps
+            .iter()
+            .any(|step| command_step_creates_endpoint_record(step, endpoint)),
+        _ => false,
     }
 }
 
@@ -484,8 +524,8 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        EndpointDefinition, EndpointMethod, OperationKind, PolicyConfig, QueryPlan, RiskLevel,
-        ViewTransform,
+        CommandSpec, CommandStep, EndpointDefinition, EndpointMethod, OperationKind, PolicyConfig,
+        QueryPlan, RiskLevel, ViewTransform,
     };
 
     use super::*;
@@ -579,6 +619,60 @@ mod tests {
             .find(|field| field.name == "landlord_id")
             .unwrap();
         assert!(landlord_id.generated);
+    }
+
+    #[test]
+    fn record_mutation_create_step_is_exposed_as_manager_create_action() {
+        let router = EndpointRouter::new([EndpointDefinition {
+            endpoint_id: "join_waiting_list".to_string(),
+            operation_id: "join_waiting_list".to_string(),
+            operation: OperationKind::Command(Box::new(CommandSpec {
+                kind: Some("record_mutation".to_string()),
+                action: Some("join_waiting_list".to_string()),
+                target: Some("waiting_list_entries".to_string()),
+                steps: vec![CommandStep::Create {
+                    as_name: Some("entry".to_string()),
+                    when: None,
+                    entity: Some("waiting_list_entry".to_string()),
+                    collection: Some("waiting_list_entries".to_string()),
+                    input: None,
+                }],
+                ..Default::default()
+            })),
+            method: EndpointMethod::Post,
+            path: "/v1/agent/waiting_list_entries/join_waiting_list".to_string(),
+            entity: Some("waiting_list_entry".to_string()),
+            collection: "waiting_list_entries".to_string(),
+            provider_binding: "store".to_string(),
+            risk: RiskLevel::Medium,
+            approval: None,
+            authorization: None,
+            input_schema: Some(json!({
+                "type": "object",
+                "required": ["lab_id", "email", "name"],
+                "properties": {
+                    "lab_id": {"type": "uuid"},
+                    "email": {"type": "email"},
+                    "name": {"type": "string"}
+                }
+            })),
+            output_schema: None,
+            view: ViewTransform::default(),
+            query_plan: QueryPlan::default(),
+            record_selector: false,
+        }])
+        .unwrap();
+
+        let view = generate_manager_view(&context(), &router, &PolicyEngine::default());
+
+        assert_eq!(
+            view.actions[0].label_key,
+            "action.waiting_list_entry.create.label"
+        );
+        assert_eq!(
+            view.records[0].create_field_names,
+            ["email", "lab_id", "name"]
+        );
     }
 
     #[test]

@@ -107,7 +107,7 @@ pub fn localize_manager_view(
 ) -> ManagerViewModel {
     view.locale = locale.locale.clone();
     for item in &mut view.navigation {
-        item.label = bundle.resolve(&locale.locale, &item.label_key, &item.record);
+        item.label = bundle.resolve(&locale.locale, &item.label_key, &item.collection);
     }
     for record in &mut view.records {
         record.label = bundle.resolve(&locale.locale, &record.label_key, &record.record);

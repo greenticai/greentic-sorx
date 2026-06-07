@@ -1311,9 +1311,28 @@ function greenticManagerSubmitUrl(value) {
   return base ? String(base).replace(/\/cards\/?$/, '/submit') : null;
 }
 
+function greenticManagerSearchValue(value) {
+  var inputId = value.manager_search_input;
+  if (!inputId) return null;
+  var raw = value[inputId];
+  if ((raw == null || raw === '') && value.input) raw = value.input[inputId];
+  if (raw == null) return null;
+  var text = String(raw).trim();
+  return text === '' ? null : text;
+}
+
+function greenticManagerTarget(value) {
+  var target = value.manager_target || (value.record ? 'records/' + value.record : 'dashboard');
+  var search = greenticManagerSearchValue(value);
+  if (search) {
+    target += (String(target).indexOf('?') === -1 ? '?' : '&') + 'q=' + encodeURIComponent(search);
+  }
+  return target;
+}
+
 function greenticManagerCardUrl(value) {
   var base = greenticManagerCardsBase(value);
-  var target = value.manager_target || (value.record ? 'records/' + value.record : 'dashboard');
+  var target = greenticManagerTarget(value);
   return base ? String(base).replace(/\/+$/, '') + '/' + String(target) : null;
 }
 
@@ -1337,6 +1356,23 @@ function greenticIncomingTextActivity(text) {
   };
 }
 
+async function greenticManagerErrorMessage(response, fallback) {
+  var message = fallback;
+  try {
+    var body = await response.clone().json();
+    message =
+      (body && body.error && body.error.message) ||
+      (body && body.message) ||
+      message;
+  } catch (err) {
+    try {
+      var text = await response.text();
+      if (text) message = text;
+    } catch (ignored) {}
+  }
+  return message;
+}
+
 async function handleGreenticManagerSubmit(store, activity) {
   var value = Object.assign({}, activity && activity.value || {});
   var submitUrl = greenticManagerSubmitUrl(value);
@@ -1350,22 +1386,27 @@ async function handleGreenticManagerSubmit(store, activity) {
       headers: headers,
       body: JSON.stringify(body)
     });
-    if (!submitResponse.ok) throw new Error('manager submit failed with HTTP ' + submitResponse.status);
+    if (!submitResponse.ok) {
+      throw new Error(await greenticManagerErrorMessage(submitResponse, 'manager submit failed with HTTP ' + submitResponse.status));
+    }
     var target = value.manager_target || (value.record ? 'records/' + value.record : 'dashboard');
     var cardResponse = await fetch(String(submitUrl).replace(/\/submit(?:[?#].*)?$/, '/cards/' + target), {
       method: 'GET',
       headers: headers
     });
-    if (!cardResponse.ok) throw new Error('manager card reload failed with HTTP ' + cardResponse.status);
+    if (!cardResponse.ok) {
+      throw new Error(await greenticManagerErrorMessage(cardResponse, 'manager card reload failed with HTTP ' + cardResponse.status));
+    }
     store.dispatch({
       type: 'DIRECT_LINE/INCOMING_ACTIVITY',
       payload: { activity: greenticIncomingCardActivity(await cardResponse.json()) }
     });
   } catch (err) {
     console.error('[manager-submit]', err);
+    var detail = err && err.message ? ' ' + err.message : '';
     store.dispatch({
       type: 'DIRECT_LINE/INCOMING_ACTIVITY',
-      payload: { activity: greenticIncomingTextActivity('Unable to submit this manager form. Please try again.') }
+      payload: { activity: greenticIncomingTextActivity('Unable to submit this manager form.' + detail) }
     });
   }
 }
