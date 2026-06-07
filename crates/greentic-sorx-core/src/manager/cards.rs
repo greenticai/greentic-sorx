@@ -200,6 +200,13 @@ enum FormScope {
 fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<Value> {
     let mut body = vec![text_block(title, "Large", true)];
     for field in &record.fields {
+        let uuid_identifier_hidden =
+            matches!(scope, FormScope::RecordEditable | FormScope::RecordReadOnly)
+                && is_uuid_detail_field(field)
+                && !record
+                    .create_field_names
+                    .iter()
+                    .any(|candidate| candidate == &field.name);
         if scope == FormScope::Create
             && !record.create_field_names.is_empty()
             && !record
@@ -215,10 +222,7 @@ fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<V
                 "Default",
                 false,
             ));
-        } else if field.generated && field.value.is_none()
-            || (matches!(scope, FormScope::RecordEditable | FormScope::RecordReadOnly)
-                && is_uuid_detail_field(field))
-        {
+        } else if field.generated && field.value.is_none() || uuid_identifier_hidden {
             continue;
         } else if scope == FormScope::RecordReadOnly
             || field.read_only
@@ -518,29 +522,39 @@ pub fn datetime_part_id(field_name: &str, part: &str) -> String {
 }
 
 fn apply_field_rules(input: &mut Value, field: &ManagerFieldView) {
-    let Some(rules) = field.rules.as_ref().and_then(Value::as_object) else {
-        return;
-    };
-
     let scalar_type = canonical_scalar_type(field.json_type.as_deref());
-    match scalar_type {
-        "decimal" | "integer" => {
-            copy_rule(input, rules, "min", "min");
-            copy_rule(input, rules, "max", "max");
+    let rules = field.rules.as_ref().and_then(Value::as_object);
+    if let Some(rules) = rules {
+        match scalar_type {
+            "decimal" | "integer" => {
+                copy_rule(input, rules, "min", "min");
+                copy_rule(input, rules, "max", "max");
+            }
+            "date" | "time" => {
+                copy_rule(input, rules, "after", "min");
+                copy_rule(input, rules, "before", "max");
+            }
+            "datetime" => {
+                input["placeholder"] = Value::String("YYYY-MM-DDTHH:MM:SSZ".to_string());
+            }
+            _ => {}
         }
-        "date" | "time" => {
-            copy_rule(input, rules, "after", "min");
-            copy_rule(input, rules, "before", "max");
-        }
-        "datetime" => {
-            input["placeholder"] = Value::String("YYYY-MM-DDTHH:MM:SSZ".to_string());
-        }
-        _ => {}
     }
 
     if input.get("type").and_then(Value::as_str) == Some("Input.Text") {
-        copy_rule(input, rules, "max_length", "maxLength");
-        copy_rule(input, rules, "pattern", "regex");
+        if scalar_type == "uuid" {
+            input["placeholder"] =
+                Value::String("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".to_string());
+            input["regex"] = Value::String(
+                "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                    .to_string(),
+            );
+            input["errorMessage"] = Value::String(format!("{} must be a UUID.", field.label));
+        }
+        if let Some(rules) = rules {
+            copy_rule(input, rules, "max_length", "maxLength");
+            copy_rule(input, rules, "pattern", "regex");
+        }
     }
 
     input["metadata"] = json!({
@@ -611,10 +625,12 @@ fn submit_actions(
         data["endpoint_id"] = Value::String(action.endpoint_id.clone());
         data["operation_id"] = Value::String(action.operation_id.clone());
         data["action"] = Value::String("manager_submit".to_string());
+        data["sorx_action_style"] = Value::String("positive".to_string());
     }
     vec![json!({
         "type": "Action.Submit",
         "title": title,
+        "style": "positive",
         "data": data
     })]
 }
@@ -794,6 +810,11 @@ mod tests {
             actions["actions"][0]["data"]["endpoint_id"],
             "record_alpha.create"
         );
+        assert_eq!(actions["actions"][0]["style"], "positive");
+        assert_eq!(
+            actions["actions"][0]["data"]["sorx_action_style"],
+            "positive"
+        );
         assert_eq!(actions["actions"][1]["title"], "Cancel");
     }
 
@@ -886,6 +907,49 @@ mod tests {
         let body = card["body"].as_array().unwrap();
         assert!(!body.iter().any(|item| item["id"] == "landlord_id"));
         assert!(body.iter().any(|item| item["id"] == "name"));
+    }
+
+    #[test]
+    fn uuid_create_fields_are_validated_and_visible_on_detail() {
+        let lab_id = "11111111-1111-4111-8111-111111111111";
+        let mut view = view();
+        view.records[0].create_field_names = vec!["lab_id".to_string()];
+        view.records[0].fields = vec![ManagerFieldView {
+            name: "lab_id".to_string(),
+            label_key: "field.record_alpha.lab_id.label".to_string(),
+            label: "Lab Id".to_string(),
+            json_type: Some("uuid".to_string()),
+            rules: None,
+            generated: false,
+            relationship: None,
+            required: true,
+            read_only: false,
+            redacted: false,
+            value: Some(json!(lab_id)),
+            policy: ManagerPolicyDecision::allow(),
+        }];
+
+        let create = render_record_create_card(&view, "RecordAlpha").unwrap();
+        let input = create["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "lab_id")
+            .unwrap();
+        assert_eq!(input["type"], "Input.Text");
+        assert_eq!(input["metadata"]["scalar_type"], "uuid");
+        assert_eq!(
+            input["regex"],
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        );
+        assert_eq!(input["errorMessage"], "Lab Id must be a UUID.");
+
+        let detail = render_record_detail_card(&view, "RecordAlpha", lab_id).unwrap();
+        let body = detail["body"].as_array().unwrap();
+        assert!(
+            body.iter()
+                .any(|item| item["text"] == format!("Lab Id: {lab_id}"))
+        );
     }
 
     #[test]
