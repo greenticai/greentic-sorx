@@ -22,3 +22,13 @@ include = [
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+foundationdb = { version = "0.9", features = ["fdb-7_3"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+
+[features]
+default = []
+# Enables the real FoundationDB-backed canonical store. Requires a FoundationDB
+# 7.3 client library at link time and a reachable cluster file at runtime.
+# Building/testing this feature locally requires the FDB header/lib harness
+# (see crate docs on `foundationdb_real`). The default build does NOT pull it.
+foundationdb = ["dep:foundationdb", "dep:tokio"]
