@@ -1053,7 +1053,16 @@ fn dispatch(
                     "start requires --schema or --answers <FILE> in non-interactive mode",
                 ));
             }
-            run_start(pack, schema, answers, dry_run, emit_answers, json, _context)
+            run_start(
+                pack,
+                schema,
+                answers,
+                dry_run,
+                emit_answers,
+                json,
+                registry_path,
+                _context,
+            )
         }
         Commands::Run { pack, answers } => {
             if answers.is_none() && _context.non_interactive {
@@ -1061,7 +1070,16 @@ fn dispatch(
                     "run requires --answers <FILE> in non-interactive mode",
                 ));
             }
-            run_start(pack, false, answers, false, false, false, _context)
+            run_start(
+                pack,
+                false,
+                answers,
+                false,
+                false,
+                false,
+                registry_path,
+                _context,
+            )
         }
     }
 }
@@ -3564,6 +3582,7 @@ fn run_mcp_start(pack: PathBuf, answers: PathBuf, context: &SorxCommandContext) 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_start(
     pack: PathBuf,
     schema: bool,
@@ -3571,6 +3590,7 @@ fn run_start(
     dry_run: bool,
     emit_answers: bool,
     _json: bool,
+    registry_path: Option<PathBuf>,
     context: &SorxCommandContext,
 ) -> CliResult<()> {
     if schema && (answers.is_some() || emit_answers) {
@@ -3601,6 +3621,12 @@ fn run_start(
         let public_base_url = config.server.public_base_url.clone();
         let initial_runtime_config =
             load_initial_runtime_config(&config.environment, context)?.map(|(_, config)| config);
+        // Only enable the HTTP registry API when the operator explicitly opts
+        // in via `--registry` or `SORX_REGISTRY_PATH`; otherwise the
+        // `/v1/sorx/*` deployment/alias endpoints stay 501 (back-compat).
+        let server_registry_path = registry_path
+            .clone()
+            .or_else(|| std::env::var_os("SORX_REGISTRY_PATH").map(PathBuf::from));
         let server = http_runtime::HttpRuntime::from_pack_with_runtime_config(
             "local",
             &pack,
@@ -3614,7 +3640,8 @@ fn run_start(
             } else {
                 CliError::runtime(message)
             }
-        })?;
+        })?
+        .with_registry_path(server_registry_path.clone());
         let listener = std::net::TcpListener::bind(&bind).map_err(|err| {
             CliError::runtime(format!("failed to bind HTTP server on {bind}: {err}"))
         })?;
@@ -3625,6 +3652,9 @@ fn run_start(
         eprintln!("greentic-sorx HTTP runtime listening on {base_url}");
         eprintln!("Sorx Business Manager: {base_url}/v1/sorx/manager");
         eprintln!("Sorx Business Manager alias: {base_url}/manager");
+        if server_registry_path.is_some() {
+            eprintln!("Sorx deployment registry API: {base_url}/v1/sorx/routing-table");
+        }
         return server
             .serve(listener)
             .map_err(|err| CliError::runtime(format!("HTTP server failed: {err}")));
