@@ -10280,4 +10280,285 @@ mod tests {
         assert_eq!(second["result"]["id"], "tenant-1");
         assert_eq!(second["result"]["data"]["name"], "Acme");
     }
+
+    mod registry_http {
+        use greentic_sorx_core::{
+            CreateDeploymentRequest, DeploymentRegistry, DeploymentStatus, DeploymentVisibility,
+            LocalDeploymentRegistryStore, PackArtifact, StateMode,
+        };
+
+        use super::super::{HttpResponse, handle_registry_request};
+
+        pub(super) fn create_request(
+            version: &str,
+            digest: &str,
+            api_version_label: &str,
+        ) -> CreateDeploymentRequest {
+            CreateDeploymentRequest {
+                artifact: PackArtifact {
+                    source: format!("fixtures/landlord-{version}.gtpack"),
+                    name: "landlord-tenant-sor".to_string(),
+                    version: version.to_string(),
+                    digest: digest.to_string(),
+                    signature: None,
+                    signature_ref: None,
+                },
+                tenant_id: "acme".to_string(),
+                sor_name: "landlord".to_string(),
+                environment: "production".to_string(),
+                api_version_label: api_version_label.to_string(),
+                base_path: format!("/sorx/acme/landlord/{api_version_label}"),
+                visibility: DeploymentVisibility::Private,
+                state_mode: StateMode::SharedCompatible,
+                state_namespace: None,
+                deployment_id: None,
+                allow_api_version_conflict: false,
+                allow_shared_state_conflict: false,
+            }
+        }
+
+        fn passing_report(deployment_id: &str, pack_digest: &str) -> serde_json::Value {
+            serde_json::json!({
+                "schema": "greentic.sorx.validation-report.v1",
+                "deployment_id": deployment_id,
+                "pack_digest": pack_digest,
+                "result": "pass",
+                "public_exposure_allowed": true,
+                "tests": []
+            })
+        }
+
+        struct Seed {
+            store: LocalDeploymentRegistryStore,
+            v1: String,
+            v2: String,
+            _temp: tempfile::TempDir,
+        }
+
+        /// Seed a registry file with two deployments (v1 + v2, both validated
+        /// hence routable) and a `stable` alias pointing at v1.
+        fn seeded_store() -> Seed {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("registry.json");
+            let store = LocalDeploymentRegistryStore::new(&path);
+            let mut registry = DeploymentRegistry::default();
+            let v1 = registry
+                .create_deployment(create_request("1.0.0", "sha256:111", "v1"))
+                .unwrap();
+            let v2 = registry
+                .create_deployment(create_request("2.0.0", "sha256:222", "v2"))
+                .unwrap();
+            registry.validate_deployment(&v1.deployment_id).unwrap();
+            registry.validate_deployment(&v2.deployment_id).unwrap();
+            // Validation reports so promote_alias can run in the rollback test.
+            registry
+                .record_validation_report(passing_report(&v1.deployment_id, "sha256:111"))
+                .unwrap();
+            registry
+                .record_validation_report(passing_report(&v2.deployment_id, "sha256:222"))
+                .unwrap();
+            registry
+                .set_alias("acme", "landlord", "stable", &v1.deployment_id)
+                .unwrap();
+            store.save(&registry).unwrap();
+            Seed {
+                store,
+                v1: v1.deployment_id,
+                v2: v2.deployment_id,
+                _temp: temp,
+            }
+        }
+
+        fn call(seed: &Seed, method: &str, path: &str, body: &str) -> HttpResponse {
+            handle_registry_request(&seed.store, method, path, body)
+        }
+
+        #[test]
+        fn registry_routing_table_resolves_alias() {
+            let seed = seeded_store();
+            let response = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            assert_eq!(response.status, 200);
+            let routes = response.body["routes"].as_array().unwrap();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0]["alias"], "stable");
+            assert_eq!(routes[0]["deployment_id"], seed.v1);
+            assert_eq!(routes[0]["routable"], true);
+            assert_eq!(routes[0]["pack_version"], "1.0.0");
+        }
+
+        #[test]
+        fn registry_set_alias_then_resolve() {
+            let seed = seeded_store();
+            let put = call(
+                &seed,
+                "PUT",
+                "/v1/sorx/aliases/acme/landlord/stable",
+                &format!(r#"{{"target_deployment_id":"{}"}}"#, seed.v2),
+            );
+            assert_eq!(put.status, 200);
+            assert_eq!(put.body["target_deployment_id"], seed.v2);
+
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            let routes = table.body["routes"].as_array().unwrap();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0]["deployment_id"], seed.v2);
+            assert_eq!(routes[0]["pack_version"], "2.0.0");
+        }
+
+        #[test]
+        fn registry_set_alias_rejects_non_routable() {
+            // Seed a pending (non-routable) deployment alongside the routable ones.
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("registry.json");
+            let store = LocalDeploymentRegistryStore::new(&path);
+            let mut registry = DeploymentRegistry::default();
+            let routable = registry
+                .create_deployment(create_request("1.0.0", "sha256:111", "v1"))
+                .unwrap();
+            registry
+                .validate_deployment(&routable.deployment_id)
+                .unwrap();
+            let pending = registry
+                .create_deployment(create_request("2.0.0", "sha256:222", "v2"))
+                .unwrap();
+            assert_eq!(
+                registry.deployment(&pending.deployment_id).unwrap().status,
+                DeploymentStatus::Pending
+            );
+            registry
+                .set_alias("acme", "landlord", "stable", &routable.deployment_id)
+                .unwrap();
+            store.save(&registry).unwrap();
+            let seed = Seed {
+                store,
+                v1: routable.deployment_id.clone(),
+                v2: pending.deployment_id.clone(),
+                _temp: temp,
+            };
+
+            let response = call(
+                &seed,
+                "PUT",
+                "/v1/sorx/aliases/acme/landlord/stable",
+                &format!(r#"{{"target_deployment_id":"{}"}}"#, pending.deployment_id),
+            );
+            assert!(
+                (400..500).contains(&response.status),
+                "expected 4xx, got {}",
+                response.status
+            );
+
+            // Alias still points at the routable deployment.
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            let routes = table.body["routes"].as_array().unwrap();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0]["deployment_id"], routable.deployment_id);
+        }
+
+        #[test]
+        fn registry_rollback_alias() {
+            let seed = seeded_store();
+            // Promote v2 to public on the `stable` alias.
+            let promote = call(
+                &seed,
+                "POST",
+                &format!("/v1/sorx/deployments/{}/promote", seed.v2),
+                r#"{"alias":"stable","visibility":"public"}"#,
+            );
+            assert_eq!(promote.status, 200, "promote body: {:?}", promote.body);
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            assert_eq!(table.body["routes"][0]["deployment_id"], seed.v2);
+
+            // Roll the `stable` alias back to v1.
+            let rollback = call(
+                &seed,
+                "POST",
+                &format!("/v1/sorx/deployments/{}/rollback", seed.v2),
+                &format!(r#"{{"alias":"stable","to_deployment_id":"{}"}}"#, seed.v1),
+            );
+            assert_eq!(rollback.status, 200, "rollback body: {:?}", rollback.body);
+
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            assert_eq!(table.body["routes"][0]["deployment_id"], seed.v1);
+
+            // v2 is now marked RolledBack.
+            let deployment = call(
+                &seed,
+                "GET",
+                &format!("/v1/sorx/deployments/{}", seed.v2),
+                "",
+            );
+            assert_eq!(deployment.status, 200);
+            assert_eq!(deployment.body["status"], "rolled_back");
+        }
+
+        #[test]
+        fn registry_list_deployments_and_aliases() {
+            let seed = seeded_store();
+            let deployments = call(
+                &seed,
+                "GET",
+                "/v1/sorx/deployments?tenant=acme&sor=landlord",
+                "",
+            );
+            assert_eq!(deployments.status, 200);
+            assert_eq!(deployments.body["deployments"].as_array().unwrap().len(), 2);
+
+            let none = call(&seed, "GET", "/v1/sorx/deployments?tenant=other", "");
+            assert_eq!(none.body["deployments"].as_array().unwrap().len(), 0);
+
+            let aliases = call(
+                &seed,
+                "GET",
+                "/v1/sorx/aliases?tenant=acme&sor=landlord",
+                "",
+            );
+            assert_eq!(aliases.status, 200);
+            let aliases = aliases.body["aliases"].as_array().unwrap();
+            assert_eq!(aliases.len(), 1);
+            assert_eq!(aliases[0]["alias"], "stable");
+            assert_eq!(aliases[0]["target_deployment_id"], seed.v1);
+        }
+    }
+
+    #[test]
+    fn registry_501_without_registry_path() {
+        // Admin API surface enabled but no registry path attached -> 501.
+        let mut runtime = runtime("local");
+        runtime.admin_api_enabled = true;
+        let response = response(&runtime, "GET", "/v1/sorx/deployments", &[], "");
+        assert_eq!(response.status, 501);
+        assert_eq!(
+            response.body["error"]["code"],
+            "SORX_ADMIN_API_NOT_IMPLEMENTED"
+        );
+    }
+
+    #[test]
+    fn registry_routing_table_served_when_registry_path_attached() {
+        // Thin wiring test: a registry path makes handle_request serve the
+        // routing-table from the persisted store instead of 501.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("registry.json");
+        let store = greentic_sorx_core::LocalDeploymentRegistryStore::new(&path);
+        let mut registry = greentic_sorx_core::DeploymentRegistry::default();
+        let created = registry
+            .create_deployment(registry_http::create_request("1.0.0", "sha256:111", "v1"))
+            .unwrap();
+        registry
+            .validate_deployment(&created.deployment_id)
+            .unwrap();
+        registry
+            .set_alias("acme", "landlord", "stable", &created.deployment_id)
+            .unwrap();
+        store.save(&registry).unwrap();
+
+        let runtime = runtime("local").with_registry_path(Some(path));
+        let response = response(&runtime, "GET", "/v1/sorx/routing-table", &[], "");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body["routes"][0]["deployment_id"],
+            created.deployment_id
+        );
+    }
 }
