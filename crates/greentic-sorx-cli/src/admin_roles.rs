@@ -105,6 +105,24 @@ impl RolesResolver for AdminRolesClient {
     }
 }
 
+/// Env var holding the admin API root URL (e.g. `https://admin.example.com`).
+pub const ENDPOINT_ENV: &str = "SORX_ADMIN_ROLES_ENDPOINT";
+/// Env var holding the `gts_<...>` service key.
+pub const SERVICE_KEY_ENV: &str = "SORX_ADMIN_ROLES_SERVICE_KEY";
+/// Env var holding the per-tenant cache TTL in seconds (default 300).
+pub const TTL_SECS_ENV: &str = "SORX_ADMIN_ROLES_TTL_SECS";
+
+/// Default per-tenant cache TTL when [`TTL_SECS_ENV`] is unset or unparsable.
+const DEFAULT_TTL_SECS: u64 = 300;
+
+/// Reads an env var, returning `None` when unset or blank after trimming.
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// A cached tenant map together with the instant it was fetched.
 type CacheEntry = (Instant, HashMap<String, Vec<String>>);
 
@@ -123,6 +141,26 @@ impl AdminRolesOverlay {
             ttl,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Builds an overlay backed by an [`AdminRolesClient`] from environment
+    /// configuration. Returns `None` when either [`ENDPOINT_ENV`] or
+    /// [`SERVICE_KEY_ENV`] is unset/blank, which preserves the legacy
+    /// header-roles behavior (config is opt-in, default-OFF).
+    ///
+    /// [`TTL_SECS_ENV`] overrides the cache TTL (default
+    /// [`DEFAULT_TTL_SECS`] seconds); an unparsable value falls back to the
+    /// default rather than failing startup.
+    pub fn from_env() -> Option<Self> {
+        let endpoint = non_empty_env(ENDPOINT_ENV)?;
+        let service_key = non_empty_env(SERVICE_KEY_ENV)?;
+        let ttl_secs = std::env::var(TTL_SECS_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(DEFAULT_TTL_SECS);
+        let client = AdminRolesClient::new(endpoint, service_key);
+        Some(Self::new(Box::new(client), Duration::from_secs(ttl_secs)))
     }
 
     /// Effective roles for a caller.

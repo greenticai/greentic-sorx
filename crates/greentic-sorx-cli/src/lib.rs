@@ -3602,7 +3602,7 @@ fn run_start(
         let public_base_url = config.server.public_base_url.clone();
         let initial_runtime_config =
             load_initial_runtime_config(&config.environment, context)?.map(|(_, config)| config);
-        let server = http_runtime::HttpRuntime::from_pack_with_runtime_config(
+        let mut server = http_runtime::HttpRuntime::from_pack_with_runtime_config(
             "local",
             &pack,
             config,
@@ -3616,6 +3616,16 @@ fn run_start(
                 CliError::runtime(message)
             }
         })?;
+        // Opt-in, default-OFF: when SORX_ADMIN_ROLES_ENDPOINT and
+        // SORX_ADMIN_ROLES_SERVICE_KEY are set, the admin system-of-record
+        // becomes authoritative for caller roles and the self-asserted
+        // `x-greentic-caller-role` header is ignored. Absent => unchanged.
+        if let Some(overlay) = admin_roles::AdminRolesOverlay::from_env() {
+            eprintln!(
+                "greentic-sorx: admin-backed roles overlay enabled (self-asserted caller-role header ignored)"
+            );
+            server = server.with_admin_roles_overlay(std::sync::Arc::new(overlay));
+        }
         let listener = std::net::TcpListener::bind(&bind).map_err(|err| {
             CliError::runtime(format!("failed to bind HTTP server on {bind}: {err}"))
         })?;
