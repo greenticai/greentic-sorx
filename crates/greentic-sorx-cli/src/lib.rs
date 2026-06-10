@@ -28,6 +28,7 @@ use greentic_sorx_pack::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod admin_roles;
 mod http_runtime;
 mod test_runtime;
 mod validation;
