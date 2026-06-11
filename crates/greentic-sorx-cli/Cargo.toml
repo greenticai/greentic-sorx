@@ -61,6 +61,9 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "json"] 
 zip.workspace = true
 
 [dev-dependencies]
+async-nats.workspace = true
 ciborium.workspace = true
 criterion.workspace = true
+futures = "0.3"
 semver.workspace = true
+tokio = { workspace = true, features = ["time"] }

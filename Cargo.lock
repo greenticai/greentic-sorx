@@ -2080,6 +2080,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion",
+ "futures",
  "greentic-qa-lib",
  "greentic-sorx-core",
  "greentic-sorx-pack",
