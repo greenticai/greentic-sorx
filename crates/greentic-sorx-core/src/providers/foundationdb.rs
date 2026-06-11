@@ -35,15 +35,54 @@ impl FoundationDbProviderConfig {
     }
 }
 
+/// Backing store for the FoundationDB binding.
+///
+/// The adapter chooses its backend at construction time:
+///
+/// * With `--features foundationdb` AND a configured `cluster_file` that exists
+///   on disk, it wires the real [`FoundationDbStore`](super::FoundationDbStore)
+///   against the live cluster.
+/// * Otherwise (feature off, or no/absent cluster file) it falls back to the
+///   file-persistent [`MemoryStoreProvider`] — the historical stub behavior.
+enum Backend {
+    Memory(MemoryStoreProvider),
+    #[cfg(feature = "foundationdb")]
+    Foundation(super::FoundationDbStore),
+}
+
 #[derive(Debug)]
 pub struct FoundationDbProviderAdapter {
-    inner: MemoryStoreProvider,
+    inner: Backend,
+}
+
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Memory(_) => f.write_str("Backend::Memory"),
+            #[cfg(feature = "foundationdb")]
+            Self::Foundation(_) => f.write_str("Backend::Foundation"),
+        }
+    }
 }
 
 impl FoundationDbProviderAdapter {
     pub fn new(config: FoundationDbProviderConfig) -> SorxResult<Self> {
+        #[cfg(feature = "foundationdb")]
+        {
+            // Only engage the real backend when a cluster file is configured
+            // and actually present; this keeps the existing stub tests (which
+            // pass placeholder cluster paths) on the memory backend.
+            if let Some(cluster_file) = config.cluster_file.as_deref()
+                && std::path::Path::new(cluster_file).exists()
+            {
+                let store = super::FoundationDbStore::connect(cluster_file)?;
+                return Ok(Self {
+                    inner: Backend::Foundation(store),
+                });
+            }
+        }
         Ok(Self {
-            inner: MemoryStoreProvider::persistent(config.persistence_path())?,
+            inner: Backend::Memory(MemoryStoreProvider::persistent(config.persistence_path())?),
         })
     }
 
@@ -54,49 +93,93 @@ impl FoundationDbProviderAdapter {
 
 impl SorStoreProvider for FoundationDbProviderAdapter {
     fn create(&self, op: CreateOp) -> SorxResult<EntityRecord> {
-        self.inner.create(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.create(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.create(op),
+        }
     }
 
     fn get(&self, op: GetOp) -> SorxResult<Option<EntityRecord>> {
-        self.inner.get(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.get(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.get(op),
+        }
     }
 
     fn update(&self, op: UpdateOp) -> SorxResult<EntityRecord> {
-        self.inner.update(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.update(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.update(op),
+        }
     }
 
     fn query(&self, op: QueryOp) -> SorxResult<QueryResult> {
-        self.inner.query(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.query(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.query(op),
+        }
     }
 
     fn delete(&self, op: DeleteOp) -> SorxResult<DeleteResult> {
-        self.inner.delete(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.delete(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.delete(op),
+        }
     }
 }
 
 impl SorxCanonicalStore for FoundationDbProviderAdapter {
     fn append_event(&self, op: AppendEventOp) -> SorxResult<EventRecord> {
-        self.inner.append_event(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.append_event(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.append_event(op),
+        }
     }
 
     fn query_index(&self, op: IndexQueryOp) -> SorxResult<IndexQueryResult> {
-        self.inner.query_index(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.query_index(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.query_index(op),
+        }
     }
 
     fn traverse(&self, op: TraverseOp) -> SorxResult<TraverseResult> {
-        self.inner.traverse(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.traverse(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.traverse(op),
+        }
     }
 
     fn get_external_refs(&self, op: ExternalRefsOp) -> SorxResult<ExternalRefsResult> {
-        self.inner.get_external_refs(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.get_external_refs(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.get_external_refs(op),
+        }
     }
 
     fn store_evidence(&self, op: StoreEvidenceOp) -> SorxResult<()> {
-        self.inner.store_evidence(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.store_evidence(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.store_evidence(op),
+        }
     }
 
     fn get_evidence(&self, op: ExternalRefsOp) -> SorxResult<EvidenceResult> {
-        self.inner.get_evidence(op)
+        match &self.inner {
+            Backend::Memory(inner) => inner.get_evidence(op),
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(inner) => inner.get_evidence(op),
+        }
     }
 }
 
