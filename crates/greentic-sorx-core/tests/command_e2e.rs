@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use greentic_sorx_core::{
-    CallerContext, EndpointRouter, EndpointStatus, McpRuntime, MemoryStoreProvider,
-    ProviderRegistry, SorxRuntime, default_start_schema, invocation, mcp_tools_from_metadata,
-    normalize_start_answers, runtime_config_from_answers, runtime_pack,
+    CallerContext, EndpointRouter, EndpointStatus, McpRuntime, MemoryBusinessEventSink,
+    MemoryStoreProvider, ProviderRegistry, SorxRuntime, default_start_schema, invocation,
+    mcp_tools_from_metadata, normalize_start_answers, runtime_config_from_answers, runtime_pack,
 };
 use serde_json::{Value, json};
 
@@ -441,5 +441,63 @@ fn command_e2e_stress_repeated_mutations_remain_consistent() {
     assert_eq!(
         remaining.output["records"].as_array().unwrap().len(),
         total - total.div_ceil(3)
+    );
+}
+
+#[test]
+fn emit_event_step_publishes_business_event_via_sink() {
+    let sink = Arc::new(MemoryBusinessEventSink::new());
+    let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
+    let config = runtime_config_from_answers("command-e2e", &normalized.answers).unwrap();
+    let router = EndpointRouter::from_agent_gateway(&gateway()).unwrap();
+    let mut providers = ProviderRegistry::new();
+    providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
+    let runtime = SorxRuntime::new(
+        runtime_pack("command-e2e", "0.1.0"),
+        config,
+        router,
+        providers,
+    )
+    .with_event_sink(sink.clone());
+
+    // Create a record first so the generate_code command has something to update
+    runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.create",
+            "record.create",
+            json!({ "id": "evt-record-1", "name": "EventTest", "active": true }),
+        ))
+        .unwrap();
+
+    // Run the command that contains an emit_event step
+    let result = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "record.generate_code",
+            "record.generate_code",
+            json!({ "id": "evt-record-1" }),
+        ))
+        .unwrap();
+    assert_eq!(result.status, EndpointStatus::Ok);
+
+    let events = sink.events().unwrap();
+
+    // The create publishes a `created` entity event; the emit_event step publishes
+    // the command event.  Filter to find the command event by topic pattern.
+    let command_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.topic == "sorla.command-e2e.record_code_generated")
+        .collect();
+    assert_eq!(
+        command_events.len(),
+        1,
+        "emit_event step must publish exactly one business event with the record_code_generated topic"
+    );
+    let command_event = command_events[0];
+    assert!(
+        command_event.r#type.ends_with(".v1"),
+        "business event type must end with .v1, got: {}",
+        command_event.r#type
     );
 }

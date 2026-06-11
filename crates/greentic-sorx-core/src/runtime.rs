@@ -8,15 +8,17 @@ use serde_json::{Value, json};
 use crate::{
     AdminActionContext, AdminActionRequest, AdminActionResponse, AdminObserverEvent, AppendEventOp,
     ApprovalBroker, ApprovalRequest, ApprovalStatus, AuditSink, AuthorizationPolicyInput,
-    AuthorizationPolicyResource, AuthorizationRequirement, CommandOrderDirection, CommandSpec,
-    CommandStep, ControlDecision, ControlDecisionAction, ControlHook, CreateOp, DeleteOp,
-    DisabledAuditSink, EndpointDefinition, EndpointInvocation, EndpointResult, EndpointRouter,
-    EndpointStatus, GetOp, IndexQueryOp, LocalPendingBroker, NoopControlHook, NoopObserverHook,
+    AuthorizationPolicyResource, AuthorizationRequirement, BusinessEventSink, CommandEventInput,
+    CommandOrderDirection, CommandSpec, CommandStep, ControlDecision, ControlDecisionAction,
+    ControlHook, CreateOp, DeleteOp, DisabledAuditSink, DisabledBusinessEventSink,
+    EndpointDefinition, EndpointInvocation, EndpointResult, EndpointRouter, EndpointStatus,
+    EntityEventInput, GetOp, IndexQueryOp, LocalPendingBroker, NoopControlHook, NoopObserverHook,
     ObserverEvent, ObserverHook, OperationKind, PolicyAction, PolicyConfig, PolicyDecision,
     PolicyEngine, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, QueryOrder,
     QueryOrderDirection, RuntimePack, SorStoreProvider, SorxAuditEvent, SorxError, SorxEvent,
     SorxResult, SorxRuntimeConfig, StackCallContext, StackCallRequest, StackCallResponse,
     TraverseOp, UniqueConflictBehavior, UniqueIndex, UpdateOp, ViewTransform, apply_value_patch,
+    command_event_envelope, entity_event_envelope,
 };
 
 static GENERATED_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -30,6 +32,7 @@ pub struct SorxRuntime {
     pub policy: PolicyEngine,
     approval_broker: Arc<dyn ApprovalBroker>,
     audit_sink: Arc<dyn AuditSink>,
+    event_sink: Arc<dyn BusinessEventSink>,
     control_hook: Arc<dyn ControlHook>,
     observer_hook: Arc<dyn ObserverHook>,
     observer_fail_open: bool,
@@ -51,6 +54,7 @@ impl SorxRuntime {
             policy,
             approval_broker: Arc::new(LocalPendingBroker),
             audit_sink: Arc::new(DisabledAuditSink),
+            event_sink: Arc::new(DisabledBusinessEventSink),
             control_hook: Arc::new(NoopControlHook),
             observer_hook: Arc::new(NoopObserverHook),
             observer_fail_open: true,
@@ -69,6 +73,11 @@ impl SorxRuntime {
 
     pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = audit_sink;
+        self
+    }
+
+    pub fn with_event_sink(mut self, event_sink: Arc<dyn BusinessEventSink>) -> Self {
+        self.event_sink = event_sink;
         self
     }
 
@@ -382,13 +391,28 @@ impl SorxRuntime {
                             .unique_indexes_for(&binding.entity, &binding.collection),
                         unique_behavior: UniqueConflictBehavior::Reject,
                     })?;
+                    let record_id = record.id.clone();
+                    let record_value = serde_json::to_value(record)
+                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?;
+                    self.publish_business_event(
+                        entity_event_envelope(
+                            &self.pack,
+                            EntityEventInput {
+                                environment: &self.config.environment,
+                                tenant_id: &invocation.tenant_id,
+                                entity: &binding.entity,
+                                operation: "created",
+                                record_id: &record_id,
+                                record: Some(record_value.clone()),
+                                idempotency_key: invocation.idempotency_key.as_deref(),
+                            },
+                        ),
+                        endpoint,
+                        &invocation,
+                    );
                     EndpointResult {
                         status: EndpointStatus::Created,
-                        output: canonical_to_view(
-                            &endpoint.view,
-                            serde_json::to_value(record)
-                                .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
-                        ),
+                        output: canonical_to_view(&endpoint.view, record_value),
                         events: vec![event(endpoint, &invocation, "entity.created")],
                     }
                 }
@@ -430,13 +454,28 @@ impl SorxRuntime {
                         unique_indexes: self
                             .unique_indexes_for(&binding.entity, &binding.collection),
                     })?;
+                    let record_id = record.id.clone();
+                    let record_value = serde_json::to_value(record)
+                        .map_err(|err| SorxError::new("encode_failed", err.to_string()))?;
+                    self.publish_business_event(
+                        entity_event_envelope(
+                            &self.pack,
+                            EntityEventInput {
+                                environment: &self.config.environment,
+                                tenant_id: &invocation.tenant_id,
+                                entity: &binding.entity,
+                                operation: "updated",
+                                record_id: &record_id,
+                                record: Some(record_value.clone()),
+                                idempotency_key: invocation.idempotency_key.as_deref(),
+                            },
+                        ),
+                        endpoint,
+                        &invocation,
+                    );
                     EndpointResult {
                         status: EndpointStatus::Ok,
-                        output: canonical_to_view(
-                            &endpoint.view,
-                            serde_json::to_value(record)
-                                .map_err(|err| SorxError::new("encode_failed", err.to_string()))?,
-                        ),
+                        output: canonical_to_view(&endpoint.view, record_value),
                         events: vec![event(endpoint, &invocation, "entity.updated")],
                     }
                 }
@@ -485,13 +524,31 @@ impl SorxRuntime {
                     }
                 }
                 OperationKind::Delete => {
-                    let id = required_string(&invocation.input, "id")?;
+                    let record_id = required_string(&invocation.input, "id")?;
                     let deleted = provider.delete(DeleteOp {
                         namespace,
                         entity: binding.entity.clone(),
                         collection: binding.collection.clone(),
-                        id,
+                        id: record_id.clone(),
                     })?;
+                    if deleted.deleted {
+                        self.publish_business_event(
+                            entity_event_envelope(
+                                &self.pack,
+                                EntityEventInput {
+                                    environment: &self.config.environment,
+                                    tenant_id: &invocation.tenant_id,
+                                    entity: &binding.entity,
+                                    operation: "deleted",
+                                    record_id: &record_id,
+                                    record: None,
+                                    idempotency_key: invocation.idempotency_key.as_deref(),
+                                },
+                            ),
+                            endpoint,
+                            &invocation,
+                        );
+                    }
                     EndpointResult {
                         status: if deleted.deleted {
                             EndpointStatus::Deleted
@@ -1106,6 +1163,10 @@ impl SorxRuntime {
             } => {
                 let canonical = self.providers.canonical_store(&binding.provider_id)?;
                 let data = command.resolve_value(payload)?;
+                let subject_id = command
+                    .resolve_string("$input.id")
+                    .or_else(|| command.resolve_string("$item.id"))
+                    .unwrap_or_else(|| endpoint.endpoint_id.clone());
                 let record = canonical.append_event(AppendEventOp {
                     namespace: namespace.clone(),
                     stream: stream.clone().unwrap_or_else(|| {
@@ -1117,12 +1178,25 @@ impl SorxRuntime {
                     capability: Some(business_event_capability(&self.pack.name, event)),
                     producer: Some(format!("sorx:{}:{}", self.pack.name, self.pack.version)),
                     subject_entity: binding.entity.clone(),
-                    subject_id: command
-                        .resolve_string("$input.id")
-                        .or_else(|| command.resolve_string("$item.id"))
-                        .unwrap_or_else(|| endpoint.endpoint_id.clone()),
-                    data,
+                    subject_id: subject_id.clone(),
+                    data: data.clone(),
                 })?;
+                self.publish_business_event(
+                    command_event_envelope(
+                        &self.pack,
+                        CommandEventInput {
+                            environment: &self.config.environment,
+                            tenant_id: &invocation.tenant_id,
+                            event_name: event,
+                            subject_entity: &binding.entity,
+                            subject_id: &subject_id,
+                            payload: data,
+                            idempotency_key: invocation.idempotency_key.as_deref(),
+                        },
+                    ),
+                    endpoint,
+                    invocation,
+                );
                 Ok((
                     as_name.clone(),
                     serde_json::to_value(record)
@@ -1190,6 +1264,33 @@ impl SorxRuntime {
                     }),
                 ))
             }
+        }
+    }
+
+    /// Publishes a business event without ever failing the calling operation.
+    ///
+    /// Envelope-build and sink failures surface only as a stderr log line and
+    /// an audit event so that a broken sink can never prevent a record
+    /// operation from completing successfully.
+    fn publish_business_event(
+        &self,
+        envelope: SorxResult<greentic_types::EventEnvelope>,
+        endpoint: &EndpointDefinition,
+        invocation: &EndpointInvocation,
+    ) {
+        let outcome = envelope.and_then(|envelope| self.event_sink.publish(envelope));
+        if let Err(err) = outcome {
+            eprintln!(
+                "sorx events: publish failed for {}: {err}",
+                endpoint.endpoint_id
+            );
+            let _ = self.audit(
+                endpoint,
+                invocation,
+                "sorx.business_event.publish_failed",
+                None,
+                None,
+            );
         }
     }
 
