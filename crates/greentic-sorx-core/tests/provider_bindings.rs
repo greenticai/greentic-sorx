@@ -623,3 +623,265 @@ fn direct_provider_config_is_only_allowed_in_local_or_test_mode() {
             .any(|issue| issue.path == "providers.store.config")
     );
 }
+
+// ---------------------------------------------------------------------------
+// S1: restart-resilience + schema-versioned persistence
+// ---------------------------------------------------------------------------
+
+fn landlord_namespace() -> ProviderNamespace {
+    ProviderNamespace {
+        tenant_id: "tenant-a".to_string(),
+        sor_name: "landlord".to_string(),
+    }
+}
+
+#[test]
+fn restart_preserves_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let namespace = landlord_namespace();
+
+    {
+        let provider = MemoryStoreProvider::persistent(&path).unwrap();
+        provider
+            .create(CreateOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                input: json!({ "id": "tenant-1", "name": "Acme" }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
+        provider
+            .append_event(AppendEventOp {
+                namespace: namespace.clone(),
+                stream: "tenant-1".to_string(),
+                event_type: "tenant.created".to_string(),
+                capability: None,
+                producer: None,
+                subject_entity: "Tenant".to_string(),
+                subject_id: "tenant-1".to_string(),
+                data: json!({ "source": "test" }),
+            })
+            .unwrap();
+        provider
+            .store_evidence(StoreEvidenceOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                id: "tenant-1".to_string(),
+                evidence: json!({ "evidence_id": "ev-1" }),
+            })
+            .unwrap();
+        // provider dropped here, simulating a restart
+    }
+
+    let restarted = MemoryStoreProvider::persistent(&path).unwrap();
+    let fetched = restarted
+        .get(GetOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.data["name"], "Acme");
+
+    let queried = restarted
+        .query(QueryOp {
+            namespace: namespace.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            filter: json!({ "name": "Acme" }),
+            order_by: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(queried.records.len(), 1);
+    assert_eq!(queried.records[0].id, "tenant-1");
+
+    let evidence = restarted
+        .get_evidence(ExternalRefsOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(evidence.evidence[0]["evidence_id"], "ev-1");
+}
+
+#[test]
+fn restart_preserves_idempotency() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let namespace = landlord_namespace();
+
+    let original = {
+        let provider = MemoryStoreProvider::persistent(&path).unwrap();
+        provider
+            .create(CreateOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                input: json!({ "name": "Acme" }),
+                idempotency_key: Some("create-acme".to_string()),
+                unique_indexes: Vec::new(),
+                unique_behavior: UniqueConflictBehavior::Reject,
+            })
+            .unwrap()
+    };
+
+    let restarted = MemoryStoreProvider::persistent(&path).unwrap();
+    let replayed = restarted
+        .create(CreateOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            input: json!({ "name": "Acme" }),
+            idempotency_key: Some("create-acme".to_string()),
+            unique_indexes: Vec::new(),
+            unique_behavior: UniqueConflictBehavior::Reject,
+        })
+        .unwrap();
+
+    assert_eq!(replayed.id, original.id);
+    assert_eq!(replayed.version, original.version);
+}
+
+#[test]
+fn loads_legacy_bare_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+
+    // A pre-versioning file: a bare MemoryState object with no envelope.
+    // collection_key = "sorx/<tenant>/<sor>/<collection>" (see key_prefix()).
+    let legacy = json!({
+        "collections": {
+            "sorx/tenant-a/landlord/tenants": {
+                "tenant-1": {
+                    "entity": "Tenant",
+                    "collection": "tenants",
+                    "id": "tenant-1",
+                    "data": { "id": "tenant-1", "name": "Legacy" },
+                    "version": 1
+                }
+            }
+        },
+        "idempotency": {},
+        "events": {},
+        "external_refs": {},
+        "evidence": {}
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+    let provider = MemoryStoreProvider::persistent(&path).unwrap();
+    let fetched = provider
+        .get(GetOp {
+            namespace: landlord_namespace(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.data["name"], "Legacy");
+
+    // The file should have been upgraded in place to the versioned envelope.
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let on_disk: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(on_disk["schema_version"], 1);
+    assert!(on_disk.get("state").is_some());
+}
+
+#[test]
+fn writes_versioned_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+
+    let provider = MemoryStoreProvider::persistent(&path).unwrap();
+    provider
+        .create(CreateOp {
+            namespace: landlord_namespace(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            input: json!({ "id": "tenant-1", "name": "Acme" }),
+            idempotency_key: None,
+            unique_indexes: Vec::new(),
+            unique_behavior: UniqueConflictBehavior::Reject,
+        })
+        .unwrap();
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let on_disk: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(on_disk["schema_version"], 1);
+    assert!(on_disk["state"].is_object());
+    assert!(on_disk["state"]["collections"].is_object());
+}
+
+#[test]
+fn rejects_future_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+
+    let future = json!({
+        "schema_version": 999,
+        "state": {
+            "collections": {},
+            "idempotency": {},
+            "events": {},
+            "external_refs": {},
+            "evidence": {}
+        }
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&future).unwrap()).unwrap();
+
+    let err = MemoryStoreProvider::persistent(&path).unwrap_err();
+    assert_eq!(err.code, "provider_schema_too_new");
+}
+
+#[test]
+fn migrate_is_idempotent_on_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.json");
+    let namespace = landlord_namespace();
+
+    {
+        let provider = MemoryStoreProvider::persistent(&path).unwrap();
+        provider
+            .create(CreateOp {
+                namespace: namespace.clone(),
+                entity: "Tenant".to_string(),
+                collection: "tenants".to_string(),
+                input: json!({ "id": "tenant-1", "name": "Acme" }),
+                idempotency_key: None,
+                unique_indexes: Vec::new(),
+                unique_behavior: UniqueConflictBehavior::Reject,
+            })
+            .unwrap();
+    }
+
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    // Reopening an already-current (v1) file must load cleanly and leave the
+    // data intact. (We do not write back on a no-op load.)
+    let restarted = MemoryStoreProvider::persistent(&path).unwrap();
+    let fetched = restarted
+        .get(GetOp {
+            namespace,
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "tenant-1".to_string(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.data["name"], "Acme");
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        before, after,
+        "loading a current-version file must not churn it"
+    );
+}

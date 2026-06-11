@@ -30,6 +30,29 @@ struct MemoryState {
     evidence: BTreeMap<String, Vec<Value>>,
 }
 
+/// Current on-disk schema version for the persistent store.
+///
+/// Bump this whenever the on-disk shape changes and register a matching
+/// `migrate_vN_to_vN1` step below.
+const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// On-disk envelope wrapping the store state with a schema version so the
+/// loader can migrate older formats forward on open.
+///
+/// The persisted file shape is `{ "schema_version": N, "state": { .. } }`.
+/// Bare (un-enveloped) [`MemoryState`] files written before versioning carry no
+/// `schema_version` key and are treated as schema v0; see [`load_state`] for the
+/// detection logic and [`MemoryStoreProvider::persist`] for the writer.
+///
+/// This typed view is used by the writer to serialize the envelope. The reader
+/// works at the [`Value`] level instead, because it must inspect
+/// `schema_version` before it knows which historical state shape to decode.
+#[derive(Debug, Serialize)]
+struct PersistedStore<'a> {
+    schema_version: u32,
+    state: &'a MemoryState,
+}
+
 impl MemoryStoreProvider {
     pub fn new() -> Self {
         Self::default()
@@ -37,29 +60,38 @@ impl MemoryStoreProvider {
 
     pub fn persistent(path: impl Into<PathBuf>) -> SorxResult<Self> {
         let path = path.into();
-        let state = if path.exists() {
-            let raw = fs::read_to_string(&path).map_err(|err| {
-                SorxError::new(
-                    "provider_read_failed",
-                    format!("failed to read persistent store {}: {err}", path.display()),
-                )
-            })?;
-            serde_json::from_str(&raw).map_err(|err| {
-                SorxError::new(
-                    "provider_decode_failed",
-                    format!(
-                        "failed to decode persistent store {}: {err}",
-                        path.display()
-                    ),
-                )
-            })?
-        } else {
-            MemoryState::default()
+        let provider = Self {
+            state: Mutex::new(MemoryState::default()),
+            persistence_path: Some(path.clone()),
         };
-        Ok(Self {
-            state: Mutex::new(state),
-            persistence_path: Some(path),
-        })
+        if !path.exists() {
+            return Ok(provider);
+        }
+
+        let raw = fs::read_to_string(&path).map_err(|err| {
+            SorxError::new(
+                "provider_read_failed",
+                format!("failed to read persistent store {}: {err}", path.display()),
+            )
+        })?;
+        let loaded = load_state(&raw).map_err(|err| {
+            // Preserve the originating error code/path while annotating the file.
+            SorxError::new(
+                err.code,
+                format!("{} (store {})", err.message, path.display()),
+            )
+        })?;
+        {
+            let mut guard = provider.state.lock().map_err(lock_error)?;
+            *guard = loaded.state;
+            // After upgrading an older on-disk format, immediately rewrite the
+            // file in the new envelope shape so it loads cleanly next time. A
+            // file already at the current version is left untouched (no churn).
+            if loaded.migrated {
+                provider.persist(&guard)?;
+            }
+        }
+        Ok(provider)
     }
 
     fn persist(&self, state: &MemoryState) -> SorxResult<()> {
@@ -77,7 +109,11 @@ impl MemoryStoreProvider {
                 )
             })?;
         }
-        let encoded = serde_json::to_string_pretty(state)
+        let envelope = PersistedStore {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            state,
+        };
+        let encoded = serde_json::to_string_pretty(&envelope)
             .map_err(|err| SorxError::new("provider_encode_failed", err.to_string()))?;
         fs::write(path, format!("{encoded}\n")).map_err(|err| {
             SorxError::new(
@@ -86,6 +122,107 @@ impl MemoryStoreProvider {
             )
         })
     }
+}
+
+/// Outcome of decoding (and possibly migrating) a persistent store file.
+struct LoadedState {
+    state: MemoryState,
+    /// `true` when the on-disk version was older than [`CURRENT_SCHEMA_VERSION`]
+    /// and the state was migrated forward, signalling the loader to rewrite the
+    /// file in the current envelope format.
+    migrated: bool,
+}
+
+/// Decode the raw persistent-store contents, detecting the on-disk schema
+/// version and migrating older formats forward.
+///
+/// Version detection: the raw JSON is parsed as a [`Value`] first. If it is an
+/// object carrying a numeric `schema_version` field it is treated as an
+/// envelope ([`PersistedStore`]) and that field is the source version. Any other
+/// object is a legacy pre-versioning bare [`MemoryState`] and is treated as
+/// schema v0, with the whole object taken as the state value.
+fn load_state(raw: &str) -> SorxResult<LoadedState> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|err| SorxError::new("provider_decode_failed", err.to_string()))?;
+
+    let (from_version, state_value) = match value
+        .as_object()
+        .and_then(|object| object.get("schema_version"))
+        .and_then(Value::as_u64)
+    {
+        Some(version) => {
+            let version = u32::try_from(version).map_err(|_| {
+                SorxError::new(
+                    "provider_schema_too_new",
+                    format!(
+                        "store schema v{version} is newer than supported v{CURRENT_SCHEMA_VERSION} \
+                         — upgrade the runtime"
+                    ),
+                )
+            })?;
+            let state_value = value
+                .get("state")
+                .cloned()
+                .unwrap_or(Value::Object(Map::new()));
+            (version, state_value)
+        }
+        // No `schema_version` key: a legacy bare MemoryState (schema v0).
+        None => (0, value),
+    };
+
+    if from_version > CURRENT_SCHEMA_VERSION {
+        return Err(SorxError::new(
+            "provider_schema_too_new",
+            format!(
+                "store schema v{from_version} is newer than supported v{CURRENT_SCHEMA_VERSION} \
+                 — upgrade the runtime"
+            ),
+        ));
+    }
+
+    let state = migrate(from_version, state_value)?;
+    Ok(LoadedState {
+        state,
+        migrated: from_version < CURRENT_SCHEMA_VERSION,
+    })
+}
+
+/// Stepwise migration executor.
+///
+/// Each `migrate_vN_to_vN1` is a `Value` -> `Value` transform on the raw store
+/// state JSON. Keeping migrations at the `Value` level (rather than the typed
+/// [`MemoryState`]) lets future steps add, rename, or drop fields without
+/// needing the historical struct shape to still compile. The single typed
+/// decode into [`MemoryState`] happens once, at the end, after all steps have
+/// run.
+fn migrate(from: u32, mut state_value: Value) -> SorxResult<MemoryState> {
+    let mut version = from;
+    while version < CURRENT_SCHEMA_VERSION {
+        state_value = match version {
+            0 => migrate_v0_to_v1(state_value)?,
+            other => {
+                return Err(SorxError::new(
+                    "provider_migration_missing",
+                    format!("no migration from schema v{other}"),
+                ));
+            }
+        };
+        version += 1;
+    }
+    serde_json::from_value(state_value)
+        .map_err(|err| SorxError::new("provider_decode_failed", err.to_string()))
+}
+
+/// Migrate a schema v0 (bare, pre-versioning) store state to schema v1.
+///
+/// v0 and v1 share the exact same state shape: v1 only adds the on-disk
+/// envelope (the `schema_version`/`state` wrapper) around an otherwise
+/// identical [`MemoryState`]. The version bump therefore records that the file
+/// is now envelope-wrapped; the state itself is carried through unchanged. This
+/// step is kept as a real registered migration so the executor is exercised and
+/// future non-identity steps slot in beside it.
+fn migrate_v0_to_v1(state_value: Value) -> SorxResult<Value> {
+    Ok(state_value)
 }
 
 impl SorStoreProvider for MemoryStoreProvider {
