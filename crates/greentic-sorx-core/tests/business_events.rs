@@ -1,6 +1,6 @@
 use greentic_sorx_core::{
-    BusinessEventSink, MemoryBusinessEventSink, command_event_envelope, entity_event_envelope,
-    runtime_pack,
+    BusinessEventSink, CommandEventInput, EntityEventInput, MemoryBusinessEventSink,
+    command_event_envelope, entity_event_envelope, runtime_pack,
 };
 use serde_json::json;
 
@@ -9,13 +9,15 @@ fn entity_envelope_maps_created_record() {
     let pack = runtime_pack("landlord", "0.1.0");
     let envelope = entity_event_envelope(
         &pack,
-        "local",
-        "tenant-a",
-        "Tenant",
-        "created",
-        "rec-1",
-        Some(json!({"id": "rec-1", "name": "Acme"})),
-        Some("idem-1"),
+        EntityEventInput {
+            environment: "local",
+            tenant_id: "tenant-a",
+            entity: "Tenant",
+            operation: "created",
+            record_id: "rec-1",
+            record: Some(json!({"id": "rec-1", "name": "Acme"})),
+            idempotency_key: Some("idem-1"),
+        },
     )
     .unwrap();
 
@@ -26,6 +28,10 @@ fn entity_envelope_maps_created_record() {
     assert_eq!(envelope.tenant.tenant.as_str(), "tenant-a");
     assert_eq!(envelope.subject.as_deref(), Some("Tenant:rec-1"));
     assert_eq!(envelope.correlation_id.as_deref(), Some("idem-1"));
+    assert_eq!(
+        envelope.metadata.get("idempotency_key").map(String::as_str),
+        Some("idem-1")
+    );
     assert_eq!(envelope.payload["entity"], "Tenant");
     assert_eq!(envelope.payload["id"], "rec-1");
     assert_eq!(envelope.payload["operation"], "created");
@@ -36,7 +42,16 @@ fn entity_envelope_maps_created_record() {
 fn entity_envelope_for_deleted_omits_record() {
     let pack = runtime_pack("landlord", "0.1.0");
     let envelope = entity_event_envelope(
-        &pack, "local", "tenant-a", "Tenant", "deleted", "rec-1", None, None,
+        &pack,
+        EntityEventInput {
+            environment: "local",
+            tenant_id: "tenant-a",
+            entity: "Tenant",
+            operation: "deleted",
+            record_id: "rec-1",
+            record: None,
+            idempotency_key: None,
+        },
     )
     .unwrap();
 
@@ -50,13 +65,15 @@ fn command_envelope_maps_emit_event_step() {
     let pack = runtime_pack("landlord", "0.1.0");
     let envelope = command_event_envelope(
         &pack,
-        "local",
-        "tenant-a",
-        "RecordRemoved",
-        "Tenant",
-        "rec-9",
-        json!({"reason": "gdpr"}),
-        None,
+        CommandEventInput {
+            environment: "local",
+            tenant_id: "tenant-a",
+            event_name: "RecordRemoved",
+            subject_entity: "Tenant",
+            subject_id: "rec-9",
+            payload: json!({"reason": "gdpr"}),
+            idempotency_key: None,
+        },
     )
     .unwrap();
 
@@ -69,10 +86,32 @@ fn command_envelope_maps_emit_event_step() {
 #[test]
 fn envelope_ids_are_unique_and_valid() {
     let pack = runtime_pack("landlord", "0.1.0");
-    let first =
-        entity_event_envelope(&pack, "local", "t", "E", "created", "1", None, None).unwrap();
-    let second =
-        entity_event_envelope(&pack, "local", "t", "E", "created", "1", None, None).unwrap();
+    let first = entity_event_envelope(
+        &pack,
+        EntityEventInput {
+            environment: "local",
+            tenant_id: "t",
+            entity: "E",
+            operation: "created",
+            record_id: "1",
+            record: None,
+            idempotency_key: None,
+        },
+    )
+    .unwrap();
+    let second = entity_event_envelope(
+        &pack,
+        EntityEventInput {
+            environment: "local",
+            tenant_id: "t",
+            entity: "E",
+            operation: "created",
+            record_id: "1",
+            record: None,
+            idempotency_key: None,
+        },
+    )
+    .unwrap();
     assert_ne!(first.id, second.id);
 }
 
@@ -81,13 +120,15 @@ fn invalid_tenant_identifier_is_an_error() {
     let pack = runtime_pack("landlord", "0.1.0");
     let result = entity_event_envelope(
         &pack,
-        "local",
-        "bad tenant!",
-        "E",
-        "created",
-        "1",
-        None,
-        None,
+        EntityEventInput {
+            environment: "local",
+            tenant_id: "bad tenant!",
+            entity: "E",
+            operation: "created",
+            record_id: "1",
+            record: None,
+            idempotency_key: None,
+        },
     );
     assert!(result.is_err());
 }
@@ -96,8 +137,19 @@ fn invalid_tenant_identifier_is_an_error() {
 fn memory_sink_records_published_envelopes() {
     let pack = runtime_pack("landlord", "0.1.0");
     let sink = MemoryBusinessEventSink::new();
-    let envelope =
-        entity_event_envelope(&pack, "local", "t", "E", "created", "1", None, None).unwrap();
+    let envelope = entity_event_envelope(
+        &pack,
+        EntityEventInput {
+            environment: "local",
+            tenant_id: "t",
+            entity: "E",
+            operation: "created",
+            record_id: "1",
+            record: None,
+            idempotency_key: None,
+        },
+    )
+    .unwrap();
     sink.publish(envelope.clone()).unwrap();
     let events = sink.events().unwrap();
     assert_eq!(events.len(), 1);

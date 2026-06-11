@@ -4,6 +4,7 @@
 //! Mirrors the `audit` module pattern. Publication is best-effort: callers
 //! must never fail a business operation because a sink failed.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -95,8 +96,69 @@ impl BusinessEventSink for MemoryBusinessEventSink {
 // Envelope builders
 // ---------------------------------------------------------------------------
 
-/// Monotonically increasing nonce combined with a millisecond timestamp to
-/// produce unique, lexicographically ordered event identifiers.
+/// Input parameters for building a record-lifecycle event envelope.
+///
+/// Using a named struct prevents silently-swapped positional `&str` arguments
+/// when the caller constructs the envelope.
+#[derive(Debug, Clone)]
+pub struct EntityEventInput<'a> {
+    /// Environment identifier (for example `local`, `prod`).
+    pub environment: &'a str,
+    /// Tenant identifier string; must be a valid Greentic identifier.
+    pub tenant_id: &'a str,
+    /// Entity type name (for example `Tenant`).
+    pub entity: &'a str,
+    /// Operation label (for example `created`, `updated`, `deleted`).
+    pub operation: &'a str,
+    /// Stable identifier of the affected record.
+    pub record_id: &'a str,
+    /// Optional full record snapshot to embed in the payload.
+    pub record: Option<Value>,
+    /// Optional idempotency key forwarded as `correlation_id` and into `metadata`.
+    pub idempotency_key: Option<&'a str>,
+}
+
+/// Input parameters for building a named command or domain event envelope.
+///
+/// Using a named struct prevents silently-swapped positional `&str` arguments
+/// when the caller constructs the envelope.
+#[derive(Debug, Clone)]
+pub struct CommandEventInput<'a> {
+    /// Environment identifier string.
+    pub environment: &'a str,
+    /// Tenant identifier string; must be a valid Greentic identifier.
+    pub tenant_id: &'a str,
+    /// Stable event name (for example `RecordRemoved`).
+    pub event_name: &'a str,
+    /// Entity type that the event concerns.
+    pub subject_entity: &'a str,
+    /// Record identifier that forms the `subject` field.
+    pub subject_id: &'a str,
+    /// Full event payload as a JSON value.
+    pub payload: Value,
+    /// Optional idempotency key forwarded as `correlation_id` and into `metadata`.
+    pub idempotency_key: Option<&'a str>,
+}
+
+/// Per-process tag initialised once at first use.
+///
+/// Mixes the OS process id with the subsecond nanoseconds of the startup
+/// instant so two replicas or restarts in the same millisecond cannot collide.
+static PROCESS_TAG: OnceLock<String> = OnceLock::new();
+
+fn process_tag() -> &'static str {
+    PROCESS_TAG.get_or_init(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.subsec_nanos())
+            .unwrap_or_default();
+        format!("{:x}-{:x}", std::process::id(), nanos)
+    })
+}
+
+/// Monotonically increasing nonce used together with the millisecond timestamp
+/// and the process tag to produce approximately time-ordered,
+/// uniqueness-focused event identifiers.
 static EVENT_NONCE: AtomicU64 = AtomicU64::new(1);
 
 /// Generates the next unique event identifier.
@@ -106,8 +168,31 @@ fn next_event_id() -> SorxResult<EventId> {
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     let nonce = EVENT_NONCE.fetch_add(1, Ordering::Relaxed);
-    EventId::new(format!("sorla-{millis}-{nonce}"))
+    EventId::new(format!("sorla-{}-{millis}-{nonce}", process_tag()))
         .map_err(|err| SorxError::new("event_id_invalid", err.to_string()))
+}
+
+/// Sanitizes a value for use as a NATS subject segment.
+///
+/// Only ASCII alphanumeric characters, hyphens, and underscores are kept.
+/// Any other character (including spaces and dots) is replaced with a hyphen.
+/// An empty result falls back to `"unknown"`.
+fn topic_segment(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Parses and validates environment and tenant identifiers into a `TenantCtx`.
@@ -129,100 +214,291 @@ fn build_event_source(pack: &RuntimePack) -> String {
 /// Builds a canonical envelope for a record-lifecycle event (create, update,
 /// delete, and so on).
 ///
-/// The envelope `topic` follows the pattern `sorla.<pack>.<Entity>.<operation>`,
-/// and the `payload` contains `entity`, `id`, `operation`, and an optional
-/// `record` field when the caller provides a JSON record snapshot.
+/// The envelope `topic` follows the pattern
+/// `sorla.<pack>.<Entity>.<operation>` where each segment is sanitized for
+/// NATS routing. The `subject` and payload values are left unsanitized.
 ///
 /// # Parameters
 ///
 /// - `pack` - Runtime descriptor for the Sorla pack emitting the event.
-/// - `environment` - Environment identifier (for example `local`, `prod`).
-/// - `tenant_id` - Tenant identifier string; must be a valid Greentic identifier.
-/// - `entity` - Entity type name (for example `Tenant`).
-/// - `operation` - Operation label (for example `created`, `updated`, `deleted`).
-/// - `record_id` - Stable identifier of the affected record.
-/// - `record` - Optional full record snapshot to embed in the payload.
-/// - `idempotency_key` - Optional key forwarded as `correlation_id`.
+/// - `input` - Structured input containing environment, tenant, entity, operation,
+///   record id, optional record snapshot, and optional idempotency key.
 ///
 /// # Errors
 ///
-/// Returns an error when `environment` or `tenant_id` fail identifier
-/// validation.
-#[allow(clippy::too_many_arguments)]
+/// Returns an error when `input.environment` or `input.tenant_id` fail
+/// identifier validation.
 pub fn entity_event_envelope(
     pack: &RuntimePack,
-    environment: &str,
-    tenant_id: &str,
-    entity: &str,
-    operation: &str,
-    record_id: &str,
-    record: Option<Value>,
-    idempotency_key: Option<&str>,
+    input: EntityEventInput<'_>,
 ) -> SorxResult<EventEnvelope> {
     let mut payload = json!({
-        "entity": entity,
-        "id": record_id,
-        "operation": operation,
+        "entity": input.entity,
+        "id": input.record_id,
+        "operation": input.operation,
     });
-    if let (Some(fields), Some(record_value)) = (payload.as_object_mut(), record) {
+    if let (Some(fields), Some(record_value)) = (payload.as_object_mut(), input.record) {
         fields.insert("record".to_string(), record_value);
+    }
+    let mut metadata = greentic_types::EventMetadata::default();
+    if let Some(key) = input.idempotency_key {
+        metadata.insert("idempotency_key".to_string(), key.to_owned());
     }
     Ok(EventEnvelope {
         id: next_event_id()?,
-        topic: format!("sorla.{}.{entity}.{operation}", pack.name),
-        r#type: format!("com.greentic.sorla.entity.{operation}.v1"),
+        topic: format!(
+            "sorla.{}.{}.{}",
+            topic_segment(&pack.name),
+            topic_segment(input.entity),
+            topic_segment(input.operation),
+        ),
+        r#type: format!("com.greentic.sorla.entity.{}.v1", input.operation),
         source: build_event_source(pack),
-        tenant: build_tenant_ctx(environment, tenant_id)?,
-        subject: Some(format!("{entity}:{record_id}")),
+        tenant: build_tenant_ctx(input.environment, input.tenant_id)?,
+        subject: Some(format!("{}:{}", input.entity, input.record_id)),
         time: Utc::now(),
-        correlation_id: idempotency_key.map(str::to_owned),
+        correlation_id: input.idempotency_key.map(str::to_owned),
         payload,
-        metadata: Default::default(),
+        metadata,
     })
 }
 
 /// Builds a canonical envelope for a named command or domain event emitted
 /// explicitly by a command step (the `emit_event` step kind).
 ///
-/// The envelope `topic` follows the pattern `sorla.<pack>.<EventName>`, and
-/// the caller provides the full `payload` directly.
+/// The envelope `topic` follows the pattern `sorla.<pack>.<EventName>` where
+/// each segment is sanitized for NATS routing. The `subject` and payload
+/// values are left unsanitized.
 ///
 /// # Parameters
 ///
 /// - `pack` - Runtime descriptor for the Sorla pack emitting the event.
-/// - `environment` - Environment identifier string.
-/// - `tenant_id` - Tenant identifier string; must be a valid Greentic identifier.
-/// - `event_name` - Stable event name (for example `RecordRemoved`).
-/// - `subject_entity` - Entity type that the event concerns.
-/// - `subject_id` - Record identifier that forms the `subject` field.
-/// - `payload` - Full event payload as a JSON value.
-/// - `idempotency_key` - Optional key forwarded as `correlation_id`.
+/// - `input` - Structured input containing environment, tenant, event name,
+///   subject entity, subject id, payload, and optional idempotency key.
 ///
 /// # Errors
 ///
-/// Returns an error when `environment` or `tenant_id` fail identifier
-/// validation.
-#[allow(clippy::too_many_arguments)]
+/// Returns an error when `input.environment` or `input.tenant_id` fail
+/// identifier validation.
 pub fn command_event_envelope(
     pack: &RuntimePack,
-    environment: &str,
-    tenant_id: &str,
-    event_name: &str,
-    subject_entity: &str,
-    subject_id: &str,
-    payload: Value,
-    idempotency_key: Option<&str>,
+    input: CommandEventInput<'_>,
 ) -> SorxResult<EventEnvelope> {
+    let mut metadata = greentic_types::EventMetadata::default();
+    if let Some(key) = input.idempotency_key {
+        metadata.insert("idempotency_key".to_string(), key.to_owned());
+    }
     Ok(EventEnvelope {
         id: next_event_id()?,
-        topic: format!("sorla.{}.{event_name}", pack.name),
-        r#type: format!("com.greentic.sorla.{event_name}.v1"),
+        topic: format!(
+            "sorla.{}.{}",
+            topic_segment(&pack.name),
+            topic_segment(input.event_name),
+        ),
+        r#type: format!("com.greentic.sorla.{}.v1", input.event_name),
         source: build_event_source(pack),
-        tenant: build_tenant_ctx(environment, tenant_id)?,
-        subject: Some(format!("{subject_entity}:{subject_id}")),
+        tenant: build_tenant_ctx(input.environment, input.tenant_id)?,
+        subject: Some(format!("{}:{}", input.subject_entity, input.subject_id)),
         time: Utc::now(),
-        correlation_id: idempotency_key.map(str::to_owned),
-        payload,
-        metadata: Default::default(),
+        correlation_id: input.idempotency_key.map(str::to_owned),
+        payload: input.payload,
+        metadata,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::runtime::runtime_pack;
+
+    fn make_pack(name: &str) -> RuntimePack {
+        runtime_pack(name, "1.0.0")
+    }
+
+    // -----------------------------------------------------------------------
+    // entity_event_envelope
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn entity_event_creates_correct_topic_and_subject() {
+        let pack = make_pack("landlord");
+        let envelope = entity_event_envelope(
+            &pack,
+            EntityEventInput {
+                environment: "local",
+                tenant_id: "tenant-1",
+                entity: "Tenant",
+                operation: "created",
+                record_id: "rec-1",
+                record: None,
+                idempotency_key: None,
+            },
+        )
+        .expect("entity_event_envelope should succeed with valid inputs");
+
+        assert_eq!(envelope.topic, "sorla.landlord.Tenant.created");
+        assert_eq!(envelope.subject.as_deref(), Some("Tenant:rec-1"));
+        assert_eq!(envelope.r#type, "com.greentic.sorla.entity.created.v1");
+    }
+
+    #[test]
+    fn entity_event_embeds_record_snapshot_when_provided() {
+        let pack = make_pack("landlord");
+        let record_value = json!({"name": "Acme"});
+        let envelope = entity_event_envelope(
+            &pack,
+            EntityEventInput {
+                environment: "local",
+                tenant_id: "tenant-1",
+                entity: "Tenant",
+                operation: "updated",
+                record_id: "rec-2",
+                record: Some(record_value.clone()),
+                idempotency_key: None,
+            },
+        )
+        .expect("entity_event_envelope should succeed with valid inputs");
+
+        assert_eq!(envelope.payload["record"], record_value);
+    }
+
+    #[test]
+    fn entity_event_propagates_idempotency_key_to_correlation_and_metadata() {
+        let pack = make_pack("landlord");
+        let envelope = entity_event_envelope(
+            &pack,
+            EntityEventInput {
+                environment: "local",
+                tenant_id: "tenant-1",
+                entity: "Tenant",
+                operation: "created",
+                record_id: "rec-3",
+                record: None,
+                idempotency_key: Some("idem-1"),
+            },
+        )
+        .expect("entity_event_envelope should succeed with valid inputs");
+
+        assert_eq!(envelope.correlation_id.as_deref(), Some("idem-1"));
+        assert_eq!(
+            envelope.metadata.get("idempotency_key").map(String::as_str),
+            Some("idem-1")
+        );
+    }
+
+    #[test]
+    fn entity_event_sanitizes_topic_segments_but_preserves_subject() {
+        let pack = make_pack("landlord");
+        let envelope = entity_event_envelope(
+            &pack,
+            EntityEventInput {
+                environment: "local",
+                tenant_id: "tenant-1",
+                entity: "My Entity.v2",
+                operation: "created",
+                record_id: "rec-1",
+                record: None,
+                idempotency_key: None,
+            },
+        )
+        .expect("entity_event_envelope should succeed with valid inputs");
+
+        assert_eq!(envelope.topic, "sorla.landlord.My-Entity-v2.created");
+        assert_eq!(envelope.subject.as_deref(), Some("My Entity.v2:rec-1"));
+    }
+
+    #[test]
+    fn entity_event_returns_error_for_invalid_environment() {
+        let pack = make_pack("landlord");
+        let result = entity_event_envelope(
+            &pack,
+            EntityEventInput {
+                environment: "invalid env!",
+                tenant_id: "tenant-1",
+                entity: "Tenant",
+                operation: "created",
+                record_id: "rec-1",
+                record: None,
+                idempotency_key: None,
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "entity_event_envelope should fail for an invalid environment identifier"
+        );
+    }
+
+    #[test]
+    fn entity_event_with_empty_record_id_documents_current_subject_format() {
+        let pack = make_pack("landlord");
+        let envelope = entity_event_envelope(
+            &pack,
+            EntityEventInput {
+                environment: "local",
+                tenant_id: "tenant-1",
+                entity: "E",
+                operation: "created",
+                record_id: "",
+                record: None,
+                idempotency_key: None,
+            },
+        )
+        .expect("entity_event_envelope should succeed even with an empty record_id");
+
+        // Current behaviour: subject is "<entity>:" when record_id is empty.
+        assert_eq!(envelope.subject.as_deref(), Some("E:"));
+    }
+
+    // -----------------------------------------------------------------------
+    // command_event_envelope
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn command_event_creates_correct_topic_and_subject() {
+        let pack = make_pack("landlord");
+        let envelope = command_event_envelope(
+            &pack,
+            CommandEventInput {
+                environment: "local",
+                tenant_id: "tenant-1",
+                event_name: "RecordRemoved",
+                subject_entity: "Tenant",
+                subject_id: "rec-4",
+                payload: json!({"reason": "deactivated"}),
+                idempotency_key: None,
+            },
+        )
+        .expect("command_event_envelope should succeed with valid inputs");
+
+        assert_eq!(envelope.topic, "sorla.landlord.RecordRemoved");
+        assert_eq!(envelope.subject.as_deref(), Some("Tenant:rec-4"));
+        assert_eq!(envelope.r#type, "com.greentic.sorla.RecordRemoved.v1");
+    }
+
+    #[test]
+    fn command_event_propagates_idempotency_key_to_correlation_and_metadata() {
+        let pack = make_pack("landlord");
+        let envelope = command_event_envelope(
+            &pack,
+            CommandEventInput {
+                environment: "local",
+                tenant_id: "tenant-1",
+                event_name: "RecordRemoved",
+                subject_entity: "Tenant",
+                subject_id: "rec-5",
+                payload: json!({}),
+                idempotency_key: Some("idem-2"),
+            },
+        )
+        .expect("command_event_envelope should succeed with valid inputs");
+
+        assert_eq!(envelope.correlation_id.as_deref(), Some("idem-2"));
+        assert_eq!(
+            envelope.metadata.get("idempotency_key").map(String::as_str),
+            Some("idem-2")
+        );
+    }
 }

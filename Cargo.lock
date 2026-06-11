@@ -2046,7 +2046,9 @@ dependencies = [
 name = "greentic-sorx-core"
 version = "0.1.9"
 dependencies = [
+ "chrono",
  "foundationdb",
+ "greentic-types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
