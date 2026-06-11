@@ -7,6 +7,60 @@ use greentic_sorx_core::{
 };
 use serde_json::{Value, json};
 
+/// Builds a minimal gateway containing only a foreach command with an
+/// `emit_event` step inside the loop body.  Used exclusively by the
+/// `foreach_emit_event_publishes_once_per_item` test so that the shared
+/// `gateway()` fixture is not modified.
+fn foreach_emit_gateway() -> Value {
+    json!({
+        "schema": "greentic.sorla.agent-gateway.v1",
+        "endpoints": [
+            {
+                "endpoint_id": "batch.notify",
+                "operation_id": "batch.notify",
+                "operation": "command",
+                "method": "POST",
+                "path": "/v1/batch/notify",
+                "entity": "BatchNotify",
+                "collection": "batch_notifies",
+                "provider_binding": "store",
+                "risk": "low",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": { "type": "array" }
+                    }
+                },
+                "command": {
+                    "kind": "bulk_mutation",
+                    "action": "batch_notify",
+                    "steps": [
+                        {
+                            "op": "foreach",
+                            "as": "notified",
+                            "items": "$input.items",
+                            "do": [
+                                {
+                                    "op": "emit_event",
+                                    "as": "notification",
+                                    "event": "item_notified",
+                                    "payload": {
+                                        "item_id": "$item.id"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "return": {
+                        "notified_count": "$steps.notified.count"
+                    }
+                }
+            }
+        ]
+    })
+}
+
 fn gateway() -> Value {
     json!({
         "schema": "greentic.sorla.agent-gateway.v1",
@@ -499,5 +553,50 @@ fn emit_event_step_publishes_business_event_via_sink() {
         command_event.r#type.ends_with(".v1"),
         "business event type must end with .v1, got: {}",
         command_event.r#type
+    );
+}
+
+#[test]
+fn foreach_emit_event_publishes_once_per_item() {
+    let sink = Arc::new(MemoryBusinessEventSink::new());
+    let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
+    let config = runtime_config_from_answers("command-e2e", &normalized.answers).unwrap();
+    let router = EndpointRouter::from_agent_gateway(&foreach_emit_gateway()).unwrap();
+    let mut providers = ProviderRegistry::new();
+    providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
+    let runtime = SorxRuntime::new(
+        runtime_pack("command-e2e", "0.1.0"),
+        config,
+        router,
+        providers,
+    )
+    .with_event_sink(sink.clone());
+
+    let result = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "batch.notify",
+            "batch.notify",
+            json!({
+                "items": [
+                    { "id": "item-1" },
+                    { "id": "item-2" }
+                ]
+            }),
+        ))
+        .unwrap();
+    assert_eq!(result.status, EndpointStatus::Ok);
+
+    let events = sink.events().unwrap();
+    let item_notified_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.topic == "sorla.command-e2e.item_notified")
+        .collect();
+    assert_eq!(
+        item_notified_events.len(),
+        2,
+        "emit_event inside a foreach must publish exactly one event per iteration; \
+         expected 2 item_notified events for 2 items, got {}",
+        item_notified_events.len()
     );
 }

@@ -1,11 +1,23 @@
 use std::sync::Arc;
 
 use greentic_sorx_core::{
-    EndpointRouter, EndpointStatus, MemoryBusinessEventSink, MemoryStoreProvider, ProviderRegistry,
-    SorxRuntime, default_start_schema, invocation, normalize_start_answers,
-    runtime_config_from_answers, runtime_pack,
+    BusinessEventSink, EndpointRouter, EndpointStatus, MemoryAuditSink, MemoryBusinessEventSink,
+    MemoryStoreProvider, ProviderRegistry, SorxError, SorxResult, SorxRuntime,
+    default_start_schema, invocation, normalize_start_answers, runtime_config_from_answers,
+    runtime_pack,
 };
+use greentic_types::EventEnvelope;
 use serde_json::json;
+
+/// Sink that always fails publication; used to verify that a broken sink
+/// never causes a business operation to fail.
+struct FailingBusinessEventSink;
+
+impl BusinessEventSink for FailingBusinessEventSink {
+    fn publish(&self, _envelope: EventEnvelope) -> SorxResult<()> {
+        Err(SorxError::new("sink_down", "boom"))
+    }
+}
 
 fn gateway() -> serde_json::Value {
     json!({
@@ -114,23 +126,22 @@ fn answers() -> serde_json::Value {
     })
 }
 
-fn runtime_with_sink(sink: Arc<MemoryBusinessEventSink>) -> SorxRuntime {
+/// Builds the base runtime without any overrides applied.
+fn build_runtime() -> SorxRuntime {
     let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
     let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
     let router = EndpointRouter::from_agent_gateway(&gateway()).unwrap();
     let mut providers = ProviderRegistry::new();
     providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
     SorxRuntime::new(runtime_pack("landlord", "0.1.0"), config, router, providers)
-        .with_event_sink(sink)
+}
+
+fn runtime_with_sink(sink: Arc<MemoryBusinessEventSink>) -> SorxRuntime {
+    build_runtime().with_event_sink(sink)
 }
 
 fn runtime_default() -> SorxRuntime {
-    let normalized = normalize_start_answers(&default_start_schema(), &answers(), true).unwrap();
-    let config = runtime_config_from_answers("landlord", &normalized.answers).unwrap();
-    let router = EndpointRouter::from_agent_gateway(&gateway()).unwrap();
-    let mut providers = ProviderRegistry::new();
-    providers.register_canonical_store("store", Arc::new(MemoryStoreProvider::new()));
-    SorxRuntime::new(runtime_pack("landlord", "0.1.0"), config, router, providers)
+    build_runtime()
 }
 
 #[test]
@@ -304,5 +315,40 @@ fn default_runtime_keeps_disabled_sink_and_behavior() {
         created.status,
         EndpointStatus::Created,
         "create must succeed even without a configured event sink"
+    );
+}
+
+#[test]
+fn failing_sink_never_fails_operation_and_emits_audit() {
+    let memory_audit = Arc::new(MemoryAuditSink::new());
+    let runtime = build_runtime()
+        .with_event_sink(Arc::new(FailingBusinessEventSink))
+        .with_audit_sink(memory_audit.clone());
+
+    // A create operation must succeed even though the sink always returns an error.
+    let result = runtime
+        .invoke(invocation(
+            "tenant-a",
+            "tenant.create",
+            "tenant.create",
+            json!({ "id": "rec-fail-sink", "name": "FailSink", "active": true }),
+        ))
+        .unwrap();
+    assert_eq!(
+        result.status,
+        EndpointStatus::Created,
+        "create must succeed even when the business-event sink always fails"
+    );
+
+    // The failed publish attempt must surface as an audit event.
+    let audit_events = memory_audit.events().unwrap();
+    let publish_failed_events: Vec<_> = audit_events
+        .iter()
+        .filter(|audit_event| audit_event.event == "sorx.business_event.publish_failed")
+        .collect();
+    assert_eq!(
+        publish_failed_events.len(),
+        1,
+        "a failing sink must emit exactly one sorx.business_event.publish_failed audit event"
     );
 }

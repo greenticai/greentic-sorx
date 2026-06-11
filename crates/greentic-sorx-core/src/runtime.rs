@@ -394,21 +394,13 @@ impl SorxRuntime {
                     let record_id = record.id.clone();
                     let record_value = serde_json::to_value(record)
                         .map_err(|err| SorxError::new("encode_failed", err.to_string()))?;
-                    self.publish_business_event(
-                        entity_event_envelope(
-                            &self.pack,
-                            EntityEventInput {
-                                environment: &self.config.environment,
-                                tenant_id: &invocation.tenant_id,
-                                entity: &binding.entity,
-                                operation: "created",
-                                record_id: &record_id,
-                                record: Some(record_value.clone()),
-                                idempotency_key: invocation.idempotency_key.as_deref(),
-                            },
-                        ),
+                    self.publish_entity_event(
                         endpoint,
                         &invocation,
+                        &binding,
+                        "created",
+                        &record_id,
+                        Some(record_value.clone()),
                     );
                     EndpointResult {
                         status: EndpointStatus::Created,
@@ -457,21 +449,13 @@ impl SorxRuntime {
                     let record_id = record.id.clone();
                     let record_value = serde_json::to_value(record)
                         .map_err(|err| SorxError::new("encode_failed", err.to_string()))?;
-                    self.publish_business_event(
-                        entity_event_envelope(
-                            &self.pack,
-                            EntityEventInput {
-                                environment: &self.config.environment,
-                                tenant_id: &invocation.tenant_id,
-                                entity: &binding.entity,
-                                operation: "updated",
-                                record_id: &record_id,
-                                record: Some(record_value.clone()),
-                                idempotency_key: invocation.idempotency_key.as_deref(),
-                            },
-                        ),
+                    self.publish_entity_event(
                         endpoint,
                         &invocation,
+                        &binding,
+                        "updated",
+                        &record_id,
+                        Some(record_value.clone()),
                     );
                     EndpointResult {
                         status: EndpointStatus::Ok,
@@ -532,21 +516,13 @@ impl SorxRuntime {
                         id: record_id.clone(),
                     })?;
                     if deleted.deleted {
-                        self.publish_business_event(
-                            entity_event_envelope(
-                                &self.pack,
-                                EntityEventInput {
-                                    environment: &self.config.environment,
-                                    tenant_id: &invocation.tenant_id,
-                                    entity: &binding.entity,
-                                    operation: "deleted",
-                                    record_id: &record_id,
-                                    record: None,
-                                    idempotency_key: invocation.idempotency_key.as_deref(),
-                                },
-                            ),
+                        self.publish_entity_event(
                             endpoint,
                             &invocation,
+                            &binding,
+                            "deleted",
+                            &record_id,
+                            None,
                         );
                     }
                     EndpointResult {
@@ -1292,6 +1268,38 @@ impl SorxRuntime {
                 None,
             );
         }
+    }
+
+    /// Convenience wrapper that builds the entity-event envelope and delegates
+    /// to [`publish_business_event`].
+    ///
+    /// Collapses the repeated `entity_event_envelope` + `publish_business_event`
+    /// pattern that appears at every CRUD call site.
+    fn publish_entity_event(
+        &self,
+        endpoint: &EndpointDefinition,
+        invocation: &EndpointInvocation,
+        binding: &ProviderBinding,
+        operation: &str,
+        record_id: &str,
+        record: Option<Value>,
+    ) {
+        self.publish_business_event(
+            entity_event_envelope(
+                &self.pack,
+                EntityEventInput {
+                    environment: &self.config.environment,
+                    tenant_id: &invocation.tenant_id,
+                    entity: &binding.entity,
+                    operation,
+                    record_id,
+                    record,
+                    idempotency_key: invocation.idempotency_key.as_deref(),
+                },
+            ),
+            endpoint,
+            invocation,
+        );
     }
 
     fn audit(
