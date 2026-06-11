@@ -123,10 +123,10 @@ pub use providers::{FoundationDbProviderAdapter, FoundationDbProviderConfig, Mem
 pub use router::EndpointRouter;
 pub use runtime::{SorxRuntime, empty_object, invocation, runtime_pack};
 pub use startup::{
-    AuditConfig, DeploymentConfig, ExposureConfig, GhcrConfig, GhcrWebhookAnswerConfig, McpConfig,
-    ProviderBindingConfig, ServerConfig, SorxNormalizedAnswers, SorxRuntimeConfig,
-    SorxStartAnswers, SorxStartupError, SorxStartupIssue, build_startup_plan, default_start_schema,
-    normalize_start_answers, runtime_config_from_answers,
+    AuditConfig, DeploymentConfig, EventsConfig, ExposureConfig, GhcrConfig,
+    GhcrWebhookAnswerConfig, McpConfig, ProviderBindingConfig, ServerConfig, SorxNormalizedAnswers,
+    SorxRuntimeConfig, SorxStartAnswers, SorxStartupError, SorxStartupIssue, build_startup_plan,
+    default_start_schema, normalize_start_answers, runtime_config_from_answers,
 };
 
 pub const SORX_VERSION_SCHEMA: &str = "greentic.sorx.version.v1";
