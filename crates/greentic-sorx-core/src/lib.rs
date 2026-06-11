@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 mod approval;
 mod audit;
+mod business_events;
 mod deployment;
 mod error;
 mod evidence;
@@ -25,6 +26,10 @@ pub use approval::{
     LocalDenyBroker, LocalPendingBroker,
 };
 pub use audit::{AuditSink, DisabledAuditSink, MemoryAuditSink, SorxAuditEvent, StdoutAuditSink};
+pub use business_events::{
+    BusinessEventSink, DisabledBusinessEventSink, MemoryBusinessEventSink, StdoutBusinessEventSink,
+    command_event_envelope, entity_event_envelope,
+};
 pub use deployment::{
     CreateDeploymentRequest, DEPLOYMENT_PROMOTION_STATUS_SCHEMA,
     DEPLOYMENT_PUBLIC_ROUTE_TABLE_SCHEMA, DEPLOYMENT_REGISTRY_SCHEMA,
