@@ -4,13 +4,21 @@
 //! a bounded channel and returns immediately; a dedicated thread running a
 //! current-thread tokio runtime drains the queue and publishes JSON envelopes.
 //!
-//! # Lazy construction
+//! # Connection behaviour
 //!
-//! Construction is lazy with respect to NATS availability: `connect` only
-//! fails if the publisher thread cannot spawn. If NATS is unreachable, events
-//! are dropped with a log line and the runtime keeps serving. Delivery is
-//! at-most-once: a full queue or NATS outage drops events (records remain the
-//! source of truth in the canonical store).
+//! There are two distinct failure modes:
+//!
+//! - **Initial connect failure** — if the NATS connection attempt at startup
+//!   fails, the background publisher exits immediately.  Events are dropped
+//!   with a log line until the process is restarted and a new connection
+//!   attempt succeeds.
+//! - **Transient outage after a successful connect** — `async-nats` handles
+//!   reconnection automatically.  Individual publish calls may log errors
+//!   while NATS is unreachable but the publisher thread stays alive.
+//!
+//! Delivery is at-most-once.  A full queue drops the oldest pending envelope
+//! with a log line.  Records remain the source of truth in the canonical store
+//! regardless of sink availability.
 
 use std::thread;
 
@@ -43,9 +51,11 @@ impl NatsEventSink {
     /// Constructs a new `NatsEventSink` and spawns the background publisher thread.
     ///
     /// The background thread connects to NATS at `url` asynchronously. If the
-    /// connection fails, events are silently dropped with a log line and the
-    /// runtime continues serving.  The thread exits gracefully when all senders
-    /// are dropped (i.e. when the runtime shuts down).
+    /// initial connection fails, the publisher thread exits and events are
+    /// dropped with a log line until the process restarts.  After a successful
+    /// initial connect, `async-nats` handles transient outages automatically.
+    /// The thread exits gracefully when all senders are dropped (i.e. when the
+    /// runtime shuts down).
     ///
     /// # Parameters
     ///
