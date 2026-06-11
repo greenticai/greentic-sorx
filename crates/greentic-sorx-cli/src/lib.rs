@@ -30,6 +30,8 @@ use sha2::{Digest, Sha256};
 
 mod admin_roles;
 mod http_runtime;
+#[cfg(feature = "events-nats")]
+pub mod nats_events;
 mod test_runtime;
 mod validation;
 

@@ -2836,6 +2836,9 @@ fn configure_runtime_events(
             nats_event_sink(&url, &config.events.subject_prefix)
                 .map(|sink| runtime.with_event_sink(sink))
         }
+        // "disabled" and "" are the explicit no-op values; anything else is
+        // treated the same way (schema already constrains the allowed values).
+        "disabled" | "" => Ok(runtime),
         _ => Ok(runtime),
     }
 }
@@ -10796,13 +10799,15 @@ mod tests {
     #[test]
     fn events_nats_sink_without_url_is_an_error() {
         let result = runtime_with_events_answers(json!({ "sink": "nats" }));
-        assert!(
-            result.is_err(),
-            "nats sink without nats_url must be an error"
-        );
         match result {
             Err(err) => assert_eq!(err.code, "events_nats_url_missing"),
-            Ok(_) => panic!("expected Err but got Ok"),
+            Ok(_) => panic!("nats sink without nats_url must be an error"),
         }
+    }
+
+    #[test]
+    fn events_disabled_explicit_sink_is_ok() {
+        let runtime = runtime_with_events_answers(json!({ "sink": "disabled" }));
+        assert!(runtime.is_ok());
     }
 }
