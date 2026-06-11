@@ -33,6 +33,8 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::admin_roles::AdminRolesOverlay;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RouteList {
     pub schema: String,
@@ -112,6 +114,10 @@ pub struct HttpRuntime {
     /// `/v1/sorx/*` deployment/alias control-plane endpoints are served from
     /// this store; when `None` they return 501 (back-compat).
     registry_path: Arc<Option<PathBuf>>,
+    /// When set, the deployment's policy roles are sourced from the admin
+    /// system-of-record instead of the self-asserted `x-greentic-caller-role`
+    /// header. `None` (the default) preserves the legacy header-roles behavior.
+    admin_roles_overlay: Option<Arc<AdminRolesOverlay>>,
 }
 
 #[derive(Clone)]
@@ -214,6 +220,7 @@ impl HttpRuntime {
             metric_provider: Arc::new(metric_provider),
             runtime_snapshot: Arc::new(RwLock::new(runtime_snapshot)),
             registry_path: Arc::new(None),
+            admin_roles_overlay: None,
         })
     }
 
@@ -224,6 +231,15 @@ impl HttpRuntime {
     pub fn with_registry_path(mut self, registry_path: Option<PathBuf>) -> Self {
         self.admin_api_enabled = registry_path.is_some();
         self.registry_path = Arc::new(registry_path);
+        self
+    }
+
+    /// Attaches an admin-backed roles overlay. When present, the request path
+    /// sources caller roles from the admin system-of-record and ignores the
+    /// self-asserted `x-greentic-caller-role` header (security: callers must not
+    /// be able to grant themselves roles).
+    pub fn with_admin_roles_overlay(mut self, overlay: Arc<AdminRolesOverlay>) -> Self {
+        self.admin_roles_overlay = Some(overlay);
         self
     }
 
@@ -400,19 +416,20 @@ impl HttpRuntime {
             Ok(value) => value,
             Err(err) => return sorx_error_response(400, err),
         };
-        let roles = request
+        let header_roles = header_caller_roles(&request.headers);
+        // Trusted lookup key for the admin overlay. The router sets this to the
+        // authenticated user's email; it is NOT derived from the free-form
+        // `x-greentic-caller-id` subject.
+        let caller_email = request
             .headers
-            .get("x-greentic-caller-role")
-            .map(|value| {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|role| !role.is_empty())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|roles| !roles.is_empty())
-            .unwrap_or_else(|| vec!["local".to_string()]);
+            .get("x-greentic-caller-email")
+            .map(String::as_str);
+        let roles = compute_effective_roles(
+            self.admin_roles_overlay.as_deref(),
+            &tenant_id,
+            caller_email,
+            header_roles,
+        );
 
         let input = match request_json(&request, &path_params, Some(&endpoint)) {
             Ok(value) => value,
@@ -7034,6 +7051,55 @@ fn header_or_local(
     }
 }
 
+/// Parses the self-asserted `x-greentic-caller-role` header into a role list,
+/// falling back to `["local"]` when the header is absent or empty.
+///
+/// This is the legacy, caller-asserted role source. When the admin roles
+/// overlay is configured these roles are deliberately ignored (see
+/// [`compute_effective_roles`]).
+fn header_caller_roles(headers: &BTreeMap<String, String>) -> Vec<String> {
+    headers
+        .get("x-greentic-caller-role")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|roles| !roles.is_empty())
+        .unwrap_or_else(|| vec!["local".to_string()])
+}
+
+/// Decides the effective policy roles for a request.
+///
+/// - No overlay configured (the default): returns `header_roles` verbatim, so
+///   behavior is byte-identical to the pre-overlay request path.
+/// - Overlay configured: the admin system-of-record is authoritative and the
+///   self-asserted `x-greentic-caller-role` header is IGNORED (this is the
+///   whole point of the security gate — a caller must not be able to grant
+///   itself roles). The overlay result maps to:
+///   - `Some(non-empty)` => those admin-granted roles,
+///   - `Some(empty)`     => the user is known but holds no roles => `["local"]`,
+///   - `None`            => unresolved (no caller email, or admin unreachable
+///     with no cached map) => `["local"]` (no asserted roles).
+fn compute_effective_roles(
+    overlay: Option<&AdminRolesOverlay>,
+    tenant_slug: &str,
+    caller_email: Option<&str>,
+    header_roles: Vec<String>,
+) -> Vec<String> {
+    match overlay {
+        None => header_roles,
+        Some(overlay) => match overlay.roles_for(tenant_slug, caller_email) {
+            Some(roles) if !roles.is_empty() => roles,
+            Some(_) => vec!["local".to_string()],
+            None => vec!["local".to_string()],
+        },
+    }
+}
+
 fn request_json(
     request: &HttpRequest,
     path_params: &BTreeMap<String, String>,
@@ -7231,9 +7297,107 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::admin_roles::{AdminRolesOverlay, RolesResolver};
+    use std::collections::HashMap as StdHashMap;
+    use std::time::Duration;
 
     const GENERIC_RUNTIME_CONFIG: &str =
         include_str!("../tests/e2e/fixtures/generic_runtime_host/runtime-config.json");
+
+    /// Minimal resolver returning a fixed map; used to exercise the seam.
+    struct SeamResolver {
+        map: StdHashMap<String, Vec<String>>,
+    }
+
+    impl RolesResolver for SeamResolver {
+        fn tenant_user_roles(
+            &self,
+            _tenant_slug: &str,
+        ) -> Result<StdHashMap<String, Vec<String>>, String> {
+            Ok(self.map.clone())
+        }
+    }
+
+    fn seam_overlay(pairs: &[(&str, &[&str])]) -> AdminRolesOverlay {
+        let map = pairs
+            .iter()
+            .map(|(email, roles)| {
+                (
+                    email.to_ascii_lowercase(),
+                    roles.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        AdminRolesOverlay::new(Box::new(SeamResolver { map }), Duration::from_secs(300))
+    }
+
+    #[test]
+    fn header_caller_roles_parses_and_falls_back() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "x-greentic-caller-role".to_string(),
+            "admin, reviewer ,,".to_string(),
+        );
+        assert_eq!(
+            header_caller_roles(&headers),
+            vec!["admin".to_string(), "reviewer".to_string()]
+        );
+        // Absent header => ["local"].
+        assert_eq!(
+            header_caller_roles(&BTreeMap::new()),
+            vec!["local".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_effective_roles_no_overlay_passthrough() {
+        // No overlay => header roles are used verbatim (today's behavior).
+        let header = vec!["admin".to_string()];
+        assert_eq!(
+            compute_effective_roles(None, "t", Some("alice@x"), header.clone()),
+            header
+        );
+        // Including the ["local"] fallback when the header was absent.
+        assert_eq!(
+            compute_effective_roles(None, "t", None, vec!["local".to_string()]),
+            vec!["local".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_effective_roles_overlay_ignores_header() {
+        let overlay = seam_overlay(&[("alice@x", &["sorla_composer"])]);
+        // Caller asserts "admin" via header, but the overlay is authoritative:
+        // the header is ignored and the admin role is used.
+        let roles = compute_effective_roles(
+            Some(&overlay),
+            "t",
+            Some("alice@x"),
+            vec!["admin".to_string()],
+        );
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn compute_effective_roles_overlay_unknown_user_local() {
+        let overlay = seam_overlay(&[("alice@x", &["sorla_composer"])]);
+        // Known tenant, unknown user (Some(empty)) => ["local"], header ignored.
+        let roles = compute_effective_roles(
+            Some(&overlay),
+            "t",
+            Some("nobody@x"),
+            vec!["admin".to_string()],
+        );
+        assert_eq!(roles, vec!["local".to_string()]);
+    }
+
+    #[test]
+    fn compute_effective_roles_overlay_no_email_local() {
+        let overlay = seam_overlay(&[("alice@x", &["sorla_composer"])]);
+        // No caller email (None) => ["local"], header still ignored.
+        let roles = compute_effective_roles(Some(&overlay), "t", None, vec!["admin".to_string()]);
+        assert_eq!(roles, vec!["local".to_string()]);
+    }
 
     #[derive(Debug)]
     struct AdminDenyControl;
