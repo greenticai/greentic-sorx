@@ -195,6 +195,39 @@ fn topic_segment(value: &str) -> String {
     }
 }
 
+/// Returns the canonical NATS topic for an entity lifecycle event.
+///
+/// Follows the pattern `sorla.<pack>.<entity>.<operation>` where each
+/// segment is sanitized by [`topic_segment`].  This is the same string
+/// written into [`EventEnvelope::topic`] by [`entity_event_envelope`].
+///
+/// Exposing this as a public function lets the CLI capability-offer layer
+/// advertise the exact topic without duplicating the sanitization logic.
+pub fn entity_event_topic(pack_name: &str, entity: &str, operation: &str) -> String {
+    format!(
+        "sorla.{}.{}.{}",
+        topic_segment(pack_name),
+        topic_segment(entity),
+        topic_segment(operation),
+    )
+}
+
+/// Returns the canonical NATS topic for a command-emitted (domain) event.
+///
+/// Follows the pattern `sorla.<pack>.<event_name>` where each segment is
+/// sanitized by [`topic_segment`].  This is the same string written into
+/// [`EventEnvelope::topic`] by [`command_event_envelope`].
+///
+/// Exposing this as a public function lets the CLI capability-offer layer
+/// advertise the exact topic without duplicating the sanitization logic.
+pub fn command_event_topic(pack_name: &str, event_name: &str) -> String {
+    format!(
+        "sorla.{}.{}",
+        topic_segment(pack_name),
+        topic_segment(event_name),
+    )
+}
+
 /// Parses and validates environment and tenant identifiers into a `TenantCtx`.
 fn build_tenant_ctx(environment: &str, tenant_id: &str) -> SorxResult<TenantCtx> {
     let env = environment
@@ -246,12 +279,7 @@ pub fn entity_event_envelope(
     }
     Ok(EventEnvelope {
         id: next_event_id()?,
-        topic: format!(
-            "sorla.{}.{}.{}",
-            topic_segment(&pack.name),
-            topic_segment(input.entity),
-            topic_segment(input.operation),
-        ),
+        topic: entity_event_topic(&pack.name, input.entity, input.operation),
         r#type: format!("com.greentic.sorla.entity.{}.v1", input.operation),
         source: build_event_source(pack),
         tenant: build_tenant_ctx(input.environment, input.tenant_id)?,
@@ -290,11 +318,7 @@ pub fn command_event_envelope(
     }
     Ok(EventEnvelope {
         id: next_event_id()?,
-        topic: format!(
-            "sorla.{}.{}",
-            topic_segment(&pack.name),
-            topic_segment(input.event_name),
-        ),
+        topic: command_event_topic(&pack.name, input.event_name),
         r#type: format!("com.greentic.sorla.{}.v1", input.event_name),
         source: build_event_source(pack),
         tenant: build_tenant_ctx(input.environment, input.tenant_id)?,

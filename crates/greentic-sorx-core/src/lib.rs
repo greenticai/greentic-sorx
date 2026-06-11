@@ -28,8 +28,8 @@ pub use approval::{
 pub use audit::{AuditSink, DisabledAuditSink, MemoryAuditSink, SorxAuditEvent, StdoutAuditSink};
 pub use business_events::{
     BusinessEventSink, CommandEventInput, DisabledBusinessEventSink, EntityEventInput,
-    MemoryBusinessEventSink, StdoutBusinessEventSink, command_event_envelope,
-    entity_event_envelope,
+    MemoryBusinessEventSink, StdoutBusinessEventSink, command_event_envelope, command_event_topic,
+    entity_event_envelope, entity_event_topic,
 };
 pub use deployment::{
     CreateDeploymentRequest, DEPLOYMENT_PROMOTION_STATUS_SCHEMA,
