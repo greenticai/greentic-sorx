@@ -37,6 +37,11 @@ path = "src/main.rs"
 name = "perf"
 harness = false
 
+[features]
+## Enable NATS-backed business event sink (adds async-nats dependency).
+## Wired automatically when events.sink = "nats" in the runtime config.
+events-nats = []
+
 [dependencies]
 ciborium.workspace = true
 clap.workspace = true

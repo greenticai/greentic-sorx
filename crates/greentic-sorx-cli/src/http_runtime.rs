@@ -7,24 +7,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentic_sorx_core::{
     AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface,
-    AuthorizationRequirement, AuthorizationRoles, CallerContext, CapabilityOffer, CommandStep,
-    ControlDecisionAction, DeploymentRegistryError, EndpointDefinition, EndpointInvocation,
-    EndpointMethod, EndpointRouter, EndpointStatus, EntityRecord, FoundationDbProviderAdapter,
-    FoundationDbProviderConfig, InvocationSource, LocalDeploymentRegistryStore,
-    ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle,
-    ManagerLocaleCatalog, ManagerLocaleContext, ManagerNavItem, ManagerPolicyDecision,
-    ManagerPolicyEffect, ManagerPolicySet, ManagerRecordView, ManagerRelationshipView,
-    McpToolDefinition, McpToolList, MemoryStoreProvider, MetricAggregate, MetricQuery,
-    MetricQueryFilter, MetricQueryResult, MetricResultRow, MetricRuntime, MetricRuntimeProvider,
-    OperationKind, PolicyAction, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp,
-    RecordAccessPolicy, RiskLevel, RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig,
-    RuntimeInfo, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
-    RuntimeMetricKind, RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment,
-    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
-    StoreProviderKind, TrafficUpdateRequest, apply_value_patch, filter_manager_view,
-    generate_manager_view, humanize_identifier, localize_manager_view, render_dashboard_card,
-    render_record_create_card, render_record_detail_card, render_record_picker_card,
-    render_relationship_summary_card, resolve_manager_context,
+    AuthorizationRequirement, AuthorizationRoles, BusinessEventSink, CallerContext,
+    CapabilityOffer, CommandStep, ControlDecisionAction, DeploymentRegistryError,
+    EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter, EndpointStatus,
+    EntityRecord, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
+    LocalDeploymentRegistryStore, ManagerContextDefaults, ManagerFieldRelationshipView,
+    ManagerFieldView, ManagerLocaleBundle, ManagerLocaleCatalog, ManagerLocaleContext,
+    ManagerNavItem, ManagerPolicyDecision, ManagerPolicyEffect, ManagerPolicySet,
+    ManagerRecordView, ManagerRelationshipView, McpToolDefinition, McpToolList,
+    MemoryStoreProvider, MetricAggregate, MetricQuery, MetricQueryFilter, MetricQueryResult,
+    MetricResultRow, MetricRuntime, MetricRuntimeProvider, OperationKind, PolicyAction,
+    ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, RecordAccessPolicy, RiskLevel,
+    RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig, RuntimeInfo, RuntimeMetric,
+    RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension, RuntimeMetricKind,
+    RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult,
+    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
+    StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest, apply_value_patch,
+    filter_manager_view, generate_manager_view, humanize_identifier, localize_manager_view,
+    render_dashboard_card, render_record_create_card, render_record_detail_card,
+    render_record_picker_card, render_relationship_summary_card, resolve_manager_context,
 };
 use greentic_sorx_pack::{
     BusinessAction, BusinessActionAssets, LoadedSorlaPack, MetricDefinition, contract_hash,
@@ -144,21 +145,24 @@ impl HttpRuntime {
         let mut router = EndpointRouter::from_agent_gateway(&pack.sorla_assets.agent_gateway_json)?;
         apply_model_endpoint_authorization(pack, &mut router);
         let providers = provider_registry(&config)?;
-        let runtime = configure_runtime_audit(
-            SorxRuntime::new(
-                RuntimePack {
-                    name: pack.pack_name.clone(),
-                    version: pack.pack_version.clone(),
-                    digest: pack.pack_digest.clone(),
-                    operational_indexes: runtime_operational_indexes(pack),
-                    record_access: runtime_record_access(pack),
-                },
-                config.clone(),
-                router,
-                providers,
+        let runtime = configure_runtime_events(
+            configure_runtime_audit(
+                SorxRuntime::new(
+                    RuntimePack {
+                        name: pack.pack_name.clone(),
+                        version: pack.pack_version.clone(),
+                        digest: pack.pack_digest.clone(),
+                        operational_indexes: runtime_operational_indexes(pack),
+                        record_access: runtime_record_access(pack),
+                    },
+                    config.clone(),
+                    router,
+                    providers,
+                ),
+                &config,
             ),
             &config,
-        );
+        )?;
         let deployment_id = deployment_id.into();
         let exposure = config.exposure.default_visibility.clone();
         let auth = http_auth_from_config(&config)?;
@@ -2814,6 +2818,40 @@ fn configure_runtime_audit(runtime: SorxRuntime, config: &SorxRuntimeConfig) -> 
         "stdout" => runtime.with_audit_sink(Arc::new(StdoutAuditSink)),
         _ => runtime,
     }
+}
+
+fn configure_runtime_events(
+    runtime: SorxRuntime,
+    config: &SorxRuntimeConfig,
+) -> SorxResult<SorxRuntime> {
+    match config.events.sink.as_str() {
+        "stdout" => Ok(runtime.with_event_sink(Arc::new(StdoutBusinessEventSink))),
+        "nats" => {
+            let url = config.events.nats_url.clone().ok_or_else(|| {
+                SorxError::new(
+                    "events_nats_url_missing",
+                    "events.sink = \"nats\" requires events.nats_url",
+                )
+            })?;
+            nats_event_sink(&url, &config.events.subject_prefix)
+                .map(|sink| runtime.with_event_sink(sink))
+        }
+        _ => Ok(runtime),
+    }
+}
+
+#[cfg(feature = "events-nats")]
+fn nats_event_sink(url: &str, subject_prefix: &str) -> SorxResult<Arc<dyn BusinessEventSink>> {
+    crate::nats_events::NatsEventSink::connect(url, subject_prefix)
+        .map(|sink| Arc::new(sink) as Arc<dyn BusinessEventSink>)
+}
+
+#[cfg(not(feature = "events-nats"))]
+fn nats_event_sink(_url: &str, _subject_prefix: &str) -> SorxResult<Arc<dyn BusinessEventSink>> {
+    Err(SorxError::new(
+        "events_nats_unavailable",
+        "this build does not include the events-nats feature",
+    ))
 }
 
 fn is_admin_api_path(path: &str) -> bool {
@@ -10724,5 +10762,47 @@ mod tests {
             response.body["routes"][0]["deployment_id"],
             created.deployment_id
         );
+    }
+
+    // ── business event sink wiring ────────────────────────────────────────────
+
+    /// Build an `HttpRuntime` from the standard fixture answers plus the given
+    /// `events` object merged into the answers JSON.
+    fn runtime_with_events_answers(events_obj: Value) -> SorxResult<HttpRuntime> {
+        let mut answers_json = answers("local");
+        answers_json
+            .as_object_mut()
+            .expect("answers must be an object")
+            .insert("events".to_string(), events_obj);
+        let pack = pack();
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &answers_json, true).unwrap();
+        let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
+        HttpRuntime::from_pack("local", &pack, config)
+    }
+
+    #[test]
+    fn events_stdout_sink_is_wired_from_config() {
+        let runtime = runtime_with_events_answers(json!({ "sink": "stdout" }));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn events_disabled_sink_is_default_passthrough() {
+        let runtime = runtime_with_events_answers(json!({}));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn events_nats_sink_without_url_is_an_error() {
+        let result = runtime_with_events_answers(json!({ "sink": "nats" }));
+        assert!(
+            result.is_err(),
+            "nats sink without nats_url must be an error"
+        );
+        match result {
+            Err(err) => assert_eq!(err.code, "events_nats_url_missing"),
+            Ok(_) => panic!("expected Err but got Ok"),
+        }
     }
 }
