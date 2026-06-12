@@ -6652,7 +6652,24 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
     for (binding, provider) in &config.providers {
         match StoreProviderKind::parse(&provider.kind) {
             StoreProviderKind::Memory => {
-                registry.register_canonical_store(binding, Arc::new(MemoryStoreProvider::new()))
+                let store_path = provider
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.get("path"))
+                    .and_then(serde_json::Value::as_str);
+                match store_path {
+                    Some(path) => {
+                        let store = MemoryStoreProvider::persistent(path).map_err(|err| {
+                            SorxError::new(
+                                "provider_store_init_failed",
+                                format!("memory store at `{path}`: {err}"),
+                            )
+                        })?;
+                        registry.register_canonical_store(binding, Arc::new(store));
+                    }
+                    None => registry
+                        .register_canonical_store(binding, Arc::new(MemoryStoreProvider::new())),
+                }
             }
             StoreProviderKind::FoundationDb => {
                 let adapter =
@@ -10724,5 +10741,57 @@ mod tests {
             response.body["routes"][0]["deployment_id"],
             created.deployment_id
         );
+    }
+
+    #[test]
+    fn memory_provider_with_path_config_is_persistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("store.json");
+
+        // Build answers pointing the memory store at a file on disk.
+        // environment = "local" so that direct `config` is allowed (no validation error).
+        let mut answers_with_path = answers("local");
+        answers_with_path["providers"]["store"] = json!({
+            "kind": "memory",
+            "config": { "path": store_path.to_str().unwrap() }
+        });
+
+        // Runtime 1: create a record.
+        let runtime1 = runtime_with_answers(answers_with_path.clone());
+        let create_response = request(
+            &runtime1,
+            "POST",
+            "/v1/agent/tenants/create",
+            &tenant_headers(),
+            r#"{"id":"persist-test-1","name":"Persistence Corp","active":true}"#,
+        );
+        assert_eq!(
+            create_response["ok"],
+            Value::Bool(true),
+            "create should succeed: {create_response:?}"
+        );
+        assert_eq!(create_response["result"]["id"], "persist-test-1");
+
+        // The store file must exist on disk now.
+        assert!(
+            store_path.exists(),
+            "store.json must be written after create"
+        );
+
+        // Runtime 2: same answers, fresh instance — data must survive.
+        let runtime2 = runtime_with_answers(answers_with_path);
+        let get_response = request(
+            &runtime2,
+            "GET",
+            "/v1/agent/tenants/persist-test-1",
+            &tenant_headers(),
+            "",
+        );
+        assert!(
+            !get_response["result"].is_null(),
+            "record must be found by runtime2 (file-backed): {get_response:?}"
+        );
+        assert_eq!(get_response["result"]["id"], "persist-test-1");
+        assert_eq!(get_response["result"]["data"]["name"], "Persistence Corp");
     }
 }
