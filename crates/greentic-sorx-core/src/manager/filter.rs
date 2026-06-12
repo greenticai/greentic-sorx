@@ -220,6 +220,9 @@ mod tests {
                     read_only: false,
                     redacted: false,
                     value: Some(Value::String(format!("{field}-value"))),
+                    hidden: false,
+                    display_order: None,
+                    display_group: None,
                     policy: ManagerPolicyDecision::allow(),
                 })
                 .collect(),

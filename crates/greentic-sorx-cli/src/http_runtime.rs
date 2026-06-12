@@ -3433,7 +3433,8 @@ fn manager_model_field(record_name: &str, field: &Value) -> Option<ManagerFieldV
             manager_key_like(name)
         ),
         label: field
-            .get("label")
+            .get("display_label")
+            .or_else(|| field.get("label"))
             .or_else(|| field.get("title"))
             .and_then(Value::as_str)
             .map(ToString::to_string)
@@ -3453,6 +3454,18 @@ fn manager_model_field(record_name: &str, field: &Value) -> Option<ManagerFieldV
             .unwrap_or(false),
         redacted: sensitive,
         value: None,
+        hidden: field
+            .get("hidden")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        display_order: field
+            .get("display_order")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32),
+        display_group: field
+            .get("display_group")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         policy: ManagerPolicyDecision::allow(),
     })
 }
@@ -5591,22 +5604,35 @@ fn manager_record_table_row(
 }
 
 fn manager_table_fields(record: &ManagerRecordView) -> Vec<ManagerFieldView> {
-    let mut fields = manager_prioritized_table_fields(
-        record
-            .fields
-            .iter()
-            .filter(|field| {
-                !field.redacted && !field.generated && !manager_is_identifier_field(field)
-            })
-            .cloned()
-            .collect(),
-    );
+    let mut candidate_fields: Vec<ManagerFieldView> = record
+        .fields
+        .iter()
+        .filter(|field| {
+            !field.redacted
+                && !field.generated
+                && !manager_is_identifier_field(field)
+                && !field.hidden
+        })
+        .cloned()
+        .collect();
+
+    // Apply display_order sort when at least one field carries it
+    if candidate_fields.iter().any(|f| f.display_order.is_some()) {
+        candidate_fields.sort_by(|a, b| {
+            a.display_order
+                .unwrap_or(u32::MAX)
+                .cmp(&b.display_order.unwrap_or(u32::MAX))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+
+    let mut fields = manager_prioritized_table_fields(candidate_fields);
     fields.truncate(4);
     if fields.is_empty() {
         fields = record
             .fields
             .iter()
-            .filter(|field| !field.redacted)
+            .filter(|field| !field.redacted && !field.hidden)
             .take(4)
             .cloned()
             .collect();
@@ -7329,6 +7355,24 @@ mod tests {
             })
             .collect();
         AdminRolesOverlay::new(Box::new(SeamResolver { map }), Duration::from_secs(300))
+    }
+
+    #[test]
+    fn manager_model_field_reads_presentation_hints() {
+        use serde_json::json;
+        let field = json!({
+            "name": "email",
+            "type": "string",
+            "display_label": "Your Email",
+            "hidden": true,
+            "display_order": 3,
+            "display_group": "Contact"
+        });
+        let result = manager_model_field("User", &field).unwrap();
+        assert_eq!(result.label, "Your Email");
+        assert!(result.hidden);
+        assert_eq!(result.display_order, Some(3));
+        assert_eq!(result.display_group.as_deref(), Some("Contact"));
     }
 
     #[test]
@@ -9329,6 +9373,9 @@ mod tests {
                     read_only: false,
                     redacted: false,
                     value: None,
+                    hidden: false,
+                    display_order: None,
+                    display_group: None,
                     policy: ManagerPolicyDecision::allow(),
                 }],
                 endpoint_ids: Vec::new(),
