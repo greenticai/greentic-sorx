@@ -3461,7 +3461,7 @@ fn manager_model_field(record_name: &str, field: &Value) -> Option<ManagerFieldV
         display_order: field
             .get("display_order")
             .and_then(Value::as_u64)
-            .map(|v| v as u32),
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         display_group: field
             .get("display_group")
             .and_then(Value::as_str)
@@ -5626,6 +5626,9 @@ fn manager_table_fields(record: &ManagerRecordView) -> Vec<ManagerFieldView> {
         });
     }
 
+    // Note: manager_prioritized_table_fields re-sorts by domain priority (e.g.
+    // invitation_code / waitlist), which can override the display_order sort above.
+    // Hint order is therefore not guaranteed on those tables.
     let mut fields = manager_prioritized_table_fields(candidate_fields);
     fields.truncate(4);
     if fields.is_empty() {
@@ -7373,6 +7376,57 @@ mod tests {
         assert!(result.hidden);
         assert_eq!(result.display_order, Some(3));
         assert_eq!(result.display_group.as_deref(), Some("Contact"));
+    }
+
+    #[test]
+    fn manager_table_fields_excludes_hidden_field() {
+        // Build a record with one hidden field and one visible field.  The table
+        // path (manager_table_fields) must surface the visible field and silently
+        // drop the hidden one.
+        fn make_field(field_name: &str, is_hidden: bool) -> ManagerFieldView {
+            ManagerFieldView {
+                name: field_name.to_string(),
+                label_key: format!("field.record.{field_name}.label"),
+                label: field_name.to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: is_hidden,
+                display_order: None,
+                display_group: None,
+                policy: ManagerPolicyDecision::allow(),
+            }
+        }
+
+        let record = ManagerRecordView {
+            record: "Item".to_string(),
+            collection: "items".to_string(),
+            label_key: "record.item.label".to_string(),
+            label: "Item".to_string(),
+            plural_label_key: "record.item.plural".to_string(),
+            plural_label: "Items".to_string(),
+            create_field_names: Vec::new(),
+            fields: vec![make_field("secret_token", true), make_field("title", false)],
+            endpoint_ids: Vec::new(),
+            policy: ManagerPolicyDecision::allow(),
+        };
+
+        let table_fields = manager_table_fields(&record);
+        let field_names: Vec<&str> = table_fields.iter().map(|f| f.name.as_str()).collect();
+
+        assert!(
+            !field_names.contains(&"secret_token"),
+            "hidden field 'secret_token' must not appear in table fields; got: {field_names:?}"
+        );
+        assert!(
+            field_names.contains(&"title"),
+            "visible field 'title' must appear in table fields; got: {field_names:?}"
+        );
     }
 
     #[test]
