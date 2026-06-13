@@ -27,6 +27,7 @@ pub struct SorxRuntimeConfig {
     pub bindings: BindingResolver,
     pub policy: BTreeMap<String, String>,
     pub audit: AuditConfig,
+    pub events: EventsConfig,
     pub deployment: DeploymentConfig,
     pub exposure: ExposureConfig,
     pub ghcr: GhcrConfig,
@@ -64,6 +65,14 @@ pub struct ProviderBindingConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditConfig {
     pub sink: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventsConfig {
+    /// Business event sink: "disabled" | "stdout" | "nats".
+    pub sink: String,
+    pub nats_url: Option<String>,
+    pub subject_prefix: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +286,14 @@ pub fn default_start_schema() -> Value {
                     "sink": { "type": "string", "enum": ["stdout", "file", "disabled"], "default": "stdout" }
                 }
             },
+            "events": {
+                "type": "object",
+                "properties": {
+                    "sink": { "type": "string", "enum": ["disabled", "stdout", "nats"], "default": "disabled" },
+                    "nats_url": { "type": "string" },
+                    "subject_prefix": { "type": "string", "default": "greentic.events" }
+                }
+            },
             "deployment": {
                 "type": "object",
                 "required": ["tenant_id", "sor_name", "environment", "deployment_mode", "api_version_label", "base_path"],
@@ -450,6 +467,7 @@ pub fn runtime_config_from_answers(
     let bindings = object.get("bindings").and_then(Value::as_object);
     let policy = object_value(object, "policy")?;
     let audit = object.get("audit").and_then(Value::as_object);
+    let events = object.get("events").and_then(Value::as_object);
     let deployment = object.get("deployment").and_then(Value::as_object);
     let exposure = object.get("exposure").and_then(Value::as_object);
     let ghcr = object.get("ghcr").and_then(Value::as_object);
@@ -479,6 +497,12 @@ pub fn runtime_config_from_answers(
         policy: approval_policy(policy),
         audit: AuditConfig {
             sink: string_at_opt(audit, "sink").unwrap_or_else(|| "stdout".to_string()),
+        },
+        events: EventsConfig {
+            sink: string_at_opt(events, "sink").unwrap_or_else(|| "disabled".to_string()),
+            nats_url: string_at_opt(events, "nats_url"),
+            subject_prefix: string_at_opt(events, "subject_prefix")
+                .unwrap_or_else(|| "greentic.events".to_string()),
         },
         deployment: DeploymentConfig {
             tenant_id: string_at_opt(deployment, "tenant_id")
@@ -606,6 +630,11 @@ pub fn build_startup_plan(
         "policy": config.policy,
         "audit": {
             "sink": config.audit.sink
+        },
+        "events": {
+            "sink": config.events.sink,
+            "nats_url": config.events.nats_url,
+            "subject_prefix": config.events.subject_prefix
         },
         "deployment": config.deployment,
         "exposure": config.exposure,
@@ -1149,5 +1178,47 @@ mod tests {
         let normalized = normalize_start_answers(&default_start_schema(), &envelope, true).unwrap();
         assert_eq!(normalized.answers["tenant"]["tenant_id"], "tenant-a");
         assert_eq!(normalized.answers["server"]["bind"], "127.0.0.1:8787");
+    }
+
+    #[test]
+    fn events_config_defaults_to_disabled() {
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &full_answers(), true).unwrap();
+        let config = runtime_config_from_answers("pack", &normalized.answers).unwrap();
+        assert_eq!(config.events.sink, "disabled");
+        assert_eq!(config.events.nats_url, None);
+        assert_eq!(config.events.subject_prefix, "greentic.events");
+    }
+
+    #[test]
+    fn events_config_parses_nats_settings() {
+        let mut answers = full_answers();
+        answers["events"] = json!({
+            "sink": "nats",
+            "nats_url": "nats://localhost:4222",
+            "subject_prefix": "custom.events"
+        });
+        let normalized = normalize_start_answers(&default_start_schema(), &answers, true).unwrap();
+        let config = runtime_config_from_answers("pack", &normalized.answers).unwrap();
+        assert_eq!(config.events.sink, "nats");
+        assert_eq!(
+            config.events.nats_url.as_deref(),
+            Some("nats://localhost:4222")
+        );
+        assert_eq!(config.events.subject_prefix, "custom.events");
+    }
+
+    #[test]
+    fn events_config_round_trips_through_answers() {
+        let mut answers = full_answers();
+        answers["events"] = json!({
+            "sink": "stdout",
+            "subject_prefix": "greentic.events"
+        });
+        let normalized = normalize_start_answers(&default_start_schema(), &answers, true).unwrap();
+        let config = runtime_config_from_answers("pack", &normalized.answers).unwrap();
+        let plan = build_startup_plan("pack", "0.1.0", &normalized.answers).unwrap();
+        assert_eq!(plan["events"]["sink"], "stdout");
+        assert_eq!(config.events.subject_prefix, "greentic.events");
     }
 }

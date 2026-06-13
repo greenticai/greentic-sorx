@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 mod approval;
 mod audit;
+mod business_events;
 mod deployment;
 mod error;
 mod evidence;
@@ -25,6 +26,11 @@ pub use approval::{
     LocalDenyBroker, LocalPendingBroker,
 };
 pub use audit::{AuditSink, DisabledAuditSink, MemoryAuditSink, SorxAuditEvent, StdoutAuditSink};
+pub use business_events::{
+    BusinessEventSink, CommandEventInput, DisabledBusinessEventSink, EntityEventInput,
+    MemoryBusinessEventSink, StdoutBusinessEventSink, command_event_envelope, command_event_topic,
+    entity_event_envelope, entity_event_topic,
+};
 pub use deployment::{
     CreateDeploymentRequest, DEPLOYMENT_PROMOTION_STATUS_SCHEMA,
     DEPLOYMENT_PUBLIC_ROUTE_TABLE_SCHEMA, DEPLOYMENT_REGISTRY_SCHEMA,
@@ -117,10 +123,10 @@ pub use providers::{FoundationDbProviderAdapter, FoundationDbProviderConfig, Mem
 pub use router::EndpointRouter;
 pub use runtime::{SorxRuntime, empty_object, invocation, runtime_pack};
 pub use startup::{
-    AuditConfig, DeploymentConfig, ExposureConfig, GhcrConfig, GhcrWebhookAnswerConfig, McpConfig,
-    ProviderBindingConfig, ServerConfig, SorxNormalizedAnswers, SorxRuntimeConfig,
-    SorxStartAnswers, SorxStartupError, SorxStartupIssue, build_startup_plan, default_start_schema,
-    normalize_start_answers, runtime_config_from_answers,
+    AuditConfig, DeploymentConfig, EventsConfig, ExposureConfig, GhcrConfig,
+    GhcrWebhookAnswerConfig, McpConfig, ProviderBindingConfig, ServerConfig, SorxNormalizedAnswers,
+    SorxRuntimeConfig, SorxStartAnswers, SorxStartupError, SorxStartupIssue, build_startup_plan,
+    default_start_schema, normalize_start_answers, runtime_config_from_answers,
 };
 
 pub const SORX_VERSION_SCHEMA: &str = "greentic.sorx.version.v1";

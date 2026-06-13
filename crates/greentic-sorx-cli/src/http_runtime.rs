@@ -7,24 +7,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentic_sorx_core::{
     AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface,
-    AuthorizationRequirement, AuthorizationRoles, CallerContext, CapabilityOffer, CommandStep,
-    ControlDecisionAction, DeploymentRegistryError, EndpointDefinition, EndpointInvocation,
-    EndpointMethod, EndpointRouter, EndpointStatus, EntityRecord, FoundationDbProviderAdapter,
-    FoundationDbProviderConfig, InvocationSource, LocalDeploymentRegistryStore,
-    ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle,
-    ManagerLocaleCatalog, ManagerLocaleContext, ManagerNavItem, ManagerPolicyDecision,
-    ManagerPolicyEffect, ManagerPolicySet, ManagerRecordView, ManagerRelationshipView,
-    McpToolDefinition, McpToolList, MemoryStoreProvider, MetricAggregate, MetricQuery,
-    MetricQueryFilter, MetricQueryResult, MetricResultRow, MetricRuntime, MetricRuntimeProvider,
-    OperationKind, PolicyAction, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp,
-    RecordAccessPolicy, RiskLevel, RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig,
-    RuntimeInfo, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
-    RuntimeMetricKind, RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment,
-    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
-    StoreProviderKind, TrafficUpdateRequest, apply_value_patch, filter_manager_view,
-    generate_manager_view, humanize_identifier, localize_manager_view, render_dashboard_card,
-    render_record_create_card, render_record_detail_card, render_record_picker_card,
-    render_relationship_summary_card, resolve_manager_context,
+    AuthorizationRequirement, AuthorizationRoles, BusinessEventSink, CallerContext,
+    CapabilityOffer, CommandStep, ControlDecisionAction, DeploymentRegistryError,
+    EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter, EndpointStatus,
+    EntityRecord, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
+    LocalDeploymentRegistryStore, ManagerContextDefaults, ManagerFieldRelationshipView,
+    ManagerFieldView, ManagerLocaleBundle, ManagerLocaleCatalog, ManagerLocaleContext,
+    ManagerNavItem, ManagerPolicyDecision, ManagerPolicyEffect, ManagerPolicySet,
+    ManagerRecordView, ManagerRelationshipView, McpToolDefinition, McpToolList,
+    MemoryStoreProvider, MetricAggregate, MetricQuery, MetricQueryFilter, MetricQueryResult,
+    MetricResultRow, MetricRuntime, MetricRuntimeProvider, OperationKind, PolicyAction,
+    ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, RecordAccessPolicy, RiskLevel,
+    RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig, RuntimeInfo, RuntimeMetric,
+    RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension, RuntimeMetricKind,
+    RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult,
+    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
+    StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest, apply_value_patch,
+    command_event_topic, entity_event_topic, filter_manager_view, generate_manager_view,
+    humanize_identifier, localize_manager_view, render_dashboard_card, render_record_create_card,
+    render_record_detail_card, render_record_picker_card, render_relationship_summary_card,
+    resolve_manager_context,
 };
 use greentic_sorx_pack::{
     BusinessAction, BusinessActionAssets, LoadedSorlaPack, MetricDefinition, contract_hash,
@@ -144,21 +146,24 @@ impl HttpRuntime {
         let mut router = EndpointRouter::from_agent_gateway(&pack.sorla_assets.agent_gateway_json)?;
         apply_model_endpoint_authorization(pack, &mut router);
         let providers = provider_registry(&config)?;
-        let runtime = configure_runtime_audit(
-            SorxRuntime::new(
-                RuntimePack {
-                    name: pack.pack_name.clone(),
-                    version: pack.pack_version.clone(),
-                    digest: pack.pack_digest.clone(),
-                    operational_indexes: runtime_operational_indexes(pack),
-                    record_access: runtime_record_access(pack),
-                },
-                config.clone(),
-                router,
-                providers,
+        let runtime = configure_runtime_events(
+            configure_runtime_audit(
+                SorxRuntime::new(
+                    RuntimePack {
+                        name: pack.pack_name.clone(),
+                        version: pack.pack_version.clone(),
+                        digest: pack.pack_digest.clone(),
+                        operational_indexes: runtime_operational_indexes(pack),
+                        record_access: runtime_record_access(pack),
+                    },
+                    config.clone(),
+                    router,
+                    providers,
+                ),
+                &config,
             ),
             &config,
-        );
+        )?;
         let deployment_id = deployment_id.into();
         let exposure = config.exposure.default_visibility.clone();
         let auth = http_auth_from_config(&config)?;
@@ -902,6 +907,8 @@ impl HttpRuntime {
 
     fn business_event_topic_offers(&self) -> Vec<CapabilityOffer> {
         let mut event_topics = BTreeMap::<String, Value>::new();
+
+        // --- command-emitted (domain) event topics ---
         for endpoint in self.runtime.router.endpoints.values() {
             let OperationKind::Command(spec) = &endpoint.operation else {
                 continue;
@@ -909,6 +916,7 @@ impl HttpRuntime {
             let mut events = Vec::new();
             collect_command_event_topics(&spec.steps, &mut events);
             for event in events {
+                let topic = command_event_topic(&self.runtime.pack.name, &event);
                 event_topics.entry(event.clone()).or_insert_with(|| {
                     json!({
                         "kind": "business_event_topic",
@@ -918,6 +926,7 @@ impl HttpRuntime {
                             "digest": self.runtime.pack.digest
                         },
                         "event_type": event,
+                        "topic": topic,
                         "producer": format!("sorx:{}:{}", self.runtime.pack.name, self.runtime.pack.version),
                         "source_endpoint_id": endpoint.endpoint_id,
                         "source_operation_id": endpoint.operation_id
@@ -925,6 +934,38 @@ impl HttpRuntime {
                 });
             }
         }
+
+        // --- entity lifecycle topics (create / update / delete) ---
+        for endpoint in self.runtime.router.endpoints.values() {
+            let operation_label = match &endpoint.operation {
+                OperationKind::Create => "created",
+                OperationKind::Update => "updated",
+                OperationKind::Delete => "deleted",
+                _ => continue,
+            };
+            let Ok(binding) = self.runtime.config.bindings.resolve(endpoint) else {
+                continue;
+            };
+            let event_type = format!("{}.{operation_label}", binding.entity);
+            let topic =
+                entity_event_topic(&self.runtime.pack.name, &binding.entity, operation_label);
+            event_topics.entry(event_type.clone()).or_insert_with(|| {
+                json!({
+                    "kind": "business_event_topic",
+                    "pack": {
+                        "name": self.runtime.pack.name,
+                        "version": self.runtime.pack.version,
+                        "digest": self.runtime.pack.digest
+                    },
+                    "event_type": event_type,
+                    "topic": topic,
+                    "producer": format!("sorx:{}:{}", self.runtime.pack.name, self.runtime.pack.version),
+                    "source_endpoint_id": endpoint.endpoint_id,
+                    "source_operation_id": endpoint.operation_id
+                })
+            });
+        }
+
         event_topics
             .into_iter()
             .map(|(event_type, metadata)| CapabilityOffer {
@@ -2814,6 +2855,43 @@ fn configure_runtime_audit(runtime: SorxRuntime, config: &SorxRuntimeConfig) -> 
         "stdout" => runtime.with_audit_sink(Arc::new(StdoutAuditSink)),
         _ => runtime,
     }
+}
+
+fn configure_runtime_events(
+    runtime: SorxRuntime,
+    config: &SorxRuntimeConfig,
+) -> SorxResult<SorxRuntime> {
+    match config.events.sink.as_str() {
+        "stdout" => Ok(runtime.with_event_sink(Arc::new(StdoutBusinessEventSink))),
+        "nats" => {
+            let url = config.events.nats_url.clone().ok_or_else(|| {
+                SorxError::new(
+                    "events_nats_url_missing",
+                    "events.sink = \"nats\" requires events.nats_url",
+                )
+            })?;
+            nats_event_sink(&url, &config.events.subject_prefix)
+                .map(|sink| runtime.with_event_sink(sink))
+        }
+        // "disabled" and "" are the explicit no-op values; anything else is
+        // treated the same way (schema already constrains the allowed values).
+        "disabled" | "" => Ok(runtime),
+        _ => Ok(runtime),
+    }
+}
+
+#[cfg(feature = "events-nats")]
+fn nats_event_sink(url: &str, subject_prefix: &str) -> SorxResult<Arc<dyn BusinessEventSink>> {
+    crate::nats_events::NatsEventSink::connect(url, subject_prefix)
+        .map(|sink| Arc::new(sink) as Arc<dyn BusinessEventSink>)
+}
+
+#[cfg(not(feature = "events-nats"))]
+fn nats_event_sink(_url: &str, _subject_prefix: &str) -> SorxResult<Arc<dyn BusinessEventSink>> {
+    Err(SorxError::new(
+        "events_nats_unavailable",
+        "this build does not include the events-nats feature",
+    ))
 }
 
 fn is_admin_api_path(path: &str) -> bool {
@@ -10723,6 +10801,124 @@ mod tests {
         assert_eq!(
             response.body["routes"][0]["deployment_id"],
             created.deployment_id
+        );
+    }
+
+    // ── business event sink wiring ────────────────────────────────────────────
+
+    /// Build an `HttpRuntime` from the standard fixture answers plus the given
+    /// `events` object merged into the answers JSON.
+    fn runtime_with_events_answers(events_obj: Value) -> SorxResult<HttpRuntime> {
+        let mut answers_json = answers("local");
+        answers_json
+            .as_object_mut()
+            .expect("answers must be an object")
+            .insert("events".to_string(), events_obj);
+        let pack = pack();
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &answers_json, true).unwrap();
+        let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
+        HttpRuntime::from_pack("local", &pack, config)
+    }
+
+    #[test]
+    fn events_stdout_sink_is_wired_from_config() {
+        let runtime = runtime_with_events_answers(json!({ "sink": "stdout" }));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn events_disabled_sink_is_default_passthrough() {
+        let runtime = runtime_with_events_answers(json!({}));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn events_nats_sink_without_url_is_an_error() {
+        let result = runtime_with_events_answers(json!({ "sink": "nats" }));
+        match result {
+            Err(err) => assert_eq!(err.code, "events_nats_url_missing"),
+            Ok(_) => panic!("nats sink without nats_url must be an error"),
+        }
+    }
+
+    #[test]
+    fn events_disabled_explicit_sink_is_ok() {
+        let runtime = runtime_with_events_answers(json!({ "sink": "disabled" }));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn capability_offers_include_entity_lifecycle_topics() {
+        let runtime = runtime("local");
+        let pack_name = &runtime.runtime.pack.name;
+
+        let offers = runtime.business_event_topic_offers();
+
+        // Fixture has create/update/delete for entity "Tenant".
+        // Each must be offered as a dedicated capability.
+        for (operation_label, event_suffix) in [
+            ("created", "Tenant.created"),
+            ("updated", "Tenant.updated"),
+            ("deleted", "Tenant.deleted"),
+        ] {
+            let expected_topic =
+                greentic_sorx_core::entity_event_topic(pack_name, "Tenant", operation_label);
+            let matching_offer = offers.iter().find(|offer| {
+                offer.metadata.as_ref().is_some_and(|meta| {
+                    meta["event_type"] == event_suffix
+                        && meta["kind"] == "business_event_topic"
+                        && meta["topic"] == expected_topic
+                })
+            });
+            assert!(
+                matching_offer.is_some(),
+                "expected a lifecycle offer for event_type={event_suffix} topic={expected_topic}"
+            );
+            let offer = matching_offer.unwrap();
+            assert_eq!(
+                offer.capability,
+                format!(
+                    "cap://greentic/events/{}/{}",
+                    clean_capability_segment(pack_name),
+                    clean_capability_segment(event_suffix)
+                ),
+                "capability URI mismatch for {event_suffix}"
+            );
+            assert!(
+                offer
+                    .contracts
+                    .contains(&"greentic.sorx.business-event-topic.v1".to_string()),
+                "lifecycle offer for {event_suffix} must declare the business-event-topic contract"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_offers_command_topics_include_topic_field() {
+        let runtime = runtime("local");
+        let pack_name = &runtime.runtime.pack.name;
+
+        let offers = runtime.business_event_topic_offers();
+
+        // The fixture command emits "tenant.code_generated" — verify the offer
+        // now carries a "topic" field equal to command_event_topic().
+        let expected_topic =
+            greentic_sorx_core::command_event_topic(pack_name, "tenant.code_generated");
+        let command_offer = offers.iter().find(|offer| {
+            offer
+                .metadata
+                .as_ref()
+                .is_some_and(|meta| meta["event_type"] == "tenant.code_generated")
+        });
+        assert!(
+            command_offer.is_some(),
+            "expected a command-event offer for tenant.code_generated"
+        );
+        assert_eq!(
+            command_offer.unwrap().metadata.as_ref().unwrap()["topic"],
+            expected_topic,
+            "command-event offer must carry the canonical topic string"
         );
     }
 }

@@ -37,22 +37,33 @@ path = "src/main.rs"
 name = "perf"
 harness = false
 
+[features]
+## Enable the NATS-backed business event sink (adds async-nats + tokio dependencies).
+## Wired automatically when events.sink = "nats" in the runtime config.
+events-nats = ["dep:async-nats", "dep:tokio"]
+
 [dependencies]
+async-nats = { workspace = true, optional = true }
+chrono.workspace = true
 ciborium.workspace = true
 clap.workspace = true
 greentic-qa-lib = "0.5"
 greentic-sorx-core.workspace = true
 greentic-sorx-pack.workspace = true
+greentic-types.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, optional = true }
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 zip.workspace = true
 
 [dev-dependencies]
+async-nats.workspace = true
 ciborium.workspace = true
 criterion.workspace = true
-greentic-types.workspace = true
+futures = "0.3"
 semver.workspace = true
+tokio = { workspace = true, features = ["time"] }
