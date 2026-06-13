@@ -197,42 +197,110 @@ enum FormScope {
     RecordReadOnly,
 }
 
-fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<Value> {
-    let mut body = vec![text_block(title, "Large", true)];
-    for field in &record.fields {
-        let uuid_identifier_hidden =
-            matches!(scope, FormScope::RecordEditable | FormScope::RecordReadOnly)
-                && is_uuid_detail_field(field)
-                && !record
-                    .create_field_names
-                    .iter()
-                    .any(|candidate| candidate == &field.name);
-        if scope == FormScope::Create
-            && !record.create_field_names.is_empty()
+fn render_field_for_scope(
+    field: &ManagerFieldView,
+    record: &ManagerRecordView,
+    scope: FormScope,
+) -> Option<Value> {
+    let uuid_identifier_hidden =
+        matches!(scope, FormScope::RecordEditable | FormScope::RecordReadOnly)
+            && is_uuid_detail_field(field)
             && !record
                 .create_field_names
                 .iter()
-                .any(|candidate| candidate == &field.name)
-        {
-            continue;
+                .any(|candidate| candidate == &field.name);
+    if scope == FormScope::Create
+        && !record.create_field_names.is_empty()
+        && !record
+            .create_field_names
+            .iter()
+            .any(|candidate| candidate == &field.name)
+    {
+        return None;
+    }
+    if field.redacted {
+        return Some(text_block(
+            &format!("{}: redacted", field.label),
+            "Default",
+            false,
+        ));
+    }
+    if field.generated && field.value.is_none() || uuid_identifier_hidden {
+        return None;
+    }
+    if scope == FormScope::RecordReadOnly
+        || field.read_only
+        || (scope == FormScope::RecordEditable && is_uuid_detail_field(field))
+    {
+        Some(read_only_field_block(field))
+    } else {
+        Some(input_for_field(field))
+    }
+}
+
+fn form_body(title: &str, record: &ManagerRecordView, scope: FormScope) -> Vec<Value> {
+    let mut body = vec![text_block(title, "Large", true)];
+
+    // Sort by display_order when at least one field carries it
+    let mut ordered: Vec<&ManagerFieldView> = record.fields.iter().collect();
+    if ordered.iter().any(|f| f.display_order.is_some()) {
+        ordered.sort_by(|a, b| {
+            a.display_order
+                .unwrap_or(u32::MAX)
+                .cmp(&b.display_order.unwrap_or(u32::MAX))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+
+    // Check if any visible field has grouping
+    let has_groups = ordered
+        .iter()
+        .any(|f| f.display_group.is_some() && !f.hidden);
+
+    if has_groups {
+        // Collect ungrouped items first, then groups in first-appearance order
+        let mut ungrouped: Vec<Value> = Vec::new();
+        let mut group_order: Vec<String> = Vec::new();
+        let mut groups: std::collections::HashMap<String, Vec<Value>> =
+            std::collections::HashMap::new();
+
+        for field in ordered.iter().copied() {
+            if field.hidden {
+                continue;
+            }
+            let item = render_field_for_scope(field, record, scope);
+            let Some(item) = item else { continue };
+            if let Some(ref group_name) = field.display_group {
+                if !group_order.contains(group_name) {
+                    group_order.push(group_name.clone());
+                }
+                groups.entry(group_name.clone()).or_default().push(item);
+            } else {
+                ungrouped.push(item);
+            }
         }
-        if field.redacted {
-            body.push(text_block(
-                &format!("{}: redacted", field.label),
-                "Default",
-                false,
-            ));
-        } else if field.generated && field.value.is_none() || uuid_identifier_hidden {
-            continue;
-        } else if scope == FormScope::RecordReadOnly
-            || field.read_only
-            || (scope == FormScope::RecordEditable && is_uuid_detail_field(field))
-        {
-            body.push(read_only_field_block(field));
-        } else {
-            body.push(input_for_field(field));
+
+        body.extend(ungrouped);
+        for group_name in group_order {
+            let items = groups.remove(&group_name).unwrap_or_default();
+            body.push(json!({
+                "type": "Container",
+                "items": std::iter::once(text_block(&group_name, "Default", true))
+                    .chain(items)
+                    .collect::<Vec<_>>()
+            }));
+        }
+    } else {
+        for field in ordered.iter().copied() {
+            if field.hidden {
+                continue;
+            }
+            if let Some(item) = render_field_for_scope(field, record, scope) {
+                body.push(item);
+            }
         }
     }
+
     body
 }
 
@@ -779,6 +847,259 @@ mod tests {
     };
 
     #[test]
+    fn hidden_field_is_excluded_from_create_edit_and_detail_cards() {
+        let mut v = view();
+        v.records[0].fields = vec![
+            ManagerFieldView {
+                name: "id".to_string(),
+                label_key: "field.record_alpha.id.label".to_string(),
+                label: "Id".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: true,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "secret".to_string(),
+                label_key: "field.record_alpha.secret.label".to_string(),
+                label: "Secret".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: true,
+                display_order: None,
+                display_group: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+        ];
+        let create = render_record_create_card(&v, "RecordAlpha").unwrap();
+        let body = create["body"].as_array().unwrap();
+        assert!(
+            body.iter().any(|item| item["id"] == "id"),
+            "visible field should appear"
+        );
+        assert!(
+            !body.iter().any(|item| item["id"] == "secret"),
+            "hidden field must not appear in create"
+        );
+
+        let detail = render_record_detail_card(&v, "RecordAlpha", "x").unwrap();
+        let body = detail["body"].as_array().unwrap();
+        assert!(
+            !body.iter().any(|item| item["id"] == "secret"),
+            "hidden field must not appear in detail"
+        );
+        assert!(
+            !body.iter().any(|item| item["text"]
+                .as_str()
+                .map(|t| t.contains("Secret"))
+                .unwrap_or(false)),
+            "hidden field label must not appear in detail"
+        );
+    }
+
+    #[test]
+    fn fields_render_in_display_order() {
+        let mut v = view();
+        v.records[0].fields = vec![
+            ManagerFieldView {
+                name: "zzz".to_string(),
+                label_key: "field.record_alpha.zzz.label".to_string(),
+                label: "Zzz".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: false,
+                display_order: Some(2),
+                display_group: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "aaa".to_string(),
+                label_key: "field.record_alpha.aaa.label".to_string(),
+                label: "Aaa".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: false,
+                display_order: Some(1),
+                display_group: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+        ];
+        let card = render_record_create_card(&v, "RecordAlpha").unwrap();
+        let body = card["body"].as_array().unwrap();
+        let inputs: Vec<_> = body
+            .iter()
+            .filter(|item| item["type"] == "Input.Text")
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(
+            inputs[0]["id"], "aaa",
+            "aaa (order=1) should come before zzz (order=2)"
+        );
+        assert_eq!(inputs[1]["id"], "zzz");
+    }
+
+    #[test]
+    fn display_label_overrides_label_in_card() {
+        // display_label is fed via the label field in ManagerFieldView (simulating the decode path)
+        let mut v = view();
+        v.records[0].fields = vec![ManagerFieldView {
+            name: "email".to_string(),
+            label_key: "field.record_alpha.email.label".to_string(),
+            label: "Your Email Address".to_string(), // simulates display_label winning
+            json_type: Some("string".to_string()),
+            rules: None,
+            generated: false,
+            relationship: None,
+            required: false,
+            read_only: false,
+            redacted: false,
+            value: None,
+            hidden: false,
+            display_order: None,
+            display_group: None,
+            policy: ManagerPolicyDecision::allow(),
+        }];
+        let card = render_record_create_card(&v, "RecordAlpha").unwrap();
+        let body = card["body"].as_array().unwrap();
+        let input = body.iter().find(|item| item["id"] == "email").unwrap();
+        assert_eq!(input["label"], "Your Email Address");
+    }
+
+    #[test]
+    fn display_group_wraps_fields_in_titled_containers() {
+        let mut v = view();
+        v.records[0].fields = vec![
+            ManagerFieldView {
+                name: "first_name".to_string(),
+                label_key: "field.record_alpha.first_name.label".to_string(),
+                label: "First Name".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: false,
+                display_order: Some(1),
+                display_group: Some("Identity".to_string()),
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "last_name".to_string(),
+                label_key: "field.record_alpha.last_name.label".to_string(),
+                label: "Last Name".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: false,
+                display_order: Some(2),
+                display_group: Some("Identity".to_string()),
+                policy: ManagerPolicyDecision::allow(),
+            },
+            ManagerFieldView {
+                name: "notes".to_string(),
+                label_key: "field.record_alpha.notes.label".to_string(),
+                label: "Notes".to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
+                policy: ManagerPolicyDecision::allow(),
+            },
+        ];
+        let card = render_record_create_card(&v, "RecordAlpha").unwrap();
+        let body = card["body"].as_array().unwrap();
+        // "notes" is ungrouped, should appear directly in body
+        assert!(
+            body.iter().any(|item| item["id"] == "notes"),
+            "ungrouped field should appear in body directly"
+        );
+        // The "Identity" container should be present
+        let container = body.iter().find(|item| {
+            item["type"] == "Container"
+                && item["items"].as_array().is_some_and(|items| {
+                    items
+                        .first()
+                        .is_some_and(|first| first["text"] == "Identity")
+                })
+        });
+        assert!(
+            container.is_some(),
+            "Identity group container should be present"
+        );
+        let container_items = container.unwrap()["items"].as_array().unwrap();
+        // First item is the group title TextBlock
+        assert_eq!(container_items[0]["text"], "Identity");
+        assert_eq!(container_items[0]["weight"], "Bolder");
+        // Then the two grouped fields
+        assert!(
+            container_items
+                .iter()
+                .any(|item| item["id"] == "first_name")
+        );
+        assert!(container_items.iter().any(|item| item["id"] == "last_name"));
+    }
+
+    #[test]
+    fn no_hints_produces_unchanged_output() {
+        // Fields with no hints (hidden=false, display_order=None, display_group=None)
+        // should produce the same output as before.
+        let v = view(); // view() returns a view with a single "id" field, no hints
+        let card = render_record_create_card(&v, "RecordAlpha").unwrap();
+        // The body should have: title TextBlock + Input.Text for "id" + ActionSet
+        let body = card["body"].as_array().unwrap();
+        assert_eq!(
+            body[0]["type"], "TextBlock",
+            "first body item should be title"
+        );
+        assert_eq!(
+            body[1]["type"], "Input.Text",
+            "second body item should be the id input"
+        );
+        assert_eq!(body[1]["id"], "id");
+    }
+
+    #[test]
     fn dashboard_card_is_adaptive_card_json() {
         let card = render_dashboard_card(&view());
         assert_eq!(card["type"], "AdaptiveCard");
@@ -885,6 +1206,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -899,6 +1223,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
         ];
@@ -926,6 +1253,9 @@ mod tests {
             read_only: false,
             redacted: false,
             value: Some(json!(lab_id)),
+            hidden: false,
+            display_order: None,
+            display_group: None,
             policy: ManagerPolicyDecision::allow(),
         }];
 
@@ -972,6 +1302,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             })
             .collect();
@@ -1024,6 +1357,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: Some(json!("record-1")),
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -1038,6 +1374,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: Some(json!("Alpha")),
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
         ];
@@ -1090,6 +1429,9 @@ mod tests {
                     read_only: false,
                     redacted: false,
                     value: None,
+                    hidden: false,
+                    display_order: None,
+                    display_group: None,
                     policy: ManagerPolicyDecision::allow(),
                 }],
                 endpoint_ids: Vec::new(),
@@ -1126,6 +1468,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -1140,6 +1485,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -1154,6 +1502,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -1168,6 +1519,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -1182,6 +1536,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -1196,6 +1553,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
         ];
@@ -1229,6 +1589,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
             ManagerFieldView {
@@ -1247,6 +1610,9 @@ mod tests {
                 read_only: false,
                 redacted: false,
                 value: None,
+                hidden: false,
+                display_order: None,
+                display_group: None,
                 policy: ManagerPolicyDecision::allow(),
             },
         ];
