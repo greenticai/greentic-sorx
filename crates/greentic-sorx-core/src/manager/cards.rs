@@ -1057,10 +1057,10 @@ mod tests {
         // The "Identity" container should be present
         let container = body.iter().find(|item| {
             item["type"] == "Container"
-                && item["items"].as_array().map_or(false, |items| {
+                && item["items"].as_array().is_some_and(|items| {
                     items
                         .first()
-                        .map_or(false, |first| first["text"] == "Identity")
+                        .is_some_and(|first| first["text"] == "Identity")
                 })
         });
         assert!(
