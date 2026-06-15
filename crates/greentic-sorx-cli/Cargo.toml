@@ -38,12 +38,24 @@ name = "perf"
 harness = false
 
 [features]
-## Enable the NATS-backed business event sink (adds async-nats + tokio dependencies).
-## Wired automatically when events.sink = "nats" in the runtime config.
-events-nats = ["dep:async-nats", "dep:tokio"]
+## Enable the NATS-backed business event sink and the async runtime dispatch
+## (`sorla.call`) event bridge (adds async-nats + tokio + the event-bridge crate).
+## The business-event sink is wired automatically when events.sink = "nats" in the
+## runtime config; the dispatch bridge additionally activates at runtime when
+## GREENTIC_EVENTS_NATS_URL is set.
+events-nats = [
+    "dep:async-nats",
+    "dep:tokio",
+    "dep:async-trait",
+    "dep:anyhow",
+    "dep:sorx-event-bridge",
+]
 
 [dependencies]
+anyhow = { version = "1", optional = true }
 async-nats = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
+sorx-event-bridge = { path = "../sorx-event-bridge", optional = true }
 chrono.workspace = true
 ciborium.workspace = true
 clap.workspace = true

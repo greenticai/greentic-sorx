@@ -253,6 +253,15 @@ impl HttpRuntime {
         &self.routes
     }
 
+    /// Returns a shared handle to the underlying [`SorxRuntime`] so background
+    /// tasks (e.g. the NATS event bridge) can invoke endpoints after the HTTP
+    /// runtime is built. The handle is reference-counted; cloning it does not
+    /// duplicate runtime state.
+    #[cfg(feature = "events-nats")]
+    pub fn runtime_handle(&self) -> Arc<SorxRuntime> {
+        self.runtime.clone()
+    }
+
     pub fn serve(&self, listener: TcpListener) -> std::io::Result<()> {
         for stream in listener.incoming() {
             match stream {
