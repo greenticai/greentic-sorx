@@ -3,6 +3,7 @@ members = [
     "crates/greentic-sorx-cli",
     "crates/greentic-sorx-core",
     "crates/greentic-sorx-pack",
+    "crates/sorx-event-bridge",
 ]
 resolver = "3"
 
