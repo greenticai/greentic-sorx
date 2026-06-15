@@ -4658,6 +4658,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "async-trait",
+ "bytes",
  "futures-util",
  "serde",
  "serde_json",
