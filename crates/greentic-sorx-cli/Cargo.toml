@@ -38,6 +38,9 @@ name = "perf"
 harness = false
 
 [dependencies]
+anyhow = "1"
+async-nats = "0.46"
+async-trait = "0.1"
 ciborium.workspace = true
 clap.workspace = true
 greentic-qa-lib = "0.5"
@@ -47,7 +50,9 @@ hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sorx-event-bridge = { path = "../sorx-event-bridge" }
 tempfile.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 zip.workspace = true
 

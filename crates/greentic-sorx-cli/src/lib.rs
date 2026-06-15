@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod admin_roles;
+mod event_bridge_invoker;
 mod http_runtime;
 mod test_runtime;
 mod validation;
@@ -2592,6 +2593,63 @@ fn scoped_concepts(root: &str, relationships: &[OntologyRelationshipEdge]) -> Ve
     concepts.into_iter().collect()
 }
 
+/// Environment variable that, when set, enables the NATS event bridge.
+const EVENTS_NATS_URL_ENV: &str = "GREENTIC_EVENTS_NATS_URL";
+
+/// Starts the NATS event bridge in the background when `GREENTIC_EVENTS_NATS_URL`
+/// is set. No-op (unchanged behavior) when the variable is absent.
+///
+/// The bridge runs on its own multi-threaded tokio runtime inside a dedicated
+/// OS thread so that the synchronous HTTP serve loop on the calling thread is
+/// never blocked. A failure to connect to NATS is logged and swallowed: HTTP
+/// serving must continue regardless of the events fabric's availability.
+fn spawn_event_bridge_if_enabled(runtime: std::sync::Arc<greentic_sorx_core::SorxRuntime>) {
+    let nats_url = match std::env::var(EVENTS_NATS_URL_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => return,
+    };
+
+    std::thread::Builder::new()
+        .name("sorx-event-bridge".to_string())
+        .spawn(move || {
+            let tokio_runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    eprintln!("greentic-sorx: failed to build event-bridge runtime: {err}");
+                    return;
+                }
+            };
+
+            tokio_runtime.block_on(async move {
+                match async_nats::connect(&nats_url).await {
+                    Ok(client) => {
+                        eprintln!(
+                            "greentic-sorx: event bridge connected to NATS at {nats_url} (greentic.sorla.request.v1)"
+                        );
+                        let invoker = std::sync::Arc::new(
+                            event_bridge_invoker::CoreSorxInvoker::new(runtime),
+                        );
+                        if let Err(err) = sorx_event_bridge::run_bridge(client, invoker).await {
+                            eprintln!("greentic-sorx: event bridge stopped: {err}");
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "greentic-sorx: event bridge disabled, failed to connect to NATS at {nats_url}: {err}"
+                        );
+                    }
+                }
+            });
+        })
+        .map(|_| ())
+        .unwrap_or_else(|err| {
+            eprintln!("greentic-sorx: failed to spawn event-bridge thread: {err}");
+        });
+}
+
 fn ontology_hash_from_pack(pack: &Path) -> CliResult<String> {
     let pack = load_sorla_pack(pack).map_err(|err| CliError::pack(err.to_string()))?;
     let ontology =
@@ -3666,6 +3724,13 @@ fn run_start(
         if server_registry_path.is_some() {
             eprintln!("Sorx deployment registry API: {base_url}/v1/sorx/routing-table");
         }
+        // Opt-in, default-OFF: when GREENTIC_EVENTS_NATS_URL is set, start the
+        // NATS event bridge so the runtime can be driven over the events fabric
+        // (greentic.sorla.request.v1 -> response.v1) alongside HTTP. The bridge
+        // runs on a dedicated tokio runtime in a background thread so the
+        // synchronous HTTP serve loop below is unaffected; a NATS connect
+        // failure logs a warning and leaves HTTP serving fully intact.
+        spawn_event_bridge_if_enabled(server.runtime_handle());
         return server
             .serve(listener)
             .map_err(|err| CliError::runtime(format!("HTTP server failed: {err}")));

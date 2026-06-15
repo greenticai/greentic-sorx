@@ -2076,6 +2076,9 @@ dependencies = [
 name = "greentic-sorx"
 version = "0.1.9"
 dependencies = [
+ "anyhow",
+ "async-nats",
+ "async-trait",
  "ciborium",
  "clap",
  "criterion",
@@ -2088,7 +2091,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sorx-event-bridge",
  "tempfile",
+ "tokio",
  "ureq",
  "zip",
 ]
