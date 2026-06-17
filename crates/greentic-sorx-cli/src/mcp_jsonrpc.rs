@@ -9,7 +9,7 @@ use greentic_sorx_core::{
     CallerContext, EndpointInvocation, EndpointResult, EndpointStatus, InvocationSource, SorxResult,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// MCP protocol revision this server speaks.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -146,17 +146,26 @@ mod tests {
     use greentic_sorx_core::{McpToolDefinition, McpToolList, RiskLevel};
 
     fn empty_tools() -> McpToolList {
-        McpToolList { schema: "greentic.sorx.mcp-tools.v1".into(), tools: vec![] }
+        McpToolList {
+            schema: "greentic.sorx.mcp-tools.v1".into(),
+            tools: vec![],
+        }
     }
     struct NoInvoke;
     impl Invoker for NoInvoke {
-        fn invoke(&self, _: greentic_sorx_core::EndpointInvocation)
-            -> greentic_sorx_core::SorxResult<greentic_sorx_core::EndpointResult> {
+        fn invoke(
+            &self,
+            _: greentic_sorx_core::EndpointInvocation,
+        ) -> greentic_sorx_core::SorxResult<greentic_sorx_core::EndpointResult> {
             panic!("not called")
         }
     }
     fn caller() -> McpCaller {
-        McpCaller { tenant_id: "acme".into(), subject: "u1".into(), roles: vec![] }
+        McpCaller {
+            tenant_id: "acme".into(),
+            subject: "u1".into(),
+            roles: vec![],
+        }
     }
 
     fn one_tool() -> McpToolList {
@@ -176,8 +185,10 @@ mod tests {
     #[test]
     fn tools_list_projects_name_description_input_schema() {
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!(2),
-            method: "tools/list".into(), params: Value::Null,
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(2),
+            method: "tools/list".into(),
+            params: Value::Null,
         };
         let out = dispatch(&req, &one_tool(), &caller(), &NoInvoke);
         let tools = out["result"]["tools"].as_array().unwrap();
@@ -201,12 +212,17 @@ mod tests {
             }],
         };
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!(3),
-            method: "tools/list".into(), params: Value::Null,
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(3),
+            method: "tools/list".into(),
+            params: Value::Null,
         };
         let out = dispatch(&req, &tools, &caller(), &NoInvoke);
         let listed = out["result"]["tools"].as_array().unwrap();
-        assert_eq!(listed[0]["inputSchema"], serde_json::json!({ "type": "object" }));
+        assert_eq!(
+            listed[0]["inputSchema"],
+            serde_json::json!({ "type": "object" })
+        );
     }
 
     #[test]
@@ -228,17 +244,23 @@ mod tests {
     #[test]
     fn unknown_method_returns_jsonrpc_error_minus_32601() {
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!("x"),
-            method: "nope".into(), params: serde_json::Value::Null,
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!("x"),
+            method: "nope".into(),
+            params: serde_json::Value::Null,
         };
         let out = dispatch(&req, &empty_tools(), &caller(), &NoInvoke);
         assert_eq!(out["error"]["code"], -32601);
     }
 
-    struct OkInvoke { last: std::cell::RefCell<Option<EndpointInvocation>> }
+    struct OkInvoke {
+        last: std::cell::RefCell<Option<EndpointInvocation>>,
+    }
     impl Invoker for OkInvoke {
-        fn invoke(&self, inv: EndpointInvocation)
-            -> greentic_sorx_core::SorxResult<EndpointResult> {
+        fn invoke(
+            &self,
+            inv: EndpointInvocation,
+        ) -> greentic_sorx_core::SorxResult<EndpointResult> {
             *self.last.borrow_mut() = Some(inv);
             Ok(EndpointResult {
                 status: EndpointStatus::Ok,
@@ -250,9 +272,13 @@ mod tests {
 
     #[test]
     fn tools_call_invokes_with_mcp_source_and_wraps_output() {
-        let inv = OkInvoke { last: std::cell::RefCell::new(None) };
+        let inv = OkInvoke {
+            last: std::cell::RefCell::new(None),
+        };
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!(3), method: "tools/call".into(),
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(3),
+            method: "tools/call".into(),
             params: serde_json::json!({
                 "name": "payment.record",
                 "arguments": { "amount": 10 }
@@ -275,7 +301,9 @@ mod tests {
     #[test]
     fn tools_call_unknown_tool_is_invalid_params() {
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!(4), method: "tools/call".into(),
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(4),
+            method: "tools/call".into(),
             params: serde_json::json!({ "name": "nope", "arguments": {} }),
         };
         let out = dispatch(&req, &one_tool(), &caller(), &NoInvoke);

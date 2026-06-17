@@ -7338,7 +7338,11 @@ struct HttpResponse {
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {
-    HttpResponse { status, body, headers: Vec::new() }
+    HttpResponse {
+        status,
+        body,
+        headers: Vec::new(),
+    }
 }
 
 fn error_response(status: u16, code: &str, message: &str) -> HttpResponse {
@@ -11047,9 +11051,10 @@ mod tests {
         let resp = json_response(401, serde_json::json!({"ok": false}))
             .with_header("WWW-Authenticate", "Bearer x");
         assert_eq!(resp.status, 401);
-        assert!(resp
-            .headers
-            .iter()
-            .any(|(k, v)| k == "WWW-Authenticate" && v == "Bearer x"));
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(k, v)| k == "WWW-Authenticate" && v == "Bearer x")
+        );
     }
 }
