@@ -7334,10 +7334,11 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 struct HttpResponse {
     status: u16,
     body: Value,
+    headers: Vec<(String, String)>,
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {
-    HttpResponse { status, body }
+    HttpResponse { status, body, headers: Vec::new() }
 }
 
 fn error_response(status: u16, code: &str, message: &str) -> HttpResponse {
@@ -7371,6 +7372,11 @@ fn sorx_error_response(status: u16, err: SorxError) -> HttpResponse {
 }
 
 impl HttpResponse {
+    fn with_header(mut self, name: &str, value: &str) -> HttpResponse {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
     fn as_bytes(&self) -> Vec<u8> {
         let body = serde_json::to_vec(&self.body).unwrap_or_else(|_| b"{}".to_vec());
         let reason = match self.status {
@@ -7380,13 +7386,17 @@ impl HttpResponse {
             404 => "Not Found",
             _ => "Internal Server Error",
         };
-        let mut response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
             reason,
             body.len()
-        )
-        .into_bytes();
+        );
+        for (name, value) in &self.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        let mut response = head.into_bytes();
         response.extend(body);
         response
     }
@@ -11030,5 +11040,16 @@ mod tests {
             expected_topic,
             "command-event offer must carry the canonical topic string"
         );
+    }
+
+    #[test]
+    fn response_carries_custom_headers() {
+        let resp = json_response(401, serde_json::json!({"ok": false}))
+            .with_header("WWW-Authenticate", "Bearer x");
+        assert_eq!(resp.status, 401);
+        assert!(resp
+            .headers
+            .iter()
+            .any(|(k, v)| k == "WWW-Authenticate" && v == "Bearer x"));
     }
 }
