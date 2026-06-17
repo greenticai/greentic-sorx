@@ -12,12 +12,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// MCP protocol revision this server speaks.
-#[cfg_attr(not(test), allow(dead_code))]
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct JsonRpcRequest {
+    /// Retained for protocol conformance validation but not inspected at runtime.
+    #[allow(dead_code)]
     pub jsonrpc: String,
     #[serde(default)]
     pub id: Value,
@@ -27,7 +27,6 @@ pub struct JsonRpcRequest {
 }
 
 /// Identity already resolved from the bearer token (see `mcp_auth`).
-#[allow(dead_code)]
 pub struct McpCaller {
     pub tenant_id: String,
     pub subject: String,
@@ -35,7 +34,6 @@ pub struct McpCaller {
 }
 
 /// The runtime invoke seam. `http_runtime` adapts `SorxRuntime` to this.
-#[allow(dead_code)]
 pub trait Invoker {
     fn invoke(&self, inv: EndpointInvocation) -> SorxResult<EndpointResult>;
 }
@@ -49,7 +47,6 @@ fn err(id: &Value, code: i64, message: &str) -> Value {
 }
 
 /// Dispatch a single JSON-RPC request. Always returns a JSON-RPC envelope.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn dispatch(
     req: &JsonRpcRequest,
     tools: &McpToolList,

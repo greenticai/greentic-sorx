@@ -11,7 +11,6 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[allow(dead_code)]
 pub struct McpAuthConfig {
     pub issuers: Vec<String>,
     pub audience: String,
@@ -23,7 +22,6 @@ impl McpAuthConfig {
     /// Returns `Some` only when MCP is explicitly enabled and the issuer
     /// allow-list + audience are configured. Default build => `None` =>
     /// the endpoint is never mounted (back-compat).
-    #[allow(dead_code)]
     pub fn from_env() -> Option<McpAuthConfig> {
         let enabled = std::env::var("SORX_MCP_ENABLED")
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
@@ -60,7 +58,6 @@ impl McpAuthConfig {
     }
 }
 
-#[allow(dead_code)]
 pub fn protected_resource_metadata(resource: &str, issuers: &[String]) -> Value {
     json!({
         "resource": resource,
@@ -69,12 +66,10 @@ pub fn protected_resource_metadata(resource: &str, issuers: &[String]) -> Value 
     })
 }
 
-#[allow(dead_code)]
 pub fn bearer_from_headers(headers: &BTreeMap<String, String>) -> Option<&str> {
     headers.get("authorization")?.strip_prefix("Bearer ")
 }
 
-#[allow(dead_code)]
 pub fn www_authenticate(resource_metadata_url: &str) -> String {
     format!("Bearer resource_metadata=\"{resource_metadata_url}\"")
 }
@@ -118,7 +113,6 @@ pub trait JwksSource {
 /// 4. Fetch the JWKS for the issuer, find the JWK matching `kid`.
 /// 5. Full RS256 decode with audience + leeway.
 /// 6. Project to `VerifiedClaims`; reject empty `tenant_id` or `sub`.
-#[allow(dead_code)]
 pub fn verify_token(
     token: &str,
     cfg: &McpAuthConfig,
@@ -154,7 +148,7 @@ pub fn verify_token(
     };
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_required_spec_claims(&["exp", "aud"]);
-    validation.set_audience(&[cfg.audience.clone()]);
+    validation.set_audience(std::slice::from_ref(&cfg.audience));
     validation.leeway = cfg.leeway_secs;
     let data = decode::<RawClaims>(token, &decoding, &validation)
         .map_err(|e| format!("jwt verification failed: {e}"))?;
@@ -175,13 +169,11 @@ pub fn verify_token(
 /// Fetches `{issuer}/jwks.json` via `ureq` (blocking) and caches the result
 /// for `ttl`. Used by the MCP HTTP handler (Task 7); not exercised by unit
 /// tests, which use `StaticJwks` instead.
-#[allow(dead_code)]
 pub struct UreqJwks {
     ttl: Duration,
     cache: Mutex<Option<(String, Instant, JwkSet)>>,
 }
 
-#[allow(dead_code)]
 impl UreqJwks {
     pub fn new(ttl: Duration) -> Self {
         Self {
@@ -199,10 +191,11 @@ impl JwksSource for UreqJwks {
                 .cache
                 .lock()
                 .map_err(|_| "jwks cache poisoned".to_string())?;
-            if let Some((u, at, set)) = guard.as_ref() {
-                if u == &url && at.elapsed() < self.ttl {
-                    return Ok(set.clone());
-                }
+            if let Some((u, at, set)) = guard.as_ref()
+                && u == &url
+                && at.elapsed() < self.ttl
+            {
+                return Ok(set.clone());
             }
         }
         let set: JwkSet = ureq::get(&url)
