@@ -32,6 +32,7 @@ mod admin_roles;
 #[cfg(feature = "events-nats")]
 mod event_bridge_invoker;
 mod http_runtime;
+mod mcp_jsonrpc;
 #[cfg(feature = "events-nats")]
 pub mod nats_events;
 mod test_runtime;
