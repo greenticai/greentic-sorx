@@ -132,6 +132,28 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_defaults_missing_input_schema_to_object() {
+        let tools = McpToolList {
+            schema: "greentic.sorx.mcp-tools.v1".into(),
+            tools: vec![McpToolDefinition {
+                name: "noop".into(),
+                description: None,
+                endpoint_id: "noop".into(),
+                operation_id: "noop".into(),
+                risk: RiskLevel::Low,
+                input_schema: None,
+            }],
+        };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: serde_json::json!(3),
+            method: "tools/list".into(), params: Value::Null,
+        };
+        let out = dispatch(&req, &tools, &caller(), &NoInvoke);
+        let listed = out["result"]["tools"].as_array().unwrap();
+        assert_eq!(listed[0]["inputSchema"], serde_json::json!({ "type": "object" }));
+    }
+
+    #[test]
     fn initialize_returns_server_info_and_tool_capability() {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
