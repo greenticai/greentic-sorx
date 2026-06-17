@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet};
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -153,6 +153,7 @@ pub fn verify_token(
         _ => return Err("unsupported JWK type".to_string()),
     };
     let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_required_spec_claims(&["exp", "aud"]);
     validation.set_audience(&[cfg.audience.clone()]);
     validation.leeway = cfg.leeway_secs;
     let data = decode::<RawClaims>(token, &decoding, &validation)
@@ -406,7 +407,7 @@ mod tests {
 
     // ---- Task 6: JWT/JWKS verification tests --------------------------------
 
-    use jsonwebtoken::{encode, EncodingKey, Header, jwk::JwkSet};
+    use jsonwebtoken::{EncodingKey, Header, encode, jwk::JwkSet};
 
     const PRIV_PEM: &str = include_str!("../tests/fixtures/mcp/rsa_test_private.pem");
     const JWKS: &str = include_str!("../tests/fixtures/mcp/rsa_test_jwks.json");
@@ -468,5 +469,51 @@ mod tests {
             "tenant_id": "acme", "exp": 4_102_444_800i64
         }));
         assert!(verify_token(&token, &jwt_cfg(), &StaticJwks).is_err());
+    }
+
+    #[test]
+    fn verify_token_rejects_tampered_signature() {
+        let token = sign(serde_json::json!({
+            "iss": "https://tm.example", "sub": "u1", "aud": "sorx-acme-landlord",
+            "tenant_id": "acme", "exp": 4_102_444_800i64
+        }));
+        // Split into header.payload.signature and corrupt the signature segment.
+        let parts: Vec<&str> = token.splitn(3, '.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have three dot-separated parts");
+        let mut sig = parts[2].to_string();
+        // Flip the last character to a different base64url character.
+        let last = sig.pop().unwrap_or('A');
+        sig.push(if last == 'A' { 'B' } else { 'A' });
+        let tampered = format!("{}.{}.{}", parts[0], parts[1], sig);
+        assert!(
+            verify_token(&tampered, &jwt_cfg(), &StaticJwks).is_err(),
+            "a token with a corrupted signature must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_token_rejects_expired_token() {
+        // exp = 1_000_000_000 is 2001-09-09, well in the past and outside the 60s leeway.
+        let token = sign(serde_json::json!({
+            "iss": "https://tm.example", "sub": "u1", "aud": "sorx-acme-landlord",
+            "tenant_id": "acme", "exp": 1_000_000_000i64
+        }));
+        assert!(
+            verify_token(&token, &jwt_cfg(), &StaticJwks).is_err(),
+            "an expired token must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_token_rejects_missing_audience() {
+        // No `aud` field — after Fix 1 (`set_required_spec_claims`) this must fail.
+        let token = sign(serde_json::json!({
+            "iss": "https://tm.example", "sub": "u1",
+            "tenant_id": "acme", "exp": 4_102_444_800i64
+        }));
+        assert!(
+            verify_token(&token, &jwt_cfg(), &StaticJwks).is_err(),
+            "a token without an aud claim must be rejected"
+        );
     }
 }
