@@ -6,7 +6,7 @@
 
 use greentic_sorx_core::McpToolList;
 use greentic_sorx_core::{
-    EndpointInvocation, EndpointResult, SorxResult,
+    CallerContext, EndpointInvocation, EndpointResult, EndpointStatus, InvocationSource, SorxResult,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -53,8 +53,8 @@ fn err(id: &Value, code: i64, message: &str) -> Value {
 pub fn dispatch(
     req: &JsonRpcRequest,
     tools: &McpToolList,
-    _caller: &McpCaller,
-    _invoker: &dyn Invoker,
+    caller: &McpCaller,
+    invoker: &dyn Invoker,
 ) -> Value {
     match req.method.as_str() {
         "initialize" => ok(
@@ -79,6 +79,62 @@ pub fn dispatch(
                 })
                 .collect();
             ok(&req.id, json!({ "tools": listed }))
+        }
+        "tools/call" => {
+            let name = match req.params.get("name").and_then(Value::as_str) {
+                Some(n) => n,
+                None => return err(&req.id, -32602, "tools/call requires a string `name`"),
+            };
+            let Some(tool) = tools.tools.iter().find(|t| t.name == name) else {
+                return err(&req.id, -32602, "unknown MCP tool");
+            };
+            let arguments = req
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let idempotency_key = req
+                .params
+                .get("_meta")
+                .and_then(|m| m.get("idempotencyKey"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            let invocation = EndpointInvocation {
+                tenant_id: caller.tenant_id.clone(),
+                endpoint_id: tool.endpoint_id.clone(),
+                operation_id: tool.operation_id.clone(),
+                input: arguments,
+                caller: CallerContext {
+                    subject: caller.subject.clone(),
+                    roles: caller.roles.clone(),
+                },
+                idempotency_key,
+                source: InvocationSource::Mcp,
+            };
+            match invoker.invoke(invocation) {
+                Ok(result) => {
+                    let is_error = !matches!(
+                        result.status,
+                        EndpointStatus::Ok | EndpointStatus::Created | EndpointStatus::Deleted
+                    );
+                    let text = serde_json::to_string(&json!({
+                        "status": result.status,
+                        "output": result.output,
+                    }))
+                    .unwrap_or_else(|_| "{}".to_string());
+                    ok(
+                        &req.id,
+                        json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }),
+                    )
+                }
+                Err(e) => ok(
+                    &req.id,
+                    json!({
+                        "content": [{ "type": "text", "text": format!("{}: {}", e.code, e.message) }],
+                        "isError": true
+                    }),
+                ),
+            }
         }
         _ => err(&req.id, -32601, "method not found"),
     }
@@ -177,5 +233,52 @@ mod tests {
         };
         let out = dispatch(&req, &empty_tools(), &caller(), &NoInvoke);
         assert_eq!(out["error"]["code"], -32601);
+    }
+
+    struct OkInvoke { last: std::cell::RefCell<Option<EndpointInvocation>> }
+    impl Invoker for OkInvoke {
+        fn invoke(&self, inv: EndpointInvocation)
+            -> greentic_sorx_core::SorxResult<EndpointResult> {
+            *self.last.borrow_mut() = Some(inv);
+            Ok(EndpointResult {
+                status: EndpointStatus::Ok,
+                output: serde_json::json!({ "id": "pay_1" }),
+                events: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn tools_call_invokes_with_mcp_source_and_wraps_output() {
+        let inv = OkInvoke { last: std::cell::RefCell::new(None) };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: serde_json::json!(3), method: "tools/call".into(),
+            params: serde_json::json!({
+                "name": "payment.record",
+                "arguments": { "amount": 10 }
+            }),
+        };
+        let out = dispatch(&req, &one_tool(), &caller(), &inv);
+        // routed to the runtime with the right identity + source
+        let seen = inv.last.borrow();
+        let seen = seen.as_ref().unwrap();
+        assert_eq!(seen.endpoint_id, "payment.record");
+        assert_eq!(seen.tenant_id, "acme");
+        assert_eq!(seen.caller.subject, "u1");
+        assert_eq!(seen.source, InvocationSource::Mcp);
+        // wrapped result
+        assert_eq!(out["result"]["isError"], false);
+        let text = out["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("pay_1"));
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_is_invalid_params() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: serde_json::json!(4), method: "tools/call".into(),
+            params: serde_json::json!({ "name": "nope", "arguments": {} }),
+        };
+        let out = dispatch(&req, &one_tool(), &caller(), &NoInvoke);
+        assert_eq!(out["error"]["code"], -32602);
     }
 }
