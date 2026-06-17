@@ -101,6 +101,12 @@ struct McpAuthState {
     jwks: std::sync::Arc<crate::mcp_auth::UreqJwks>,
     /// Canonical resource identifier, e.g. `{public_base_url}/v1/sorx/mcp`.
     resource: String,
+    /// Pre-computed OAuth Protected Resource Metadata URL
+    /// (`{public_base_url}/.well-known/oauth-protected-resource`).
+    /// Stored at construction time so `handle_mcp_post` never has to derive it
+    /// from `resource` via string trimming, which is fragile when `public_base_url`
+    /// is empty or has an unexpected suffix.
+    metadata_url: String,
 }
 
 #[derive(Clone)]
@@ -236,11 +242,13 @@ impl HttpRuntime {
                 .unwrap_or("")
                 .trim_end_matches('/');
             let resource = format!("{public_base_url}/v1/sorx/mcp");
+            let metadata_url = format!("{public_base_url}/.well-known/oauth-protected-resource");
             let jwks = crate::mcp_auth::UreqJwks::new(cfg.jwks_ttl);
             McpAuthState {
                 config: std::sync::Arc::new(cfg),
                 jwks: std::sync::Arc::new(jwks),
                 resource,
+                metadata_url,
             }
         });
         Ok(Self {
@@ -601,11 +609,7 @@ impl HttpRuntime {
     /// Handle `POST /v1/sorx/mcp`: verify bearer token, match tenant, then
     /// dispatch the JSON-RPC body.
     fn handle_mcp_post(&self, state: &McpAuthState, request: &HttpRequest) -> HttpResponse {
-        let metadata_url = format!(
-            "{}/.well-known/oauth-protected-resource",
-            state.resource.trim_end_matches("/v1/sorx/mcp")
-        );
-        let challenge = crate::mcp_auth::www_authenticate(&metadata_url);
+        let challenge = crate::mcp_auth::www_authenticate(&state.metadata_url);
         let Some(token) = crate::mcp_auth::bearer_from_headers(&request.headers) else {
             return error_response(401, "SORX_MCP_UNAUTHORIZED", "missing bearer token")
                 .with_header("WWW-Authenticate", &challenge);
@@ -617,17 +621,9 @@ impl HttpRuntime {
                     .with_header("WWW-Authenticate", &challenge);
             }
         };
-        if claims.tenant_id != self.runtime.config.tenant_id {
-            return error_response(
-                403,
-                "SORX_MCP_TENANT_MISMATCH",
-                "token tenant does not match this SoR instance",
-            );
-        }
-        let caller = crate::mcp_jsonrpc::McpCaller {
-            tenant_id: claims.tenant_id,
-            subject: claims.sub,
-            roles: claims.roles,
+        let caller = match mcp_caller_from_claims(claims, &self.runtime.config.tenant_id) {
+            Ok(c) => c,
+            Err(resp) => return resp,
         };
         self.handle_mcp_dispatch(&caller, &request.body)
     }
@@ -7485,6 +7481,30 @@ fn sorx_error_response(status: u16, err: SorxError) -> HttpResponse {
     )
 }
 
+/// Pure post-verification helper: maps [`crate::mcp_auth::VerifiedClaims`] onto
+/// an [`crate::mcp_jsonrpc::McpCaller`], rejecting claims whose `tenant_id`
+/// does not match the `instance_tenant` of this SoR deployment.
+///
+/// Extracted so tenant-mismatch logic can be unit-tested without a real JWT or
+/// JWKS endpoint.
+fn mcp_caller_from_claims(
+    claims: crate::mcp_auth::VerifiedClaims,
+    instance_tenant: &str,
+) -> Result<crate::mcp_jsonrpc::McpCaller, HttpResponse> {
+    if claims.tenant_id != instance_tenant {
+        return Err(error_response(
+            403,
+            "SORX_MCP_TENANT_MISMATCH",
+            "token tenant does not match this SoR instance",
+        ));
+    }
+    Ok(crate::mcp_jsonrpc::McpCaller {
+        tenant_id: claims.tenant_id,
+        subject: claims.sub,
+        roles: claims.roles,
+    })
+}
+
 impl HttpResponse {
     fn with_header(mut self, name: &str, value: &str) -> HttpResponse {
         self.headers.push((name.to_string(), value.to_string()));
@@ -11200,5 +11220,96 @@ mod tests {
             "result.tools must be an array; got: {}",
             resp.body
         );
+    }
+
+    // ---- Fix 1a: unauthenticated POST → 401 + WWW-Authenticate ----------------
+
+    /// Build a minimal `McpAuthState` suitable for auth-boundary tests.
+    /// The `jwks` field uses `UreqJwks` which is never called for the 401 path
+    /// (bearer extraction fails before any token verification).
+    fn test_mcp_auth_state() -> McpAuthState {
+        let config = crate::mcp_auth::McpAuthConfig {
+            issuers: vec!["https://tm.example".into()],
+            audience: "sorx-acme-landlord".into(),
+            jwks_ttl: std::time::Duration::from_secs(600),
+            leeway_secs: 60,
+        };
+        McpAuthState {
+            config: std::sync::Arc::new(config),
+            jwks: std::sync::Arc::new(crate::mcp_auth::UreqJwks::new(
+                std::time::Duration::from_secs(600),
+            )),
+            resource: "https://sor.example/v1/sorx/mcp".into(),
+            metadata_url: "https://sor.example/.well-known/oauth-protected-resource".into(),
+        }
+    }
+
+    #[test]
+    fn handle_mcp_post_without_auth_header_returns_401_with_www_authenticate() {
+        let rt = runtime("local");
+        let state = test_mcp_auth_state();
+        // No `authorization` header — must hit the bearer_from_headers None arm.
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/sorx/mcp".into(),
+            headers: BTreeMap::new(),
+            body: r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#.into(),
+        };
+        let resp = rt.handle_mcp_post(&state, &request);
+        assert_eq!(resp.status, 401, "missing bearer must yield 401");
+        let www_auth = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k == "WWW-Authenticate")
+            .map(|(_, v)| v.as_str());
+        assert!(
+            www_auth.is_some(),
+            "401 response must include a WWW-Authenticate header"
+        );
+        assert!(
+            www_auth.unwrap().starts_with("Bearer resource_metadata="),
+            "WWW-Authenticate must start with 'Bearer resource_metadata='; got: {:?}",
+            www_auth
+        );
+    }
+
+    // ---- Fix 1b: tenant-mismatch helper unit tests -----------------------------
+
+    #[test]
+    fn mcp_caller_from_claims_rejects_mismatched_tenant_with_403() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "other".into(),
+            sub: "u1".into(),
+            email: None,
+            roles: vec![],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Ok(_) => panic!("mismatched tenant must return Err, got Ok"),
+            Err(resp) => {
+                assert_eq!(resp.status, 403, "tenant mismatch must yield HTTP 403");
+                assert_eq!(
+                    resp.body["error"]["code"], "SORX_MCP_TENANT_MISMATCH",
+                    "error code must be SORX_MCP_TENANT_MISMATCH"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_caller_from_claims_accepts_matching_tenant_and_projects_fields() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "acme".into(),
+            sub: "u42".into(),
+            email: Some("u42@acme.io".into()),
+            roles: vec!["sorla_composer".into()],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Err(_) => panic!("matching tenant must return Ok(McpCaller)"),
+            Ok(caller) => {
+                assert_eq!(caller.tenant_id, "acme");
+                assert_eq!(caller.subject, "u42");
+                assert_eq!(caller.roles, vec!["sorla_composer".to_string()]);
+            }
+        }
     }
 }
