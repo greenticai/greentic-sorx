@@ -1,10 +1,14 @@
 //! OAuth Resource-Server pieces for the MCP transport: config from env,
-//! Protected Resource Metadata (RFC 9728), bearer extraction, and the
-//! `WWW-Authenticate` challenge. JWT/JWKS verification lives below (Task 6).
+//! Protected Resource Metadata (RFC 9728), bearer extraction, the
+//! `WWW-Authenticate` challenge, and JWT/JWKS verification (Task 6).
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[allow(dead_code)]
@@ -73,6 +77,143 @@ pub fn bearer_from_headers(headers: &BTreeMap<String, String>) -> Option<&str> {
 #[allow(dead_code)]
 pub fn www_authenticate(resource_metadata_url: &str) -> String {
     format!("Bearer resource_metadata=\"{resource_metadata_url}\"")
+}
+
+// ---------------------------------------------------------------------------
+// JWT / JWKS verification (Task 6)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RawClaims {
+    iss: String,
+    sub: String,
+    tenant_id: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    roles: Vec<String>,
+}
+
+/// Verified, projected JWT claims ready for use by the MCP handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedClaims {
+    pub tenant_id: String,
+    pub sub: String,
+    pub email: Option<String>,
+    pub roles: Vec<String>,
+}
+
+/// Abstraction over JWKS retrieval — allows both the production HTTP client
+/// and a static in-process fixture to be used interchangeably.
+pub trait JwksSource {
+    fn jwks(&self, issuer: &str) -> Result<JwkSet, String>;
+}
+
+/// Validate `token` against the issuer allow-list and audience in `cfg`.
+///
+/// Flow:
+/// 1. Decode the header to extract `kid`.
+/// 2. Peek claims with signature validation disabled (read-only; issuer check).
+/// 3. Reject any issuer not in `cfg.issuers`.
+/// 4. Fetch the JWKS for the issuer, find the JWK matching `kid`.
+/// 5. Full RS256 decode with audience + leeway.
+/// 6. Project to `VerifiedClaims`; reject empty `tenant_id` or `sub`.
+#[allow(dead_code)]
+pub fn verify_token(
+    token: &str,
+    cfg: &McpAuthConfig,
+    jwks: &dyn JwksSource,
+) -> Result<VerifiedClaims, String> {
+    let header = decode_header(token).map_err(|e| format!("bad token header: {e}"))?;
+    let kid = header.kid.ok_or_else(|| "token missing kid".to_string())?;
+
+    // Peek the (unverified) issuer to pick the JWKS + enforce the allow-list.
+    let unverified: RawClaims = {
+        let mut v = Validation::new(Algorithm::RS256);
+        v.insecure_disable_signature_validation();
+        v.validate_aud = false;
+        v.validate_exp = false;
+        decode::<RawClaims>(token, &DecodingKey::from_secret(b"x"), &v)
+            .map_err(|e| format!("undecodable claims: {e}"))?
+            .claims
+    };
+    if !cfg.issuers.iter().any(|i| i == &unverified.iss) {
+        return Err(format!("untrusted issuer {}", unverified.iss));
+    }
+
+    let set = jwks.jwks(&unverified.iss)?;
+    let jwk = set
+        .keys
+        .iter()
+        .find(|k| k.common.key_id.as_deref() == Some(kid.as_str()))
+        .ok_or_else(|| format!("no JWK for kid {kid}"))?;
+    let decoding = match &jwk.algorithm {
+        AlgorithmParameters::RSA(rsa) => DecodingKey::from_rsa_components(&rsa.n, &rsa.e)
+            .map_err(|e| format!("bad RSA jwk: {e}"))?,
+        _ => return Err("unsupported JWK type".to_string()),
+    };
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[cfg.audience.clone()]);
+    validation.leeway = cfg.leeway_secs;
+    let data = decode::<RawClaims>(token, &decoding, &validation)
+        .map_err(|e| format!("jwt verification failed: {e}"))?;
+    let c = data.claims;
+    if c.tenant_id.is_empty() || c.sub.is_empty() {
+        return Err("token missing tenant_id/sub".to_string());
+    }
+    Ok(VerifiedClaims {
+        tenant_id: c.tenant_id,
+        sub: c.sub,
+        email: c.email.filter(|e| !e.is_empty()),
+        roles: c.roles,
+    })
+}
+
+/// Production JWKS client with TTL-based in-memory cache.
+///
+/// Fetches `{issuer}/jwks.json` via `ureq` (blocking) and caches the result
+/// for `ttl`. Used by the MCP HTTP handler (Task 7); not exercised by unit
+/// tests, which use `StaticJwks` instead.
+#[allow(dead_code)]
+pub struct UreqJwks {
+    ttl: Duration,
+    cache: Mutex<Option<(String, Instant, JwkSet)>>,
+}
+
+#[allow(dead_code)]
+impl UreqJwks {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            cache: Mutex::new(None),
+        }
+    }
+}
+
+impl JwksSource for UreqJwks {
+    fn jwks(&self, issuer: &str) -> Result<JwkSet, String> {
+        let url = format!("{}/jwks.json", issuer.trim_end_matches('/'));
+        {
+            let guard = self
+                .cache
+                .lock()
+                .map_err(|_| "jwks cache poisoned".to_string())?;
+            if let Some((u, at, set)) = guard.as_ref() {
+                if u == &url && at.elapsed() < self.ttl {
+                    return Ok(set.clone());
+                }
+            }
+        }
+        let set: JwkSet = ureq::get(&url)
+            .call()
+            .map_err(|e| format!("jwks fetch {url}: {e}"))?
+            .into_json()
+            .map_err(|e| format!("jwks decode {url}: {e}"))?;
+        if let Ok(mut guard) = self.cache.lock() {
+            *guard = Some((url, Instant::now(), set.clone()));
+        }
+        Ok(set)
+    }
 }
 
 #[cfg(test)]
@@ -261,5 +402,71 @@ mod tests {
         assert!(v.contains(
             "resource_metadata=\"https://sor.example/.well-known/oauth-protected-resource\""
         ));
+    }
+
+    // ---- Task 6: JWT/JWKS verification tests --------------------------------
+
+    use jsonwebtoken::{encode, EncodingKey, Header, jwk::JwkSet};
+
+    const PRIV_PEM: &str = include_str!("../tests/fixtures/mcp/rsa_test_private.pem");
+    const JWKS: &str = include_str!("../tests/fixtures/mcp/rsa_test_jwks.json");
+
+    struct StaticJwks;
+    impl JwksSource for StaticJwks {
+        fn jwks(&self, _issuer: &str) -> Result<JwkSet, String> {
+            serde_json::from_str(JWKS).map_err(|e| e.to_string())
+        }
+    }
+
+    fn jwt_cfg() -> McpAuthConfig {
+        McpAuthConfig {
+            issuers: vec!["https://tm.example".into()],
+            audience: "sorx-acme-landlord".into(),
+            jwks_ttl: std::time::Duration::from_secs(600),
+            leeway_secs: 60,
+        }
+    }
+
+    fn sign(claims: serde_json::Value) -> String {
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some("test-key".into());
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_rsa_pem(PRIV_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn verify_token_accepts_valid_tm_jwt_and_projects_claims() {
+        let now = 4_102_444_800i64; // far future
+        let token = sign(serde_json::json!({
+            "iss": "https://tm.example", "sub": "u1", "aud": "sorx-acme-landlord",
+            "tenant_id": "acme", "email": "a@acme.io", "roles": ["sorla_composer"],
+            "exp": now
+        }));
+        let claims = verify_token(&token, &jwt_cfg(), &StaticJwks).unwrap();
+        assert_eq!(claims.tenant_id, "acme");
+        assert_eq!(claims.sub, "u1");
+        assert_eq!(claims.roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn verify_token_rejects_untrusted_issuer() {
+        let token = sign(serde_json::json!({
+            "iss": "https://evil.example", "sub": "u1", "aud": "sorx-acme-landlord",
+            "tenant_id": "acme", "exp": 4_102_444_800i64
+        }));
+        assert!(verify_token(&token, &jwt_cfg(), &StaticJwks).is_err());
+    }
+
+    #[test]
+    fn verify_token_rejects_wrong_audience() {
+        let token = sign(serde_json::json!({
+            "iss": "https://tm.example", "sub": "u1", "aud": "someone-else",
+            "tenant_id": "acme", "exp": 4_102_444_800i64
+        }));
+        assert!(verify_token(&token, &jwt_cfg(), &StaticJwks).is_err());
     }
 }
