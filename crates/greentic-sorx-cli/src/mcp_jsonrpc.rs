@@ -52,7 +52,7 @@ fn err(id: &Value, code: i64, message: &str) -> Value {
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn dispatch(
     req: &JsonRpcRequest,
-    _tools: &McpToolList,
+    tools: &McpToolList,
     _caller: &McpCaller,
     _invoker: &dyn Invoker,
 ) -> Value {
@@ -65,6 +65,21 @@ pub fn dispatch(
                 "serverInfo": { "name": "greentic-sorx", "version": env!("CARGO_PKG_VERSION") }
             }),
         ),
+        "tools/list" => {
+            let listed: Vec<Value> = tools
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": t.input_schema.clone()
+                            .unwrap_or_else(|| json!({ "type": "object" })),
+                    })
+                })
+                .collect();
+            ok(&req.id, json!({ "tools": listed }))
+        }
         _ => err(&req.id, -32601, "method not found"),
     }
 }
@@ -72,7 +87,7 @@ pub fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_sorx_core::McpToolList;
+    use greentic_sorx_core::{McpToolDefinition, McpToolList, RiskLevel};
 
     fn empty_tools() -> McpToolList {
         McpToolList { schema: "greentic.sorx.mcp-tools.v1".into(), tools: vec![] }
@@ -86,6 +101,34 @@ mod tests {
     }
     fn caller() -> McpCaller {
         McpCaller { tenant_id: "acme".into(), subject: "u1".into(), roles: vec![] }
+    }
+
+    fn one_tool() -> McpToolList {
+        McpToolList {
+            schema: "greentic.sorx.mcp-tools.v1".into(),
+            tools: vec![McpToolDefinition {
+                name: "payment.record".into(),
+                description: Some("Record a payment".into()),
+                endpoint_id: "payment.record".into(),
+                operation_id: "payment.record".into(),
+                risk: RiskLevel::Medium,
+                input_schema: Some(serde_json::json!({ "type": "object" })),
+            }],
+        }
+    }
+
+    #[test]
+    fn tools_list_projects_name_description_input_schema() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: serde_json::json!(2),
+            method: "tools/list".into(), params: Value::Null,
+        };
+        let out = dispatch(&req, &one_tool(), &caller(), &NoInvoke);
+        let tools = out["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "payment.record");
+        assert_eq!(tools[0]["description"], "Record a payment");
+        assert_eq!(tools[0]["inputSchema"]["type"], "object");
     }
 
     #[test]
