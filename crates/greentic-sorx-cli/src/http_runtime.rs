@@ -93,6 +93,22 @@ impl RouteVersionMetadata {
     }
 }
 
+/// Holds the resolved OAuth/MCP auth state for the MCP Streamable-HTTP endpoint.
+/// Present only when `SORX_MCP_ENABLED=1` (and issuer + audience are configured).
+#[derive(Clone)]
+struct McpAuthState {
+    config: std::sync::Arc<crate::mcp_auth::McpAuthConfig>,
+    jwks: std::sync::Arc<crate::mcp_auth::UreqJwks>,
+    /// Canonical resource identifier, e.g. `{public_base_url}/v1/sorx/mcp`.
+    resource: String,
+    /// Pre-computed OAuth Protected Resource Metadata URL
+    /// (`{public_base_url}/.well-known/oauth-protected-resource`).
+    /// Stored at construction time so `handle_mcp_post` never has to derive it
+    /// from `resource` via string trimming, which is fragile when `public_base_url`
+    /// is empty or has an unexpected suffix.
+    metadata_url: String,
+}
+
 #[derive(Clone)]
 pub struct HttpRuntime {
     deployment_id: String,
@@ -120,11 +136,23 @@ pub struct HttpRuntime {
     /// system-of-record instead of the self-asserted `x-greentic-caller-role`
     /// header. `None` (the default) preserves the legacy header-roles behavior.
     admin_roles_overlay: Option<Arc<AdminRolesOverlay>>,
+    /// OAuth resource-server state for the MCP endpoint. `None` when MCP is
+    /// disabled (the default; back-compat).
+    mcp_auth: Option<McpAuthState>,
 }
 
 #[derive(Clone)]
 struct HttpAuth {
     shared_secret: Option<String>,
+}
+
+impl crate::mcp_jsonrpc::Invoker for SorxRuntime {
+    fn invoke(
+        &self,
+        inv: greentic_sorx_core::EndpointInvocation,
+    ) -> greentic_sorx_core::SorxResult<greentic_sorx_core::EndpointResult> {
+        SorxRuntime::invoke(self, inv)
+    }
 }
 
 impl HttpRuntime {
@@ -206,6 +234,23 @@ impl HttpRuntime {
                 .collect(),
             default_provider_id: runtime.config.bindings.default_provider_id().to_string(),
         };
+        let mcp_auth = crate::mcp_auth::McpAuthConfig::from_env().map(|cfg| {
+            let public_base_url = config
+                .server
+                .public_base_url
+                .as_deref()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let resource = format!("{public_base_url}/v1/sorx/mcp");
+            let metadata_url = format!("{public_base_url}/.well-known/oauth-protected-resource");
+            let jwks = crate::mcp_auth::UreqJwks::new(cfg.jwks_ttl);
+            McpAuthState {
+                config: std::sync::Arc::new(cfg),
+                jwks: std::sync::Arc::new(jwks),
+                resource,
+                metadata_url,
+            }
+        });
         Ok(Self {
             deployment_id,
             admin_api_enabled: false,
@@ -226,6 +271,7 @@ impl HttpRuntime {
             runtime_snapshot: Arc::new(RwLock::new(runtime_snapshot)),
             registry_path: Arc::new(None),
             admin_roles_overlay: None,
+            mcp_auth,
         })
     }
 
@@ -305,6 +351,23 @@ impl HttpRuntime {
             ("GET", "/healthz") => return json_response(200, json!({ "ok": true })),
             ("GET", "/readyz") => return json_response(200, json!({ "ok": true })),
             _ => {}
+        }
+
+        // MCP OAuth endpoints — served before the shared-secret `authorize` gate.
+        if let Some(state) = &self.mcp_auth {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/.well-known/oauth-protected-resource") => {
+                    return json_response(
+                        200,
+                        crate::mcp_auth::protected_resource_metadata(
+                            &state.resource,
+                            &state.config.issuers,
+                        ),
+                    );
+                }
+                ("POST", "/v1/sorx/mcp") => return self.handle_mcp_post(state, &request),
+                _ => {}
+            }
         }
 
         if let Err(response) = self.authorize(&request) {
@@ -520,6 +583,49 @@ impl HttpRuntime {
             "SORX_UNAUTHORIZED",
             "valid HTTP ingest shared secret is required",
         ))
+    }
+
+    /// Parse and dispatch a single JSON-RPC 2.0 body for an already-verified
+    /// MCP caller. Factored out so tests can drive it directly without a token.
+    fn handle_mcp_dispatch(
+        &self,
+        caller: &crate::mcp_jsonrpc::McpCaller,
+        body: &str,
+    ) -> HttpResponse {
+        let req: crate::mcp_jsonrpc::JsonRpcRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return json_response(
+                    200,
+                    serde_json::json!({"jsonrpc":"2.0","id":null,
+                        "error":{"code":-32700,"message":format!("parse error: {e}")}}),
+                );
+            }
+        };
+        let out = crate::mcp_jsonrpc::dispatch(&req, &self.tools, caller, &*self.runtime);
+        json_response(200, out)
+    }
+
+    /// Handle `POST /v1/sorx/mcp`: verify bearer token, match tenant, then
+    /// dispatch the JSON-RPC body.
+    fn handle_mcp_post(&self, state: &McpAuthState, request: &HttpRequest) -> HttpResponse {
+        let challenge = crate::mcp_auth::www_authenticate(&state.metadata_url);
+        let Some(token) = crate::mcp_auth::bearer_from_headers(&request.headers) else {
+            return error_response(401, "SORX_MCP_UNAUTHORIZED", "missing bearer token")
+                .with_header("WWW-Authenticate", &challenge);
+        };
+        let claims = match crate::mcp_auth::verify_token(token, &state.config, &*state.jwks) {
+            Ok(c) => c,
+            Err(e) => {
+                return error_response(401, "SORX_MCP_UNAUTHORIZED", &e)
+                    .with_header("WWW-Authenticate", &challenge);
+            }
+        };
+        let caller = match mcp_caller_from_claims(claims, &self.runtime.config.tenant_id) {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
+        self.handle_mcp_dispatch(&caller, &request.body)
     }
 
     fn handle_generic_admin_request(&self, request: &HttpRequest) -> HttpResponse {
@@ -7334,10 +7440,15 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 struct HttpResponse {
     status: u16,
     body: Value,
+    headers: Vec<(String, String)>,
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {
-    HttpResponse { status, body }
+    HttpResponse {
+        status,
+        body,
+        headers: Vec::new(),
+    }
 }
 
 fn error_response(status: u16, code: &str, message: &str) -> HttpResponse {
@@ -7370,23 +7481,57 @@ fn sorx_error_response(status: u16, err: SorxError) -> HttpResponse {
     )
 }
 
+/// Pure post-verification helper: maps [`crate::mcp_auth::VerifiedClaims`] onto
+/// an [`crate::mcp_jsonrpc::McpCaller`], rejecting claims whose `tenant_id`
+/// does not match the `instance_tenant` of this SoR deployment.
+///
+/// Extracted so tenant-mismatch logic can be unit-tested without a real JWT or
+/// JWKS endpoint.
+fn mcp_caller_from_claims(
+    claims: crate::mcp_auth::VerifiedClaims,
+    instance_tenant: &str,
+) -> Result<crate::mcp_jsonrpc::McpCaller, HttpResponse> {
+    if claims.tenant_id != instance_tenant {
+        return Err(error_response(
+            403,
+            "SORX_MCP_TENANT_MISMATCH",
+            "token tenant does not match this SoR instance",
+        ));
+    }
+    Ok(crate::mcp_jsonrpc::McpCaller {
+        tenant_id: claims.tenant_id,
+        subject: claims.sub,
+        roles: claims.roles,
+    })
+}
+
 impl HttpResponse {
+    fn with_header(mut self, name: &str, value: &str) -> HttpResponse {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
     fn as_bytes(&self) -> Vec<u8> {
         let body = serde_json::to_vec(&self.body).unwrap_or_else(|_| b"{}".to_vec());
         let reason = match self.status {
             200 => "OK",
             400 => "Bad Request",
+            401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
             _ => "Internal Server Error",
         };
-        let mut response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
             reason,
             body.len()
-        )
-        .into_bytes();
+        );
+        for (name, value) in &self.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        let mut response = head.into_bytes();
         response.extend(body);
         response
     }
@@ -11030,5 +11175,141 @@ mod tests {
             expected_topic,
             "command-event offer must carry the canonical topic string"
         );
+    }
+
+    #[test]
+    fn response_carries_custom_headers() {
+        let resp = json_response(401, serde_json::json!({"ok": false}))
+            .with_header("WWW-Authenticate", "Bearer x");
+        assert_eq!(resp.status, 401);
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(k, v)| k == "WWW-Authenticate" && v == "Bearer x")
+        );
+    }
+
+    #[test]
+    fn status_401_reason_phrase_is_unauthorized() {
+        let resp = error_response(401, "SORX_UNAUTHORIZED", "no token");
+        let bytes = resp.as_bytes();
+        let header = String::from_utf8_lossy(&bytes);
+        assert!(
+            header.contains("401 Unauthorized"),
+            "status line must read '401 Unauthorized', got: {}",
+            header.lines().next().unwrap_or("")
+        );
+    }
+
+    #[test]
+    fn handle_mcp_tools_list_returns_tools_for_verified_caller() {
+        let rt = runtime("local");
+        let caller = crate::mcp_jsonrpc::McpCaller {
+            tenant_id: rt.runtime.config.tenant_id.clone(),
+            subject: "u1".into(),
+            roles: vec![],
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+        })
+        .to_string();
+        let resp = rt.handle_mcp_dispatch(&caller, &body);
+        assert_eq!(resp.status, 200, "dispatch must return HTTP 200");
+        assert!(
+            resp.body["result"]["tools"].is_array(),
+            "result.tools must be an array; got: {}",
+            resp.body
+        );
+    }
+
+    // ---- Fix 1a: unauthenticated POST → 401 + WWW-Authenticate ----------------
+
+    /// Build a minimal `McpAuthState` suitable for auth-boundary tests.
+    /// The `jwks` field uses `UreqJwks` which is never called for the 401 path
+    /// (bearer extraction fails before any token verification).
+    fn test_mcp_auth_state() -> McpAuthState {
+        let config = crate::mcp_auth::McpAuthConfig {
+            issuers: vec!["https://tm.example".into()],
+            audience: "sorx-acme-landlord".into(),
+            jwks_ttl: std::time::Duration::from_secs(600),
+            leeway_secs: 60,
+        };
+        McpAuthState {
+            config: std::sync::Arc::new(config),
+            jwks: std::sync::Arc::new(crate::mcp_auth::UreqJwks::new(
+                std::time::Duration::from_secs(600),
+            )),
+            resource: "https://sor.example/v1/sorx/mcp".into(),
+            metadata_url: "https://sor.example/.well-known/oauth-protected-resource".into(),
+        }
+    }
+
+    #[test]
+    fn handle_mcp_post_without_auth_header_returns_401_with_www_authenticate() {
+        let rt = runtime("local");
+        let state = test_mcp_auth_state();
+        // No `authorization` header — must hit the bearer_from_headers None arm.
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/sorx/mcp".into(),
+            headers: BTreeMap::new(),
+            body: r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#.into(),
+        };
+        let resp = rt.handle_mcp_post(&state, &request);
+        assert_eq!(resp.status, 401, "missing bearer must yield 401");
+        let www_auth = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k == "WWW-Authenticate")
+            .map(|(_, v)| v.as_str());
+        assert!(
+            www_auth.is_some(),
+            "401 response must include a WWW-Authenticate header"
+        );
+        assert!(
+            www_auth.unwrap().starts_with("Bearer resource_metadata="),
+            "WWW-Authenticate must start with 'Bearer resource_metadata='; got: {:?}",
+            www_auth
+        );
+    }
+
+    // ---- Fix 1b: tenant-mismatch helper unit tests -----------------------------
+
+    #[test]
+    fn mcp_caller_from_claims_rejects_mismatched_tenant_with_403() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "other".into(),
+            sub: "u1".into(),
+            email: None,
+            roles: vec![],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Ok(_) => panic!("mismatched tenant must return Err, got Ok"),
+            Err(resp) => {
+                assert_eq!(resp.status, 403, "tenant mismatch must yield HTTP 403");
+                assert_eq!(
+                    resp.body["error"]["code"], "SORX_MCP_TENANT_MISMATCH",
+                    "error code must be SORX_MCP_TENANT_MISMATCH"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_caller_from_claims_accepts_matching_tenant_and_projects_fields() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "acme".into(),
+            sub: "u42".into(),
+            email: Some("u42@acme.io".into()),
+            roles: vec!["sorla_composer".into()],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Err(_) => panic!("matching tenant must return Ok(McpCaller)"),
+            Ok(caller) => {
+                assert_eq!(caller.tenant_id, "acme");
+                assert_eq!(caller.subject, "u42");
+                assert_eq!(caller.roles, vec!["sorla_composer".to_string()]);
+            }
+        }
     }
 }

@@ -32,6 +32,8 @@ mod admin_roles;
 #[cfg(feature = "events-nats")]
 mod event_bridge_invoker;
 mod http_runtime;
+mod mcp_auth;
+mod mcp_jsonrpc;
 #[cfg(feature = "events-nats")]
 pub mod nats_events;
 mod test_runtime;
@@ -3634,9 +3636,17 @@ fn run_mcp_start(pack: PathBuf, answers: PathBuf, context: &SorxCommandContext) 
         .map_err(|err| CliError::pack(err.to_string()))?;
     let tools = mcp_tools_from_metadata(pack.sorla_assets.mcp_tools_json.as_ref(), &router)
         .map_err(|err| CliError::pack(err.to_string()))?;
+    // `mcp start` stays an offline plan emitter (no server of its own). The
+    // live transport is served by `start` when MCP is enabled: a
+    // Streamable-HTTP JSON-RPC endpoint at `POST /v1/sorx/mcp`, gated by an
+    // OAuth bearer (Tenant-Manager JWT), advertised via
+    // `/.well-known/oauth-protected-resource`. See `mcp_jsonrpc` + `mcp_auth`.
     let encoded = serde_json::to_string_pretty(&serde_json::json!({
         "schema": "greentic.sorx.mcp.runtime.v1",
         "transport": "adapter_only",
+        "live_transport": "streamable-http",
+        "live_endpoint": "/v1/sorx/mcp",
+        "live_auth": "oauth-bearer",
         "bind": config.mcp.bind,
         "enabled": config.mcp.enabled,
         "tools": tools.tools
