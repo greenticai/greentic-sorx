@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+pub mod migration;
+pub use migration::{CompatibilityMigration, CompatibilityMode, MigrationBackfill};
 mod approval;
 mod audit;
 mod business_events;
