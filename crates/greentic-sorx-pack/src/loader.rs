@@ -59,6 +59,12 @@ pub struct SorlaAssets {
     pub business_actions: Option<BusinessActionAssets>,
     pub metrics: Option<MetricAssets>,
     pub operational_indexes: Option<OperationalIndexAssets>,
+    /// Raw `assets/sorla/executable-contract.json` value, when present in the pack.
+    ///
+    /// Exposed as a raw [`Value`] so that `greentic-sorx-pack` does not need to
+    /// depend on `greentic-sorx-core`.  Callers that need typed migrations should
+    /// pass this to `greentic_sorx_core::parse_pack_migrations`.
+    pub executable_contract_json: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -607,6 +613,12 @@ fn read_sorla_assets(
     )?;
     let metrics = read_metric_assets(archive, entries, manifest)?;
     let operational_indexes = read_operational_index_assets(archive, entries, manifest)?;
+    let executable_contract_json =
+        if entries.contains("assets/sorla/executable-contract.json") {
+            Some(parse_json(archive, "assets/sorla/executable-contract.json")?)
+        } else {
+            None
+        };
 
     Ok((
         SorlaAssets {
@@ -620,6 +632,7 @@ fn read_sorla_assets(
             business_actions,
             metrics,
             operational_indexes,
+            executable_contract_json,
         },
         business_action_errors,
     ))
@@ -2024,5 +2037,41 @@ mod tests {
             integrity.signature_ref.as_deref(),
             Some("sigstore:bundle-ref")
         );
+    }
+
+    #[test]
+    fn pack_without_executable_contract_has_none_field() {
+        let (_temp, path) = write_pack(valid_entries());
+        let pack = load_sorla_pack(&path).unwrap();
+        assert!(
+            pack.sorla_assets.executable_contract_json.is_none(),
+            "expected None when entry is absent from pack"
+        );
+    }
+
+    #[test]
+    fn pack_with_executable_contract_exposes_raw_json() {
+        let mut entries = valid_entries();
+        let contract_json = serde_json::json!({
+            "schema": "greentic.sorla.executable-contract.v1",
+            "relationships": [],
+            "migrations": []
+        });
+        entries.insert(
+            "assets/sorla/executable-contract.json".to_string(),
+            serde_json::to_vec(&contract_json).unwrap(),
+        );
+        refresh_lock(&mut entries);
+        let (_temp, path) = write_pack(entries);
+        let pack = load_sorla_pack(&path).unwrap();
+        let value = pack
+            .sorla_assets
+            .executable_contract_json
+            .expect("expected Some when entry is present");
+        assert_eq!(
+            value.get("schema").and_then(|v| v.as_str()),
+            Some("greentic.sorla.executable-contract.v1")
+        );
+        assert!(value.get("migrations").is_some_and(|v| v.is_array()));
     }
 }
