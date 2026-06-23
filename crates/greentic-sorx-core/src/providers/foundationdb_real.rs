@@ -48,6 +48,7 @@ use foundationdb::{Database, FdbBindingError, KeySelector, RangeOption};
 use serde_json::{Map, Value, json};
 use tokio::runtime::{Handle, Runtime};
 
+use crate::migration::runner::AppliedMigrations;
 use crate::{
     AppendEventOp, CreateOp, DeleteOp, DeleteResult, EntityRecord, EventRecord, EvidenceResult,
     ExternalRef, ExternalRefsOp, ExternalRefsResult, GetOp, IndexQueryOp, IndexQueryResult,
@@ -132,6 +133,77 @@ impl FoundationDbStore {
             }
             Err(_) => rt.block_on(fut),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration ledger
+    // -----------------------------------------------------------------------
+    // Keyspace: `<ns_prefix>/migrations/<clean(migration_id)>` → migration id
+    // A range scan over `<ns_prefix>/migrations/` collects all recorded ids.
+
+    /// Record a migration id as applied under the given namespace.
+    ///
+    /// Idempotent: calling it twice for the same id is safe.
+    pub fn record_migration_applied(
+        &self,
+        namespace: &ProviderNamespace,
+        migration_id: &str,
+    ) -> SorxResult<()> {
+        let key = migration_key(namespace, migration_id);
+        let value = migration_id.as_bytes().to_vec();
+        self.block_on(async move {
+            self.db
+                .run(|trx, _| {
+                    let key = key.clone();
+                    let value = value.clone();
+                    async move {
+                        trx.set(&key, &value);
+                        Ok(())
+                    }
+                })
+                .await
+                .map_err(lower)
+        })
+    }
+
+    /// Load all migration ids recorded under the given namespace.
+    ///
+    /// Returns an empty [`AppliedMigrations`] when no migrations have been
+    /// recorded yet.
+    pub fn load_applied_migrations(
+        &self,
+        namespace: &ProviderNamespace,
+    ) -> SorxResult<AppliedMigrations> {
+        let mut prefix = join(&ns_subspace(namespace), &["migrations"]);
+        // Trailing separator ensures the scan matches only exact subkeys, not
+        // other subspaces that share the `migrations` prefix.
+        prefix.push(b'/');
+        let end = prefix_end(&prefix);
+        self.block_on(async move {
+            let kvs = self
+                .db
+                .run(|trx, _| {
+                    let prefix = prefix.clone();
+                    let end = end.clone();
+                    async move {
+                        let range = RangeOption::from((
+                            KeySelector::first_greater_or_equal(prefix),
+                            KeySelector::first_greater_or_equal(end),
+                        ));
+                        // `?` converts FdbError -> FdbBindingError via From impl.
+                        let values = trx.get_range(&range, 1, false).await?;
+                        Ok(values)
+                    }
+                })
+                .await
+                .map_err(lower)?;
+            let mut applied = AppliedMigrations::default();
+            for kv in &kvs {
+                let id = String::from_utf8_lossy(kv.value()).to_string();
+                applied.record(&id);
+            }
+            Ok(applied)
+        })
     }
 }
 
@@ -233,6 +305,13 @@ fn subject_key(
 
 fn schema_key(namespace: &ProviderNamespace) -> Vec<u8> {
     join(&ns_subspace(namespace), &["meta", "schema_version"])
+}
+
+fn migration_key(namespace: &ProviderNamespace, migration_id: &str) -> Vec<u8> {
+    join(
+        &ns_subspace(namespace),
+        &["migrations", &clean_key(migration_id)],
+    )
 }
 
 /// Join `/`-separated string segments onto the namespace subspace prefix bytes.
