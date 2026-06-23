@@ -75,8 +75,7 @@ impl CompatibilityMigration {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use super::{CompatibilityMigration, CompatibilityMode, MigrationBackfill};
+    use super::{CompatibilityMigration, CompatibilityMode};
     fn parse(j: &str) -> CompatibilityMigration {
         serde_json::from_str(j).expect("parse")
     }

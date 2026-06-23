@@ -1,3 +1,5 @@
 pub mod plan;
+pub mod runner;
+
 pub use plan::{CompatibilityMigration, CompatibilityMode, MigrationBackfill};
-// runner re-exports added in Task 0.3.2
+pub use runner::{AppliedMigrations, MigrationOutcome, MigrationRunError, MigrationRunner};
