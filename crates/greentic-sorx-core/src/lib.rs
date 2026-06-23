@@ -40,6 +40,7 @@ pub use deployment::{
     DeploymentRoute, DeploymentRouteTable, DeploymentStatus, DeploymentVisibility,
     LocalDeploymentRegistryStore, PackArtifact, PromotionAuditEvent, PromotionStatus,
     RollbackAliasRequest, SorxDeployment, StateMode, TrafficHeaderMatch, TrafficMode, TrafficSplit,
+    evaluate_pending_migrations,
 };
 pub use error::{SorxError, SorxResult};
 pub use evidence::{
