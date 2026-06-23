@@ -181,6 +181,14 @@ impl SorxCanonicalStore for FoundationDbProviderAdapter {
             Backend::Foundation(inner) => inner.get_evidence(op),
         }
     }
+
+    fn as_migration_ledger(&self) -> Option<&dyn crate::migration::MigrationLedger> {
+        match &self.inner {
+            #[cfg(feature = "foundationdb")]
+            Backend::Foundation(store) => Some(store),
+            _ => None,
+        }
+    }
 }
 
 fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {

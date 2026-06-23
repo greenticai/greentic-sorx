@@ -6813,20 +6813,14 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
 ///   startup rather than silently mutating the SoR.
 /// * **`confirm_breaking`** — from the `SORX_CONFIRM_BREAKING_MIGRATIONS` env
 ///   var (`1`/`true`); default `false`.
-/// * **Ledger** — [`LocalMigrationLedger`] at the path from
-///   `SORX_MIGRATION_LEDGER_PATH` (mirrors `SORX_REGISTRY_PATH`). When the pack
-///   ships migrations but no ledger path is configured, we SKIP with a logged
-///   note rather than failing — idempotence cannot be guaranteed without a
-///   durable ledger, so applying would risk re-running backfills on restart.
-///
-/// # Remaining hook (PR 0.4)
-/// A FoundationDB-backed ledger is not wired here: the registry hands back an
-/// `Arc<dyn SorxCanonicalStore>` (a `FoundationDbProviderAdapter`) whose inner
-/// `FoundationDbStore` — which already implements [`MigrationLedger`] under the
-/// `foundationdb` feature — is not exposed. Wiring the FDB ledger needs an
-/// accessor on the adapter (or a downcast); that, plus real-FDB + real-pack
-/// e2e, is deferred to PR 0.4. The reusable core (`apply_pending_migrations`)
-/// is backend-agnostic and already accepts any `&dyn MigrationLedger`.
+/// * **Ledger** — prefers the store's built-in durable ledger when the store
+///   exposes one via [`SorxCanonicalStore::as_migration_ledger`] (i.e. when
+///   the runtime is FoundationDB-backed). Falls back to a
+///   [`LocalMigrationLedger`] at the path from `SORX_MIGRATION_LEDGER_PATH`.
+///   When the pack ships migrations but neither a built-in nor a file-based
+///   ledger is available, we SKIP with a logged note rather than failing —
+///   idempotence cannot be guaranteed without a durable ledger, so applying
+///   would risk re-running backfills on restart.
 fn apply_pack_migrations_at_startup(
     pack: &LoadedSorlaPack,
     config: &SorxRuntimeConfig,
@@ -6840,34 +6834,50 @@ fn apply_pack_migrations_at_startup(
         return Ok(());
     }
 
-    let ledger_path = std::env::var_os("SORX_MIGRATION_LEDGER_PATH").map(PathBuf::from);
-    let Some(ledger_path) = ledger_path else {
-        eprintln!(
-            "greentic-sorx: pack declares {} migration(s) but SORX_MIGRATION_LEDGER_PATH is not \
-             set and no FoundationDB ledger is wired at startup; skipping migration application \
-             (set SORX_MIGRATION_LEDGER_PATH to enable durable, idempotent runs)",
-            migrations.len()
-        );
-        return Ok(());
-    };
-
     let namespace = ProviderNamespace {
         tenant_id: config.deployment.tenant_id.clone(),
         sor_name: config.deployment.sor_name.clone(),
     };
     let binding = runtime.config.bindings.default_provider_id();
     let store = runtime.providers.canonical_store(binding)?;
-    let ledger = LocalMigrationLedger::new(ledger_path);
     let confirm_breaking = env_flag("SORX_CONFIRM_BREAKING_MIGRATIONS");
 
-    let outcomes = apply_pending_migrations(
-        StateMode::SharedRequiresMigration,
-        &migrations,
-        store.as_ref(),
-        &ledger,
-        &namespace,
-        confirm_breaking,
-    )?;
+    // Prefer the store's own durable ledger (e.g. FoundationDB subspace) when
+    // available; no env-path configuration needed in that case.
+    let outcomes = if let Some(fdb_ledger) = store.as_migration_ledger() {
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            fdb_ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    } else {
+        // Fall back to the local-file ledger. Skip with a log when no path is
+        // configured — applying without a durable ledger risks duplicate
+        // backfills across restarts.
+        let ledger_path = std::env::var_os("SORX_MIGRATION_LEDGER_PATH").map(PathBuf::from);
+        let Some(ledger_path) = ledger_path else {
+            eprintln!(
+                "greentic-sorx: pack declares {} migration(s) but SORX_MIGRATION_LEDGER_PATH is \
+                 not set and no FoundationDB ledger is available; skipping migration application \
+                 (set SORX_MIGRATION_LEDGER_PATH or use a FoundationDB-backed store)",
+                migrations.len()
+            );
+            return Ok(());
+        };
+        let ledger = LocalMigrationLedger::new(ledger_path);
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            &ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    };
+
     let applied = outcomes
         .iter()
         .filter(|outcome| {
