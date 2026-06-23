@@ -7,11 +7,11 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::SorxError;
 use crate::migration::plan::{CompatibilityMigration, MigrationBackfill};
 use crate::provider::{
     ProviderNamespace, QueryOp, SorxCanonicalStore, UpdateOp, default_collection_name,
 };
-use crate::SorxError;
 
 /// Tracks which migrations have been applied.
 ///
@@ -110,8 +110,8 @@ impl<'a> MigrationRunner<'a> {
 
         let mut backfilled: usize = 0;
         for backfill in &migration.backfills {
-            backfilled +=
-                apply_backfill(store, namespace, backfill).map_err(MigrationRunError::BackfillFailed)?;
+            backfilled += apply_backfill(store, namespace, backfill)
+                .map_err(MigrationRunError::BackfillFailed)?;
         }
 
         self.applied.record(&id);

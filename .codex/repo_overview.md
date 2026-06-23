@@ -318,6 +318,10 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
   - **Role:** Deployment registry guide.
   - **Key functionality:** Documents the PR 12/15 local JSON registry, deployment and alias commands, deployment-scoped route listing, validation-gated public promotion, rollback, old-deployment retirement, states, and HTTP diagnostics.
 
+- **Path:** `docs/migrations.md`
+  - **Role:** Migration runner guide.
+  - **Key functionality:** Documents the PR 0.3 migration runner — additive/backward/breaking classification, idempotence via the namespace-scoped ledger (local JSON file + FoundationDB subspace), the `apply_pending_migrations` orchestration core, the `MigrationLedger` trait, the activation gate, where migrations come from in the pack `executable-contract.json`, and the `gtc start` wiring (LocalMigrationLedger via `SORX_MIGRATION_LEDGER_PATH`; FoundationDB-backed ledger deferred).
+
 - **Path:** `docs/ghcr-webhooks.md`
   - **Role:** GHCR publish webhook guide.
   - **Key functionality:** Documents PR 13 GitHub/GHCR callback handling, startup config, fixture replay commands, fixture shape, and the fake-resolver boundary before real GHCR integration.

@@ -19,9 +19,7 @@ use super::plan::CompatibilityMigration;
 /// - Returns `Err` when `"migrations"` is present but is not a JSON array.
 /// - Returns `Err` when any array element cannot be deserialised into a
 ///   [`CompatibilityMigration`] — no entry is silently dropped.
-pub fn parse_pack_migrations(
-    contract: &Value,
-) -> Result<Vec<CompatibilityMigration>, SorxError> {
+pub fn parse_pack_migrations(contract: &Value) -> Result<Vec<CompatibilityMigration>, SorxError> {
     let Some(migrations_val) = contract.get("migrations") else {
         return Ok(Vec::new());
     };
@@ -74,8 +72,7 @@ mod tests {
     #[test]
     fn parses_landlord_contract_one_migration_twelve_backfills() {
         let contract = landlord_contract();
-        let migrations = parse_pack_migrations(&contract)
-            .expect("should parse without error");
+        let migrations = parse_pack_migrations(&contract).expect("should parse without error");
         assert_eq!(migrations.len(), 1, "expected exactly one migration");
         let m = &migrations[0];
         assert_eq!(m.idempotence_id(), "landlord-tenant-v2-fields");
@@ -94,7 +91,10 @@ mod tests {
             "relationships": []
         });
         let result = parse_pack_migrations(&contract).expect("should return Ok");
-        assert!(result.is_empty(), "expected empty vec for absent migrations field");
+        assert!(
+            result.is_empty(),
+            "expected empty vec for absent migrations field"
+        );
     }
 
     #[test]

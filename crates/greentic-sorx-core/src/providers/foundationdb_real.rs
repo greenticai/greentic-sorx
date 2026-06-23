@@ -207,6 +207,16 @@ impl FoundationDbStore {
     }
 }
 
+impl crate::migration::MigrationLedger for FoundationDbStore {
+    fn load(&self, namespace: &ProviderNamespace) -> SorxResult<AppliedMigrations> {
+        self.load_applied_migrations(namespace)
+    }
+
+    fn record_applied(&self, namespace: &ProviderNamespace, migration_id: &str) -> SorxResult<()> {
+        self.record_migration_applied(namespace, migration_id)
+    }
+}
+
 /// Map any FDB/binding error or layer message into a `SorxError`.
 fn fdb_error(message: impl Into<String>) -> SorxError {
     SorxError::new("provider_fdb_error", message.into())

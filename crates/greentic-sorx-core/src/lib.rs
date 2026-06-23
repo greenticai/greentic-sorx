@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 pub mod migration;
-pub use migration::{CompatibilityMigration, CompatibilityMode, MigrationBackfill, parse_pack_migrations};
+pub use migration::{
+    CompatibilityMigration, CompatibilityMode, LocalMigrationLedger, MigrationBackfill,
+    MigrationLedger, MigrationOutcome, apply_pending_migrations, parse_pack_migrations,
+};
 mod approval;
 mod audit;
 mod business_events;

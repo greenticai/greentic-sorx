@@ -613,12 +613,14 @@ fn read_sorla_assets(
     )?;
     let metrics = read_metric_assets(archive, entries, manifest)?;
     let operational_indexes = read_operational_index_assets(archive, entries, manifest)?;
-    let executable_contract_json =
-        if entries.contains("assets/sorla/executable-contract.json") {
-            Some(parse_json(archive, "assets/sorla/executable-contract.json")?)
-        } else {
-            None
-        };
+    let executable_contract_json = if entries.contains("assets/sorla/executable-contract.json") {
+        Some(parse_json(
+            archive,
+            "assets/sorla/executable-contract.json",
+        )?)
+    } else {
+        None
+    };
 
     Ok((
         SorlaAssets {

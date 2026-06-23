@@ -82,7 +82,9 @@ mod tests {
 
     #[test]
     fn additive_auto_applies_and_not_breaking() {
-        let m = parse(r#"{"name":"landlord-tenant-v2-fields","compatibility":"additive","idempotence_key":"landlord-tenant-v2-fields","backfills":[{"record":"Tenant","field":"date_of_birth","default":null}],"projection_updates":["ActiveTenants"]}"#);
+        let m = parse(
+            r#"{"name":"landlord-tenant-v2-fields","compatibility":"additive","idempotence_key":"landlord-tenant-v2-fields","backfills":[{"record":"Tenant","field":"date_of_birth","default":null}],"projection_updates":["ActiveTenants"]}"#,
+        );
         assert_eq!(m.compatibility, CompatibilityMode::Additive);
         assert!(!m.is_breaking());
         assert!(m.auto_appliable());
@@ -91,14 +93,18 @@ mod tests {
     }
     #[test]
     fn breaking_not_auto_appliable_and_falls_back_to_name_for_id() {
-        let m = parse(r#"{"name":"split","compatibility":"breaking","backfills":[],"projection_updates":[]}"#);
+        let m = parse(
+            r#"{"name":"split","compatibility":"breaking","backfills":[],"projection_updates":[]}"#,
+        );
         assert!(m.is_breaking());
         assert!(!m.auto_appliable());
         assert_eq!(m.idempotence_id(), "split");
     }
     #[test]
     fn backward_compatible_auto_applies() {
-        let m = parse(r#"{"name":"bc","compatibility":"backward-compatible","backfills":[],"projection_updates":[]}"#);
+        let m = parse(
+            r#"{"name":"bc","compatibility":"backward-compatible","backfills":[],"projection_updates":[]}"#,
+        );
         assert!(m.auto_appliable());
         assert!(!m.is_breaking());
     }

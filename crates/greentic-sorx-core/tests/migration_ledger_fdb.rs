@@ -5,8 +5,8 @@
 //! run only with `--features foundationdb`.
 #![cfg(feature = "foundationdb")]
 
-use greentic_sorx_core::providers::foundationdb_real::FoundationDbStore;
 use greentic_sorx_core::ProviderNamespace;
+use greentic_sorx_core::providers::foundationdb_real::FoundationDbStore;
 
 fn cluster_file() -> String {
     std::env::var("FDB_CLUSTER_FILE")
