@@ -40,7 +40,7 @@ harness = false
 [dependencies]
 ciborium.workspace = true
 clap.workspace = true
-greentic-qa-lib = "0.5"
+greentic-qa-lib = "1.1"
 greentic-sorx-core.workspace = true
 greentic-sorx-pack.workspace = true
 hex.workspace = true
