@@ -640,7 +640,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf044036a9d87f059698002c11f72f0f46f1fcc3228b3bc1fd1a3a621653f2ff"
 dependencies = [
  "greentic-interfaces-guest",
- "greentic-types",
+ "greentic-types 0.5.4",
  "qa-spec",
  "serde",
  "serde_cbor",
@@ -1623,7 +1623,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57b57ff54329cc825cc37a5d3f5839b6c45fc2460ef9de12ee9d282f45f9f22e"
 dependencies = [
- "greentic-types",
+ "greentic-types 0.5.4",
  "serde",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
@@ -1642,7 +1642,7 @@ dependencies = [
  "greentic-config-types",
  "greentic-interfaces-guest",
  "greentic-secrets-lib",
- "greentic-types",
+ "greentic-types 0.5.4",
  "oci-distribution",
  "reqwest 0.13.4",
  "rpassword",
@@ -1671,7 +1671,7 @@ dependencies = [
  "greentic-interfaces-host",
  "greentic-interfaces-wasmtime",
  "greentic-qa-lib",
- "greentic-types",
+ "greentic-types 0.5.4",
  "handlebars",
  "include_dir",
  "indexmap",
@@ -1717,7 +1717,7 @@ checksum = "5d4fc902124d374030b0b4845d3dcb9aa0db65271c39b28f58eb43db783bfef2"
 dependencies = [
  "anyhow",
  "constant_time_eq 0.4.2",
- "greentic-types",
+ "greentic-types 0.5.4",
  "semver",
  "thiserror 2.0.18",
  "time",
@@ -1734,7 +1734,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae851adc13682dbb8e246f3c9a556121525c9e0205a423f4860fb24afbf34eb8"
 dependencies = [
  "greentic-interfaces",
- "greentic-types",
+ "greentic-types 0.5.4",
  "wit-bindgen 0.57.1",
  "wit-bindgen-core 0.57.1",
  "wit-bindgen-rust 0.57.1",
@@ -1747,7 +1747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5fc39b674096535f025ec52a125b9348c7751442670c8886956482a2ca14954"
 dependencies = [
  "greentic-interfaces",
- "greentic-types",
+ "greentic-types 0.5.4",
  "serde",
  "serde_json",
  "wasmtime",
@@ -1783,7 +1783,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.2",
  "greentic-flow",
- "greentic-types",
+ "greentic-types 0.5.4",
  "hex",
  "indexmap",
  "pkcs8",
@@ -1839,7 +1839,7 @@ dependencies = [
  "greentic-secrets-api",
  "greentic-secrets-provider-dev",
  "greentic-secrets-spec",
- "greentic-types",
+ "greentic-types 0.5.4",
  "hkdf",
  "lru",
  "once_cell",
@@ -1866,7 +1866,7 @@ dependencies = [
  "greentic-secrets-core",
  "greentic-secrets-provider-dev",
  "greentic-secrets-spec",
- "greentic-types",
+ "greentic-types 0.5.4",
 ]
 
 [[package]]
@@ -1893,7 +1893,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d53eae0820853253dc6760c7c7044ec5d97922200e7abc0a57d363432da0993d"
 dependencies = [
  "async-trait",
- "greentic-types",
+ "greentic-types 0.5.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1910,7 +1910,7 @@ dependencies = [
  "greentic-qa-lib",
  "greentic-sorx-core",
  "greentic-sorx-pack",
- "greentic-types",
+ "greentic-types 1.1.3",
  "hex",
  "semver",
  "serde",
@@ -1935,7 +1935,7 @@ version = "0.1.9"
 dependencies = [
  "ciborium",
  "greentic-pack-lib",
- "greentic-types",
+ "greentic-types 1.1.3",
  "hex",
  "semver",
  "serde",
@@ -1970,9 +1970,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-types"
-version = "0.5.2"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27d3246d833a9d0c3c44694c9381df09df6361754f9590e922bfad0829a6d789"
+checksum = "b3f5c283151a144a7c047bf9c802361edb17aac9958693a389ff2c64999b7868"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1996,6 +1996,30 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unic-langid",
+]
+
+[[package]]
+name = "greentic-types"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "853321f6d463c7a805821fb54a126cc44d50a1b3ffb009f14718d34e158799cf"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "ciborium",
+ "constant_time_eq 0.4.2",
+ "fnv",
+ "indexmap",
+ "semver",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "serde_with",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "time",
  "unic-langid",
 ]
 
