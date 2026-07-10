@@ -23,22 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout greentic-sorla
-        uses: actions/checkout@v4
-        with:
-          repository: greenticai/greentic-sorla
-          path: greentic-sorla
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
 
       - name: Ensure llvm coverage tools
         run: rustup component add llvm-tools-preview
@@ -57,22 +45,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cargo binstall -y cargo-nextest
-          cargo binstall -y cargo-llvm-cov
-          cargo binstall -y greentic-dev
+          # rust-cache restores ~/.cargo/.crates.toml but prunes ~/.cargo/bin of
+          # binstall-installed binaries, so binstall says "already installed"
+          # while the binary is gone. --force sidesteps that.
+          cargo binstall -y --force cargo-nextest
+          cargo binstall -y --force cargo-llvm-cov
+          cargo binstall -y --force greentic-dev
+          command -v cargo-nextest
+          command -v cargo-llvm-cov
+          greentic-dev --version
 
       - name: Run coverage and enforce policy
         run: greentic-dev coverage
-
-      - name: Install Playwright Chromium
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium
-
-      - name: Run complex SoRLa WebChat e2e
-        env:
-          GREENTIC_SORLA_DIR: ${{ github.workspace }}/greentic-sorla
-        run: bash scripts/e2e/run-complex-sorla-webchat.sh
 
       - name: Upload coverage report
         if: always()

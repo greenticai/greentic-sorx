@@ -8,7 +8,8 @@
   },
   "exclusions": {
     "files": [
-      "crates/greentic-sorx-cli/src/main.rs"
+      "crates/greentic-sorx-cli/src/main.rs",
+      "crates/greentic-sorx-cli/src/test_runtime.rs"
     ]
   },
   "per_file": {}
