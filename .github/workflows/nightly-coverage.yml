@@ -57,9 +57,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cargo binstall -y cargo-nextest
-          cargo binstall -y cargo-llvm-cov
-          cargo binstall -y greentic-dev
+          # rust-cache restores ~/.cargo/.crates.toml but prunes ~/.cargo/bin of
+          # binstall-installed binaries, so binstall says "already installed"
+          # while the binary is gone. --force sidesteps that.
+          cargo binstall -y --force cargo-nextest
+          cargo binstall -y --force cargo-llvm-cov
+          cargo binstall -y --force greentic-dev
+          command -v cargo-nextest
+          command -v cargo-llvm-cov
+          greentic-dev --version
 
       - name: Run coverage and enforce policy
         run: greentic-dev coverage
