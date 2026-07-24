@@ -21,12 +21,12 @@ use greentic_sorx_core::{
     RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig, RuntimeInfo, RuntimeMetric,
     RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension, RuntimeMetricKind,
     RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult,
-    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StateMode, StdoutAuditSink,
-    StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest, apply_pending_migrations,
-    apply_value_patch, command_event_topic, entity_event_topic, filter_manager_view,
-    generate_manager_view, humanize_identifier, localize_manager_view, parse_pack_migrations,
-    render_dashboard_card, render_record_create_card, render_record_detail_card,
-    render_record_picker_card, render_relationship_summary_card, resolve_manager_context,
+    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StateMode, StdoutBusinessEventSink,
+    StoreProviderKind, TrafficUpdateRequest, apply_pending_migrations, apply_value_patch,
+    command_event_topic, entity_event_topic, filter_manager_view, generate_manager_view,
+    humanize_identifier, localize_manager_view, parse_pack_migrations, render_dashboard_card,
+    render_record_create_card, render_record_detail_card, render_record_picker_card,
+    render_relationship_summary_card, resolve_manager_context,
 };
 use greentic_sorx_pack::{
     BusinessAction, BusinessActionAssets, LoadedSorlaPack, MetricDefinition, contract_hash,
@@ -174,24 +174,30 @@ impl HttpRuntime {
         let mut router = EndpointRouter::from_agent_gateway(&pack.sorla_assets.agent_gateway_json)?;
         apply_model_endpoint_authorization(pack, &mut router);
         let providers = provider_registry(&config)?;
-        let runtime = configure_runtime_events(
-            configure_runtime_audit(
-                SorxRuntime::new(
-                    RuntimePack {
-                        name: pack.pack_name.clone(),
-                        version: pack.pack_version.clone(),
-                        digest: pack.pack_digest.clone(),
-                        operational_indexes: runtime_operational_indexes(pack),
-                        record_access: runtime_record_access(pack),
-                    },
-                    config.clone(),
-                    router,
-                    providers,
-                ),
-                &config,
+        let audit_sink = audit_sink_from_config(&config);
+        let runtime = configure_runtime_audit(
+            SorxRuntime::new(
+                RuntimePack {
+                    name: pack.pack_name.clone(),
+                    version: pack.pack_version.clone(),
+                    digest: pack.pack_digest.clone(),
+                    operational_indexes: runtime_operational_indexes(pack),
+                    record_access: runtime_record_access(pack),
+                },
+                config.clone(),
+                router,
+                providers,
             ),
-            &config,
-        )?;
+            audit_sink.clone(),
+        );
+        let runtime = bind_runtime_extensions(
+            runtime,
+            runtime_config.as_ref().map(|rc| &rc.extensions),
+            audit_sink,
+            &pack.pack_name,
+            &pack.pack_version,
+        );
+        let runtime = configure_runtime_events(runtime, &config)?;
         // Apply any pending pack migrations against the canonical store before
         // serving. No-op when the pack ships no migrations; fails startup when
         // an unconfirmed breaking migration is pending. See
@@ -2999,11 +3005,47 @@ fn request_bearer_token(headers: &BTreeMap<String, String>) -> Option<&str> {
     }
 }
 
-fn configure_runtime_audit(runtime: SorxRuntime, config: &SorxRuntimeConfig) -> SorxRuntime {
+fn audit_sink_from_config(config: &SorxRuntimeConfig) -> Arc<dyn greentic_sorx_core::AuditSink> {
     match config.audit.sink.as_str() {
-        "stdout" => runtime.with_audit_sink(Arc::new(StdoutAuditSink)),
-        _ => runtime,
+        "stdout" => Arc::new(greentic_sorx_core::StdoutAuditSink),
+        _ => Arc::new(greentic_sorx_core::DisabledAuditSink),
     }
+}
+
+fn configure_runtime_audit(
+    runtime: SorxRuntime,
+    audit_sink: Arc<dyn greentic_sorx_core::AuditSink>,
+) -> SorxRuntime {
+    runtime.with_audit_sink(audit_sink)
+}
+
+/// Wires declared runtime-extension bindings into the runtime's control/observer
+/// seams against the built-in native adapter registry, sharing `audit_sink` with
+/// the audit observer. When no bindings are declared, the runtime is returned
+/// unchanged (Noop hooks) so behavior is identical to a deployment without
+/// extensions.
+fn bind_runtime_extensions(
+    runtime: SorxRuntime,
+    extensions: Option<&greentic_sorx_core::RuntimeExtensions>,
+    audit_sink: Arc<dyn greentic_sorx_core::AuditSink>,
+    pack: &str,
+    version: &str,
+) -> SorxRuntime {
+    let Some(extensions) = extensions.filter(|ext| !ext.is_empty()) else {
+        return runtime;
+    };
+    let registry = greentic_sorx_core::native_extension_registry(audit_sink, pack, version);
+    let control = Arc::new(greentic_sorx_core::BoundControlHook::new(
+        extensions.clone(),
+        registry.clone(),
+    ));
+    let observer = Arc::new(greentic_sorx_core::BoundObserverHook::new(
+        extensions.clone(),
+        registry,
+    ));
+    runtime
+        .with_control_hook(control)
+        .with_observer_hook(observer, true)
 }
 
 fn configure_runtime_events(
@@ -11664,5 +11706,74 @@ mod tests {
                 assert_eq!(caller.roles, vec!["sorla_composer".to_string()]);
             }
         }
+    }
+
+    #[test]
+    fn bind_runtime_extensions_dispatches_audit_when_subscribed() {
+        use greentic_sorx_core::{
+            BoundObserverHook, ExtensionFailMode, NATIVE_AUDIT_PACK_REF, ObserverEvent,
+            ObserverHook, RuntimeExtensionBinding, RuntimeExtensions, native_extension_registry,
+        };
+        use std::sync::Arc;
+
+        let sink = MemoryAuditSink::new();
+        let mut extensions = RuntimeExtensions::default();
+        extensions.observer.subscriptions.insert(
+            "post_call".to_string(),
+            vec![RuntimeExtensionBinding {
+                id: "audit".into(),
+                contract: "greentic.cap.extension.observer.v1".into(),
+                pack_ref: NATIVE_AUDIT_PACK_REF.into(),
+                fail_mode: ExtensionFailMode::Open,
+            }],
+        );
+
+        // Build the bound observer the same way bind_runtime_extensions does and
+        // fire a completed event; the audit sink must capture it.
+        let registry = native_extension_registry(Arc::new(sink.clone()), "landlord", "1.0.0");
+        let hook = BoundObserverHook::new(extensions, registry);
+        let event: ObserverEvent = serde_json::from_value(serde_json::json!({
+            "event_type": "stack.call.completed",
+            "context": {
+                "environment_id": "env", "runtime_id": "rt", "tenant_id": "acme",
+                "deployment_id": "dep", "stack_id": "landlord", "route_id": "record_rent_payment",
+                "call_id": "c1", "trace_id": "t1", "actor": "alice"
+            },
+            "status": "ok"
+        }))
+        .unwrap();
+        hook.observe(&event).unwrap();
+        assert_eq!(sink.events().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bind_runtime_extensions_is_noop_without_bindings() {
+        // Spec parity requirement: with no declared bindings, bind_runtime_extensions
+        // must return the runtime unchanged (Noop hooks) — no dispatch, no audit
+        // records. Prove it by driving a real business-action invocation through the
+        // bound runtime and asserting the shared audit sink captured nothing; if the
+        // None/empty-extensions gate were removed, the native audit adapter would
+        // pick up the `stack.call.completed` event and this would fail.
+        let mut runtime = runtime("local");
+        let sink = Arc::new(MemoryAuditSink::new());
+        let inner = (*runtime.runtime).clone();
+        let bound = bind_runtime_extensions(inner, None, sink.clone(), "landlord", "1.0.0");
+        runtime.runtime = Arc::new(bound);
+
+        let body = json!({
+            "action_ref": { "contract_hash": business_action_hash() },
+            "values": { "id": "tenant-noop-1", "name": "Acme", "active": true },
+            "options": { "idempotency_key": "business-action-noop" }
+        })
+        .to_string();
+        let invoked = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+            &tenant_headers(),
+            &body,
+        );
+        assert_eq!(invoked["ok"], true);
+        assert_eq!(sink.events().unwrap().len(), 0);
     }
 }
