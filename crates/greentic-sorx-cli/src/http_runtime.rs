@@ -6,22 +6,22 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentic_sorx_core::{
-    AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface,
-    AuthorizationRequirement, AuthorizationRoles, BusinessEventSink, CallerContext,
-    CapabilityOffer, CommandStep, ControlDecisionAction, DeploymentRegistryError,
-    EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter, EndpointStatus,
-    EntityRecord, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
-    LocalDeploymentRegistryStore, ManagerContextDefaults, ManagerFieldRelationshipView,
-    ManagerFieldView, ManagerLocaleBundle, ManagerLocaleCatalog, ManagerLocaleContext,
-    ManagerNavItem, ManagerPolicyDecision, ManagerPolicyEffect, ManagerPolicySet,
-    ManagerRecordView, ManagerRelationshipView, McpToolDefinition, McpToolList,
-    MemoryStoreProvider, MetricAggregate, MetricQuery, MetricQueryFilter, MetricQueryResult,
-    MetricResultRow, MetricRuntime, MetricRuntimeProvider, OperationKind, PolicyAction,
-    ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, RecordAccessPolicy, RiskLevel,
-    RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig, RuntimeInfo, RuntimeMetric,
-    RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension, RuntimeMetricKind,
-    RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult,
-    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
+    AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface, AppendEventOp,
+    AuthorizationPolicyInput, AuthorizationPolicyResource, AuthorizationRequirement,
+    AuthorizationRoles, BusinessEventSink, CallerContext, CapabilityOffer, CommandStep,
+    ControlDecisionAction, DeploymentRegistryError, EndpointDefinition, EndpointInvocation,
+    EndpointMethod, EndpointRouter, EndpointStatus, EntityRecord, FoundationDbProviderAdapter,
+    FoundationDbProviderConfig, InvocationSource, LocalDeploymentRegistryStore,
+    ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle,
+    ManagerLocaleCatalog, ManagerLocaleContext, ManagerNavItem, ManagerPolicyDecision,
+    ManagerPolicyEffect, ManagerPolicySet, ManagerRecordView, ManagerRelationshipView,
+    McpToolDefinition, McpToolList, MemoryStoreProvider, MetricAggregate, MetricQuery,
+    MetricQueryFilter, MetricQueryResult, MetricResultRow, MetricRuntime, MetricRuntimeProvider,
+    OperationKind, PolicyAction, ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp,
+    RecordAccessPolicy, RiskLevel, RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig,
+    RuntimeInfo, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
+    RuntimeMetricKind, RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment,
+    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
     StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest, apply_value_patch,
     command_event_topic, entity_event_topic, filter_manager_view, generate_manager_view,
     humanize_identifier, localize_manager_view, render_dashboard_card, render_record_create_card,
@@ -311,6 +311,10 @@ impl HttpRuntime {
             return response;
         }
 
+        if request.method == "POST" && request.path == "/v1/sorx/events" {
+            return self.append_business_event(&request);
+        }
+
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/v1/sorx/routes") => {
                 return json_response(200, serde_json::to_value(&*self.routes).unwrap());
@@ -520,6 +524,123 @@ impl HttpRuntime {
             "SORX_UNAUTHORIZED",
             "valid HTTP ingest shared secret is required",
         ))
+    }
+
+    /// Handles `POST /v1/sorx/events`: an external ingress that appends a
+    /// business event directly onto the tenant's canonical event stream,
+    /// bypassing the generic command/endpoint router. The shared-secret
+    /// bearer check has already run in `handle_request` before this is
+    /// reached; this method additionally routes the append through the
+    /// policy engine so tenant authorization policies still apply.
+    fn append_business_event(&self, request: &HttpRequest) -> HttpResponse {
+        let tenant_id = match header_or_local(
+            &request.headers,
+            "x-greentic-tenant-id",
+            &self.runtime.config.tenant_id,
+            &self.runtime.config.environment,
+        ) {
+            Ok(value) => value,
+            Err(err) => return sorx_error_response(400, err),
+        };
+        let caller_id = match header_or_local(
+            &request.headers,
+            "x-greentic-caller-id",
+            "local",
+            &self.runtime.config.environment,
+        ) {
+            Ok(value) => value,
+            Err(err) => return sorx_error_response(400, err),
+        };
+        let caller_email = request
+            .headers
+            .get("x-greentic-caller-email")
+            .map(String::as_str);
+        let roles = compute_effective_roles(
+            self.admin_roles_overlay.as_deref(),
+            &tenant_id,
+            caller_email,
+            header_caller_roles(&request.headers),
+        );
+
+        let body: Value = match serde_json::from_str(&request.body) {
+            Ok(value) => value,
+            Err(err) => return error_response(400, "SORX_INVALID_JSON", &err.to_string()),
+        };
+        let event_type = body.get("type").and_then(Value::as_str).unwrap_or_default();
+        let Some((domain, _name)) = parse_events_cap(event_type) else {
+            return error_response(
+                400,
+                "SORX_INVALID_EVENT_TYPE",
+                "type must be cap://greentic/events/{domain}/{name}",
+            );
+        };
+        let producer = body.pointer("/metadata/producer").and_then(Value::as_str);
+        let schema_version = body
+            .pointer("/metadata/schema_version")
+            .and_then(Value::as_str);
+        if producer.map(str::is_empty).unwrap_or(true)
+            || schema_version.map(str::is_empty).unwrap_or(true)
+        {
+            return error_response(
+                400,
+                "SORX_INVALID_EVENT",
+                "metadata.producer and metadata.schema_version are required",
+            );
+        }
+
+        let decision = self
+            .runtime
+            .policy
+            .decide_authorization(&AuthorizationPolicyInput {
+                principal_subject: caller_id,
+                principal_roles: roles,
+                resource: AuthorizationPolicyResource::Record {
+                    record: format!("events/{domain}"),
+                },
+                operation: "append_event".to_string(),
+                policies: Vec::new(),
+                conditions: None,
+            });
+        if matches!(decision.action, PolicyAction::Deny) {
+            return error_response(403, "SORX_POLICY_DENIED", &decision.reason);
+        }
+
+        let occurred_at = body
+            .get("time")
+            .and_then(Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+
+        let provider_id = self
+            .runtime
+            .config
+            .bindings
+            .default_provider_id()
+            .to_string();
+        let canonical = match self.runtime.providers.canonical_store(&provider_id) {
+            Ok(store) => store,
+            Err(err) => return sorx_error_response(500, err),
+        };
+
+        let op = AppendEventOp {
+            namespace: ProviderNamespace {
+                tenant_id,
+                sor_name: self.runtime.config.deployment.sor_name.clone(),
+            },
+            stream: format!("events/{domain}"),
+            event_type: event_type.to_string(),
+            capability: Some(event_type.to_string()),
+            producer: producer.map(ToString::to_string),
+            subject_entity: "trigger".to_string(),
+            subject_id: producer.unwrap_or("event").to_string(),
+            data: body.get("payload").cloned().unwrap_or_else(|| json!({})),
+            occurred_at,
+        };
+        match canonical.append_event(op) {
+            Ok(record) => json_response(200, json!({ "ok": true, "event": record })),
+            Err(err) => sorx_error_response(500, err),
+        }
     }
 
     fn handle_generic_admin_request(&self, request: &HttpRequest) -> HttpResponse {
@@ -7146,6 +7267,18 @@ fn match_path(pattern: &str, path: &str) -> Option<BTreeMap<String, String>> {
     Some(params)
 }
 
+/// Extracts `(domain, name)` from an events capability URI of the form
+/// `cap://greentic/events/{domain}/{name}`. Returns `None` for anything that
+/// does not match, including a missing/empty domain or name segment.
+fn parse_events_cap(cap: &str) -> Option<(String, String)> {
+    let rest = cap.strip_prefix("cap://greentic/events/")?;
+    let (domain, name) = rest.split_once('/')?;
+    if domain.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((domain.to_string(), name.to_string()))
+}
+
 fn header_or_local(
     headers: &BTreeMap<String, String>,
     name: &str,
@@ -10182,6 +10315,51 @@ mod tests {
             1
         );
         assert_eq!(active_by_landlord["result"]["records"][0]["id"], "tenant-1");
+    }
+
+    #[test]
+    fn append_business_event_appends_and_returns_record() {
+        let runtime = runtime("local");
+        let body = json!({
+            "id": "evt-1", "topic": "tenancy",
+            "type": "cap://greentic/events/tenancy/rent",
+            "source": "greentic",
+            "time": "2026-07-24T06:00:00Z",
+            "payload": { "msg": "due" },
+            "metadata": { "producer": "trigger:t1", "schema_version": "1" }
+        });
+        let resp = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/events",
+            &tenant_headers(),
+            &body.to_string(),
+        );
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body["ok"], true);
+        assert_eq!(
+            resp.body["event"]["event_type"],
+            "cap://greentic/events/tenancy/rent"
+        );
+    }
+
+    #[test]
+    fn append_business_event_rejects_bad_type() {
+        let runtime = runtime("local");
+        let body = json!({
+            "type": "not-a-cap",
+            "topic": "x",
+            "payload": {},
+            "metadata": { "producer": "p", "schema_version": "1" }
+        });
+        let resp = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/events",
+            &tenant_headers(),
+            &body.to_string(),
+        );
+        assert_eq!(resp.status, 400);
     }
 
     #[test]
