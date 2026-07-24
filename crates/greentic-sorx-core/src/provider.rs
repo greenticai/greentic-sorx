@@ -241,6 +241,13 @@ pub struct DeleteResult {
     pub deleted: bool,
 }
 
+/// Serde default for `occurred_at` on events serialized before the field
+/// existed. `chrono::DateTime<Utc>` has no `Default`, so `#[serde(default)]`
+/// alone would not compile — a named default fn is required.
+fn epoch() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppendEventOp {
     pub namespace: ProviderNamespace,
@@ -253,6 +260,8 @@ pub struct AppendEventOp {
     pub subject_entity: String,
     pub subject_id: String,
     pub data: Value,
+    #[serde(default = "epoch")]
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -266,6 +275,8 @@ pub struct EventRecord {
     #[serde(default)]
     pub envelope: Value,
     pub sequence: u64,
+    #[serde(default = "epoch")]
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

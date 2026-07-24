@@ -1156,6 +1156,7 @@ impl SorxRuntime {
                     subject_entity: binding.entity.clone(),
                     subject_id: subject_id.clone(),
                     data: data.clone(),
+                    occurred_at: chrono::Utc::now(),
                 })?;
                 self.publish_business_event(
                     command_event_envelope(

@@ -400,6 +400,7 @@ impl SorxCanonicalStore for MemoryStoreProvider {
             data: op.data,
             envelope,
             sequence,
+            occurred_at: op.occurred_at,
         };
         stream.push(record.clone());
         self.persist(&state)?;
