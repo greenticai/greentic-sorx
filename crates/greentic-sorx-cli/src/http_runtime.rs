@@ -11,7 +11,7 @@ use greentic_sorx_core::{
     AuthorizationRoles, BusinessEventSink, CallerContext, CapabilityOffer, CommandStep,
     ControlDecisionAction, DeploymentRegistryError, EndpointDefinition, EndpointInvocation,
     EndpointMethod, EndpointRouter, EndpointStatus, EntityRecord, FoundationDbProviderAdapter,
-    FoundationDbProviderConfig, InvocationSource, LocalDeploymentRegistryStore,
+    FoundationDbProviderConfig, InvocationSource, LocalDeploymentRegistryStore, LocalMigrationLedger,
     ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle,
     ManagerLocaleCatalog, ManagerLocaleContext, ManagerNavItem, ManagerPolicyDecision,
     ManagerPolicyEffect, ManagerPolicySet, ManagerRecordView, ManagerRelationshipView,
@@ -21,10 +21,11 @@ use greentic_sorx_core::{
     RecordAccessPolicy, RiskLevel, RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig,
     RuntimeInfo, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
     RuntimeMetricKind, RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment,
-    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
-    StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest, apply_value_patch,
-    command_event_topic, entity_event_topic, filter_manager_view, generate_manager_view,
-    humanize_identifier, localize_manager_view, render_dashboard_card, render_record_create_card,
+    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StateMode,
+    StdoutAuditSink, StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest,
+    apply_pending_migrations, apply_value_patch, command_event_topic, entity_event_topic,
+    filter_manager_view, generate_manager_view, humanize_identifier, localize_manager_view,
+    parse_pack_migrations, render_dashboard_card, render_record_create_card,
     render_record_detail_card, render_record_picker_card, render_relationship_summary_card,
     resolve_manager_context,
 };
@@ -93,6 +94,22 @@ impl RouteVersionMetadata {
     }
 }
 
+/// Holds the resolved OAuth/MCP auth state for the MCP Streamable-HTTP endpoint.
+/// Present only when `SORX_MCP_ENABLED=1` (and issuer + audience are configured).
+#[derive(Clone)]
+struct McpAuthState {
+    config: std::sync::Arc<crate::mcp_auth::McpAuthConfig>,
+    jwks: std::sync::Arc<crate::mcp_auth::UreqJwks>,
+    /// Canonical resource identifier, e.g. `{public_base_url}/v1/sorx/mcp`.
+    resource: String,
+    /// Pre-computed OAuth Protected Resource Metadata URL
+    /// (`{public_base_url}/.well-known/oauth-protected-resource`).
+    /// Stored at construction time so `handle_mcp_post` never has to derive it
+    /// from `resource` via string trimming, which is fragile when `public_base_url`
+    /// is empty or has an unexpected suffix.
+    metadata_url: String,
+}
+
 #[derive(Clone)]
 pub struct HttpRuntime {
     deployment_id: String,
@@ -120,11 +137,23 @@ pub struct HttpRuntime {
     /// system-of-record instead of the self-asserted `x-greentic-caller-role`
     /// header. `None` (the default) preserves the legacy header-roles behavior.
     admin_roles_overlay: Option<Arc<AdminRolesOverlay>>,
+    /// OAuth resource-server state for the MCP endpoint. `None` when MCP is
+    /// disabled (the default; back-compat).
+    mcp_auth: Option<McpAuthState>,
 }
 
 #[derive(Clone)]
 struct HttpAuth {
     shared_secret: Option<String>,
+}
+
+impl crate::mcp_jsonrpc::Invoker for SorxRuntime {
+    fn invoke(
+        &self,
+        inv: greentic_sorx_core::EndpointInvocation,
+    ) -> greentic_sorx_core::SorxResult<greentic_sorx_core::EndpointResult> {
+        SorxRuntime::invoke(self, inv)
+    }
 }
 
 impl HttpRuntime {
@@ -164,6 +193,11 @@ impl HttpRuntime {
             ),
             &config,
         )?;
+        // Apply any pending pack migrations against the canonical store before
+        // serving. No-op when the pack ships no migrations; fails startup when
+        // an unconfirmed breaking migration is pending. See
+        // `apply_pack_migrations_at_startup` for ledger/namespace resolution.
+        apply_pack_migrations_at_startup(pack, &config, &runtime)?;
         let deployment_id = deployment_id.into();
         let exposure = config.exposure.default_visibility.clone();
         let auth = http_auth_from_config(&config)?;
@@ -206,6 +240,23 @@ impl HttpRuntime {
                 .collect(),
             default_provider_id: runtime.config.bindings.default_provider_id().to_string(),
         };
+        let mcp_auth = crate::mcp_auth::McpAuthConfig::from_env().map(|cfg| {
+            let public_base_url = config
+                .server
+                .public_base_url
+                .as_deref()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let resource = format!("{public_base_url}/v1/sorx/mcp");
+            let metadata_url = format!("{public_base_url}/.well-known/oauth-protected-resource");
+            let jwks = crate::mcp_auth::UreqJwks::new(cfg.jwks_ttl);
+            McpAuthState {
+                config: std::sync::Arc::new(cfg),
+                jwks: std::sync::Arc::new(jwks),
+                resource,
+                metadata_url,
+            }
+        });
         Ok(Self {
             deployment_id,
             admin_api_enabled: false,
@@ -226,6 +277,7 @@ impl HttpRuntime {
             runtime_snapshot: Arc::new(RwLock::new(runtime_snapshot)),
             registry_path: Arc::new(None),
             admin_roles_overlay: None,
+            mcp_auth,
         })
     }
 
@@ -305,6 +357,23 @@ impl HttpRuntime {
             ("GET", "/healthz") => return json_response(200, json!({ "ok": true })),
             ("GET", "/readyz") => return json_response(200, json!({ "ok": true })),
             _ => {}
+        }
+
+        // MCP OAuth endpoints — served before the shared-secret `authorize` gate.
+        if let Some(state) = &self.mcp_auth {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/.well-known/oauth-protected-resource") => {
+                    return json_response(
+                        200,
+                        crate::mcp_auth::protected_resource_metadata(
+                            &state.resource,
+                            &state.config.issuers,
+                        ),
+                    );
+                }
+                ("POST", "/v1/sorx/mcp") => return self.handle_mcp_post(state, &request),
+                _ => {}
+            }
         }
 
         if let Err(response) = self.authorize(&request) {
@@ -641,6 +710,49 @@ impl HttpRuntime {
             Ok(record) => json_response(200, json!({ "ok": true, "event": record })),
             Err(err) => sorx_error_response(500, err),
         }
+    }
+
+    /// Parse and dispatch a single JSON-RPC 2.0 body for an already-verified
+    /// MCP caller. Factored out so tests can drive it directly without a token.
+    fn handle_mcp_dispatch(
+        &self,
+        caller: &crate::mcp_jsonrpc::McpCaller,
+        body: &str,
+    ) -> HttpResponse {
+        let req: crate::mcp_jsonrpc::JsonRpcRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return json_response(
+                    200,
+                    serde_json::json!({"jsonrpc":"2.0","id":null,
+                        "error":{"code":-32700,"message":format!("parse error: {e}")}}),
+                );
+            }
+        };
+        let out = crate::mcp_jsonrpc::dispatch(&req, &self.tools, caller, &*self.runtime);
+        json_response(200, out)
+    }
+
+    /// Handle `POST /v1/sorx/mcp`: verify bearer token, match tenant, then
+    /// dispatch the JSON-RPC body.
+    fn handle_mcp_post(&self, state: &McpAuthState, request: &HttpRequest) -> HttpResponse {
+        let challenge = crate::mcp_auth::www_authenticate(&state.metadata_url);
+        let Some(token) = crate::mcp_auth::bearer_from_headers(&request.headers) else {
+            return error_response(401, "SORX_MCP_UNAUTHORIZED", "missing bearer token")
+                .with_header("WWW-Authenticate", &challenge);
+        };
+        let claims = match crate::mcp_auth::verify_token(token, &state.config, &*state.jwks) {
+            Ok(c) => c,
+            Err(e) => {
+                return error_response(401, "SORX_MCP_UNAUTHORIZED", &e)
+                    .with_header("WWW-Authenticate", &challenge);
+            }
+        };
+        let caller = match mcp_caller_from_claims(claims, &self.runtime.config.tenant_id) {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
+        self.handle_mcp_dispatch(&caller, &request.body)
     }
 
     fn handle_generic_admin_request(&self, request: &HttpRequest) -> HttpResponse {
@@ -1106,6 +1218,35 @@ impl HttpRuntime {
             .collect()
     }
 
+    /// Resolve the effective policy roles for an HTTP-sourced invocation.
+    ///
+    /// Security gate: when the admin roles overlay is configured it is the
+    /// authoritative source and the caller's self-asserted roles — whether from
+    /// the `x-greentic-caller-role` header or a request-body `context.roles` —
+    /// are ignored (see [`compute_effective_roles`]). `body_roles` carries any
+    /// caller-supplied roles from the request body so every HTTP entry point
+    /// runs through the same overlay check instead of trusting them directly.
+    fn effective_request_roles(
+        &self,
+        request: &HttpRequest,
+        tenant_id: &str,
+        body_roles: Option<Vec<String>>,
+    ) -> Vec<String> {
+        let header_roles = body_roles
+            .filter(|roles| !roles.is_empty())
+            .unwrap_or_else(|| request_roles(&request.headers));
+        let caller_email = request
+            .headers
+            .get("x-greentic-caller-email")
+            .map(String::as_str);
+        compute_effective_roles(
+            self.admin_roles_overlay.as_deref(),
+            tenant_id,
+            caller_email,
+            header_roles,
+        )
+    }
+
     fn invoke_capability(&self, request: &HttpRequest) -> HttpResponse {
         let body = match request_json(request, &BTreeMap::new(), None) {
             Ok(value) => value,
@@ -1199,11 +1340,10 @@ impl HttpRuntime {
             })
             .unwrap_or("capability")
             .to_string();
-        let roles = context
+        let body_roles = context
             .and_then(|context| context.get("roles"))
-            .and_then(string_array)
-            .filter(|roles| !roles.is_empty())
-            .unwrap_or_else(|| request_roles(&request.headers));
+            .and_then(string_array);
+        let roles = self.effective_request_roles(request, &tenant_id, body_roles);
         let invocation = EndpointInvocation {
             tenant_id,
             endpoint_id: endpoint.endpoint_id.clone(),
@@ -2788,6 +2928,7 @@ impl HttpRuntime {
             Ok(value) => value,
             Err(err) => return sorx_error_response(400, err),
         };
+        let roles = self.effective_request_roles(request, &tenant_id, None);
         let invocation = EndpointInvocation {
             tenant_id,
             endpoint_id: endpoint.endpoint_id.clone(),
@@ -2795,7 +2936,7 @@ impl HttpRuntime {
             input: values,
             caller: CallerContext {
                 subject: caller_id,
-                roles: request_roles(&request.headers),
+                roles,
             },
             idempotency_key,
             source: InvocationSource::Http,
@@ -6910,6 +7051,117 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
     Ok(registry)
 }
 
+/// Apply any migrations declared in the pack's executable-contract against the
+/// runtime's canonical store, recording each in a durable ledger.
+///
+/// Resolution at this (local-start) pack-load point:
+///
+/// * **Migrations** — parsed from `pack.sorla_assets.executable_contract_json`
+///   via [`parse_pack_migrations`]. Absent/`null` contract or empty list →
+///   no-op (returns `Ok(())` immediately).
+/// * **Namespace** — `ProviderNamespace { tenant_id, sor_name }` from
+///   `config.deployment`.
+/// * **Store** — the canonical store registered for the default provider
+///   binding in the runtime's [`ProviderRegistry`].
+/// * **State mode** — the local-start config carries `deployment_mode`
+///   (`local_single` / `versioned_registry`), not a registry `StateMode`. We
+///   conservatively use [`StateMode::SharedRequiresMigration`] so the
+///   activation gate is *active*: an unconfirmed breaking migration fails
+///   startup rather than silently mutating the SoR.
+/// * **`confirm_breaking`** — from the `SORX_CONFIRM_BREAKING_MIGRATIONS` env
+///   var (`1`/`true`); default `false`.
+/// * **Ledger** — prefers the store's built-in durable ledger when the store
+///   exposes one via [`SorxCanonicalStore::as_migration_ledger`] (i.e. when
+///   the runtime is FoundationDB-backed). Falls back to a
+///   [`LocalMigrationLedger`] at the path from `SORX_MIGRATION_LEDGER_PATH`.
+///   When the pack ships migrations but neither a built-in nor a file-based
+///   ledger is available, we SKIP with a logged note rather than failing —
+///   idempotence cannot be guaranteed without a durable ledger, so applying
+///   would risk re-running backfills on restart.
+fn apply_pack_migrations_at_startup(
+    pack: &LoadedSorlaPack,
+    config: &SorxRuntimeConfig,
+    runtime: &SorxRuntime,
+) -> SorxResult<()> {
+    let Some(contract) = pack.sorla_assets.executable_contract_json.as_ref() else {
+        return Ok(());
+    };
+    let migrations = parse_pack_migrations(contract)?;
+    if migrations.is_empty() {
+        return Ok(());
+    }
+
+    let namespace = ProviderNamespace {
+        tenant_id: config.deployment.tenant_id.clone(),
+        sor_name: config.deployment.sor_name.clone(),
+    };
+    let binding = runtime.config.bindings.default_provider_id();
+    let store = runtime.providers.canonical_store(binding)?;
+    let confirm_breaking = env_flag("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+    // Prefer the store's own durable ledger (e.g. FoundationDB subspace) when
+    // available; no env-path configuration needed in that case.
+    let outcomes = if let Some(fdb_ledger) = store.as_migration_ledger() {
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            fdb_ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    } else {
+        // Fall back to the local-file ledger. Skip with a log when no path is
+        // configured — applying without a durable ledger risks duplicate
+        // backfills across restarts.
+        let ledger_path = std::env::var_os("SORX_MIGRATION_LEDGER_PATH").map(PathBuf::from);
+        let Some(ledger_path) = ledger_path else {
+            eprintln!(
+                "greentic-sorx: pack declares {} migration(s) but SORX_MIGRATION_LEDGER_PATH is \
+                 not set and no FoundationDB ledger is available; skipping migration application \
+                 (set SORX_MIGRATION_LEDGER_PATH or use a FoundationDB-backed store)",
+                migrations.len()
+            );
+            return Ok(());
+        };
+        let ledger = LocalMigrationLedger::new(ledger_path);
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            &ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    };
+
+    let applied = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                greentic_sorx_core::MigrationOutcome::Applied { .. }
+            )
+        })
+        .count();
+    eprintln!(
+        "greentic-sorx: pack migrations processed ({} declared, {} applied this run)",
+        migrations.len(),
+        applied
+    );
+    Ok(())
+}
+
+/// Read a boolean-ish env flag: `1`/`true`/`yes` (case-insensitive) => `true`.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false)
+}
+
 pub fn route_list(
     deployment_id: &str,
     exposure: &str,
@@ -7467,10 +7719,15 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 struct HttpResponse {
     status: u16,
     body: Value,
+    headers: Vec<(String, String)>,
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {
-    HttpResponse { status, body }
+    HttpResponse {
+        status,
+        body,
+        headers: Vec::new(),
+    }
 }
 
 fn error_response(status: u16, code: &str, message: &str) -> HttpResponse {
@@ -7503,23 +7760,57 @@ fn sorx_error_response(status: u16, err: SorxError) -> HttpResponse {
     )
 }
 
+/// Pure post-verification helper: maps [`crate::mcp_auth::VerifiedClaims`] onto
+/// an [`crate::mcp_jsonrpc::McpCaller`], rejecting claims whose `tenant_id`
+/// does not match the `instance_tenant` of this SoR deployment.
+///
+/// Extracted so tenant-mismatch logic can be unit-tested without a real JWT or
+/// JWKS endpoint.
+fn mcp_caller_from_claims(
+    claims: crate::mcp_auth::VerifiedClaims,
+    instance_tenant: &str,
+) -> Result<crate::mcp_jsonrpc::McpCaller, HttpResponse> {
+    if claims.tenant_id != instance_tenant {
+        return Err(error_response(
+            403,
+            "SORX_MCP_TENANT_MISMATCH",
+            "token tenant does not match this SoR instance",
+        ));
+    }
+    Ok(crate::mcp_jsonrpc::McpCaller {
+        tenant_id: claims.tenant_id,
+        subject: claims.sub,
+        roles: claims.roles,
+    })
+}
+
 impl HttpResponse {
+    fn with_header(mut self, name: &str, value: &str) -> HttpResponse {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
     fn as_bytes(&self) -> Vec<u8> {
         let body = serde_json::to_vec(&self.body).unwrap_or_else(|_| b"{}".to_vec());
         let reason = match self.status {
             200 => "OK",
             400 => "Bad Request",
+            401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
             _ => "Internal Server Error",
         };
-        let mut response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
             reason,
             body.len()
-        )
-        .into_bytes();
+        );
+        for (name, value) in &self.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        let mut response = head.into_bytes();
         response.extend(body);
         response
     }
@@ -7715,6 +8006,61 @@ mod tests {
         // No caller email (None) => ["local"], header still ignored.
         let roles = compute_effective_roles(Some(&overlay), "t", None, vec!["admin".to_string()]);
         assert_eq!(roles, vec!["local".to_string()]);
+    }
+
+    fn request_with(headers: &[(&str, &str)]) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            path: "/x".to_string(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), (*v).to_string()))
+                .collect(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn effective_request_roles_overlay_beats_self_asserted_header() {
+        let runtime = runtime("test").with_admin_roles_overlay(std::sync::Arc::new(seam_overlay(
+            &[("alice@x", &["sorla_composer"])],
+        )));
+        // Caller self-asserts "admin" via header; overlay is authoritative.
+        let request = request_with(&[
+            ("x-greentic-caller-role", "admin"),
+            ("x-greentic-caller-email", "alice@x"),
+        ]);
+        let roles = runtime.effective_request_roles(&request, "local", None);
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn effective_request_roles_overlay_beats_body_supplied_roles() {
+        let runtime = runtime("test").with_admin_roles_overlay(std::sync::Arc::new(seam_overlay(
+            &[("alice@x", &["sorla_composer"])],
+        )));
+        // The capability path lets a caller pass roles in the request body's
+        // `context.roles`; that self-grant must NOT bypass the overlay.
+        let request = request_with(&[("x-greentic-caller-email", "alice@x")]);
+        let roles =
+            runtime.effective_request_roles(&request, "local", Some(vec!["superuser".to_string()]));
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn effective_request_roles_passthrough_without_overlay() {
+        // No overlay configured: header roles are honored verbatim (back-compat).
+        let runtime = runtime("test");
+        let request = request_with(&[("x-greentic-caller-role", "leasing-agent")]);
+        assert_eq!(
+            runtime.effective_request_roles(&request, "local", None),
+            vec!["leasing-agent".to_string()]
+        );
+        // Body-supplied roles are honored when no overlay gates them.
+        assert_eq!(
+            runtime.effective_request_roles(&request, "local", Some(vec!["ops".to_string()])),
+            vec!["ops".to_string()]
+        );
     }
 
     #[derive(Debug)]
@@ -7951,6 +8297,7 @@ mod tests {
                 business_actions: Some(business_action_assets()),
                 metrics: Some(metric_assets()),
                 operational_indexes: None,
+                executable_contract_json: None,
             },
             sorx_assets: SorxAssets {
                 start_schema_json: default_start_schema(),
@@ -8131,6 +8478,158 @@ mod tests {
             normalize_start_answers(&default_start_schema(), &answers("local"), true).unwrap();
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
         HttpRuntime::from_pack("local", &pack, config).unwrap()
+    }
+
+    /// Build the runtime config used by the migration-wiring tests.
+    fn migration_config() -> SorxRuntimeConfig {
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &answers("local"), true).unwrap();
+        runtime_config_from_answers("landlord-tenant-sor", &normalized.answers).unwrap()
+    }
+
+    /// Build a `SorxRuntime` (with a memory canonical store) for the wiring tests.
+    fn migration_runtime(config: &SorxRuntimeConfig) -> SorxRuntime {
+        let providers = provider_registry(config).unwrap();
+        let router =
+            EndpointRouter::from_agent_gateway(&pack().sorla_assets.agent_gateway_json).unwrap();
+        SorxRuntime::new(
+            RuntimePack {
+                name: "landlord-tenant-sor".to_string(),
+                version: "0.1.0".to_string(),
+                digest: None,
+                operational_indexes: Vec::new(),
+                record_access: Default::default(),
+            },
+            config.clone(),
+            router,
+            providers,
+        )
+    }
+
+    /// Pack whose executable-contract declares one additive migration.
+    fn pack_with_additive_migration() -> LoadedSorlaPack {
+        let mut pack = pack();
+        pack.sorla_assets.executable_contract_json = Some(json!({
+            "schema": "greentic.sorla.executable-contract.v1",
+            "migrations": [{
+                "name": "tenant-v2",
+                "compatibility": "additive",
+                "idempotence_key": "tenant-v2",
+                "backfills": [
+                    { "record": "Tenant", "field": "date_of_birth", "default": null }
+                ]
+            }]
+        }));
+        pack
+    }
+
+    /// Pack whose executable-contract declares one breaking migration.
+    fn pack_with_breaking_migration() -> LoadedSorlaPack {
+        let mut pack = pack();
+        pack.sorla_assets.executable_contract_json = Some(json!({
+            "schema": "greentic.sorla.executable-contract.v1",
+            "migrations": [{
+                "name": "tenant-split",
+                "compatibility": "breaking",
+                "idempotence_key": "tenant-split",
+                "backfills": []
+            }]
+        }));
+        pack
+    }
+
+    // The migration-ledger path is read from a process-global env var, so the
+    // env-touching tests serialize against one mutex and restore prior state.
+    static MIGRATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: all migration env tests hold MIGRATION_ENV_LOCK, so no
+            // other thread mutates or reads these vars concurrently.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn migration_wiring_noop_without_contract() {
+        // The default `pack()` has no executable_contract_json: the helper must
+        // be a clean no-op even when no ledger path is configured.
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::unset("SORX_MIGRATION_LEDGER_PATH");
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack(), &config, &runtime)
+            .expect("no-op without contract");
+    }
+
+    #[test]
+    fn migration_wiring_skips_when_no_ledger_path() {
+        // Migrations present but no ledger path configured => skip (Ok), no panic.
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::unset("SORX_MIGRATION_LEDGER_PATH");
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack_with_additive_migration(), &config, &runtime)
+            .expect("skip without ledger path");
+    }
+
+    #[test]
+    fn migration_wiring_applies_additive_and_is_idempotent() {
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("migrations.json");
+        let _guard = EnvGuard::set("SORX_MIGRATION_LEDGER_PATH", ledger_path.to_str().unwrap());
+        let _confirm = EnvGuard::unset("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+        let config = migration_config();
+        let pack = pack_with_additive_migration();
+
+        // First call applies and records.
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack, &config, &runtime).expect("first apply");
+        assert!(ledger_path.exists(), "ledger file should be written");
+
+        // Second call (fresh store + same ledger) must skip — the ledger is durable.
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack, &config, &runtime).expect("idempotent re-run");
+    }
+
+    #[test]
+    fn migration_wiring_unconfirmed_breaking_fails_startup() {
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("migrations.json");
+        let _guard = EnvGuard::set("SORX_MIGRATION_LEDGER_PATH", ledger_path.to_str().unwrap());
+        let _confirm = EnvGuard::unset("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        let err =
+            apply_pack_migrations_at_startup(&pack_with_breaking_migration(), &config, &runtime)
+                .expect_err("unconfirmed breaking must fail startup");
+        assert_eq!(err.code, "migration_breaking_unconfirmed");
     }
 
     fn runtime_with_model(model: Value) -> HttpRuntime {
@@ -11208,5 +11707,141 @@ mod tests {
             expected_topic,
             "command-event offer must carry the canonical topic string"
         );
+    }
+
+    #[test]
+    fn response_carries_custom_headers() {
+        let resp = json_response(401, serde_json::json!({"ok": false}))
+            .with_header("WWW-Authenticate", "Bearer x");
+        assert_eq!(resp.status, 401);
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(k, v)| k == "WWW-Authenticate" && v == "Bearer x")
+        );
+    }
+
+    #[test]
+    fn status_401_reason_phrase_is_unauthorized() {
+        let resp = error_response(401, "SORX_UNAUTHORIZED", "no token");
+        let bytes = resp.as_bytes();
+        let header = String::from_utf8_lossy(&bytes);
+        assert!(
+            header.contains("401 Unauthorized"),
+            "status line must read '401 Unauthorized', got: {}",
+            header.lines().next().unwrap_or("")
+        );
+    }
+
+    #[test]
+    fn handle_mcp_tools_list_returns_tools_for_verified_caller() {
+        let rt = runtime("local");
+        let caller = crate::mcp_jsonrpc::McpCaller {
+            tenant_id: rt.runtime.config.tenant_id.clone(),
+            subject: "u1".into(),
+            roles: vec![],
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+        })
+        .to_string();
+        let resp = rt.handle_mcp_dispatch(&caller, &body);
+        assert_eq!(resp.status, 200, "dispatch must return HTTP 200");
+        assert!(
+            resp.body["result"]["tools"].is_array(),
+            "result.tools must be an array; got: {}",
+            resp.body
+        );
+    }
+
+    // ---- Fix 1a: unauthenticated POST → 401 + WWW-Authenticate ----------------
+
+    /// Build a minimal `McpAuthState` suitable for auth-boundary tests.
+    /// The `jwks` field uses `UreqJwks` which is never called for the 401 path
+    /// (bearer extraction fails before any token verification).
+    fn test_mcp_auth_state() -> McpAuthState {
+        let config = crate::mcp_auth::McpAuthConfig {
+            issuers: vec!["https://tm.example".into()],
+            audience: "sorx-acme-landlord".into(),
+            jwks_ttl: std::time::Duration::from_secs(600),
+            leeway_secs: 60,
+        };
+        McpAuthState {
+            config: std::sync::Arc::new(config),
+            jwks: std::sync::Arc::new(crate::mcp_auth::UreqJwks::new(
+                std::time::Duration::from_secs(600),
+            )),
+            resource: "https://sor.example/v1/sorx/mcp".into(),
+            metadata_url: "https://sor.example/.well-known/oauth-protected-resource".into(),
+        }
+    }
+
+    #[test]
+    fn handle_mcp_post_without_auth_header_returns_401_with_www_authenticate() {
+        let rt = runtime("local");
+        let state = test_mcp_auth_state();
+        // No `authorization` header — must hit the bearer_from_headers None arm.
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/sorx/mcp".into(),
+            headers: BTreeMap::new(),
+            body: r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#.into(),
+        };
+        let resp = rt.handle_mcp_post(&state, &request);
+        assert_eq!(resp.status, 401, "missing bearer must yield 401");
+        let www_auth = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k == "WWW-Authenticate")
+            .map(|(_, v)| v.as_str());
+        assert!(
+            www_auth.is_some(),
+            "401 response must include a WWW-Authenticate header"
+        );
+        assert!(
+            www_auth.unwrap().starts_with("Bearer resource_metadata="),
+            "WWW-Authenticate must start with 'Bearer resource_metadata='; got: {:?}",
+            www_auth
+        );
+    }
+
+    // ---- Fix 1b: tenant-mismatch helper unit tests -----------------------------
+
+    #[test]
+    fn mcp_caller_from_claims_rejects_mismatched_tenant_with_403() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "other".into(),
+            sub: "u1".into(),
+            email: None,
+            roles: vec![],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Ok(_) => panic!("mismatched tenant must return Err, got Ok"),
+            Err(resp) => {
+                assert_eq!(resp.status, 403, "tenant mismatch must yield HTTP 403");
+                assert_eq!(
+                    resp.body["error"]["code"], "SORX_MCP_TENANT_MISMATCH",
+                    "error code must be SORX_MCP_TENANT_MISMATCH"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_caller_from_claims_accepts_matching_tenant_and_projects_fields() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "acme".into(),
+            sub: "u42".into(),
+            email: Some("u42@acme.io".into()),
+            roles: vec!["sorla_composer".into()],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Err(_) => panic!("matching tenant must return Ok(McpCaller)"),
+            Ok(caller) => {
+                assert_eq!(caller.tenant_id, "acme");
+                assert_eq!(caller.subject, "u42");
+                assert_eq!(caller.roles, vec!["sorla_composer".to_string()]);
+            }
+        }
     }
 }

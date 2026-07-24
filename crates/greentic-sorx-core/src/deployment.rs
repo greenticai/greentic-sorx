@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::migration::{AppliedMigrations, CompatibilityMigration};
+
 pub const DEPLOYMENT_REGISTRY_SCHEMA: &str = "greentic.sorx.deployment-registry.v1";
 pub const DEPLOYMENT_ROUTE_TABLE_SCHEMA: &str = "greentic.sorx.deployment-routes.v1";
 pub const DEPLOYMENT_PUBLIC_ROUTE_TABLE_SCHEMA: &str = "greentic.sorx.public-routes.v1";
@@ -1227,6 +1229,131 @@ fn normalize_base_path(value: &str) -> String {
         return "/".to_string();
     }
     format!("/{}", trimmed.trim_matches('/'))
+}
+
+/// Pre-activation gate: when the deployment's state requires migration, refuse
+/// activation if any pending (not-yet-applied) migration is breaking and not
+/// explicitly confirmed. Additive/backward-compatible pending migrations do not
+/// block (they are applied by the runner at activation/startup). Returns `Ok`
+/// for non-`SharedRequiresMigration` modes.
+///
+/// # Wiring note
+/// `activate_private` retains its current signature unchanged. The runtime
+/// activation caller (Task 0.3.6 / http_runtime) calls this gate before
+/// invoking `activate_private`, supplying the pack's pending migrations and
+/// the loaded ledger.
+pub fn evaluate_pending_migrations(
+    state_mode: StateMode,
+    pending: &[CompatibilityMigration],
+    applied: &AppliedMigrations,
+    confirm_breaking: bool,
+) -> Result<(), DeploymentRegistryError> {
+    if state_mode != StateMode::SharedRequiresMigration {
+        return Ok(());
+    }
+    for m in pending {
+        if applied.contains(m.idempotence_id()) {
+            continue;
+        }
+        if m.is_breaking() && !confirm_breaking {
+            return Err(DeploymentRegistryError::new(
+                "migration_breaking_unconfirmed",
+                format!(
+                    "breaking migration `{}` requires explicit confirmation",
+                    m.idempotence_id()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod migration_gate_tests {
+    use super::{StateMode, evaluate_pending_migrations};
+    use crate::migration::{AppliedMigrations, CompatibilityMigration, CompatibilityMode};
+
+    fn mig(name: &str, mode: CompatibilityMode) -> CompatibilityMigration {
+        CompatibilityMigration {
+            name: name.into(),
+            compatibility: mode,
+            from_version: None,
+            to_version: None,
+            projection_updates: vec![],
+            backfills: vec![],
+            idempotence_key: Some(name.into()),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn unconfirmed_breaking_blocks_when_requires_migration() {
+        let applied = AppliedMigrations::default();
+        let r = evaluate_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &[mig("split", CompatibilityMode::Breaking)],
+            &applied,
+            false,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn confirmed_breaking_is_allowed() {
+        let applied = AppliedMigrations::default();
+        assert!(
+            evaluate_pending_migrations(
+                StateMode::SharedRequiresMigration,
+                &[mig("split", CompatibilityMode::Breaking)],
+                &applied,
+                true,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn additive_pending_is_allowed() {
+        let applied = AppliedMigrations::default();
+        assert!(
+            evaluate_pending_migrations(
+                StateMode::SharedRequiresMigration,
+                &[mig("v2", CompatibilityMode::Additive)],
+                &applied,
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn already_applied_breaking_does_not_block() {
+        let mut applied = AppliedMigrations::default();
+        applied.record("split");
+        assert!(
+            evaluate_pending_migrations(
+                StateMode::SharedRequiresMigration,
+                &[mig("split", CompatibilityMode::Breaking)],
+                &applied,
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn isolated_mode_never_blocks() {
+        let applied = AppliedMigrations::default();
+        assert!(
+            evaluate_pending_migrations(
+                StateMode::Isolated,
+                &[mig("split", CompatibilityMode::Breaking)],
+                &applied,
+                false,
+            )
+            .is_ok()
+        );
+    }
 }
 
 #[cfg(test)]

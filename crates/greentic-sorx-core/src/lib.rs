@@ -1,5 +1,10 @@
 use std::path::PathBuf;
 
+pub mod migration;
+pub use migration::{
+    CompatibilityMigration, CompatibilityMode, LocalMigrationLedger, MigrationBackfill,
+    MigrationLedger, MigrationOutcome, apply_pending_migrations, parse_pack_migrations,
+};
 mod approval;
 mod audit;
 mod business_events;
@@ -38,6 +43,7 @@ pub use deployment::{
     DeploymentRoute, DeploymentRouteTable, DeploymentStatus, DeploymentVisibility,
     LocalDeploymentRegistryStore, PackArtifact, PromotionAuditEvent, PromotionStatus,
     RollbackAliasRequest, SorxDeployment, StateMode, TrafficHeaderMatch, TrafficMode, TrafficSplit,
+    evaluate_pending_migrations,
 };
 pub use error::{SorxError, SorxResult};
 pub use evidence::{
