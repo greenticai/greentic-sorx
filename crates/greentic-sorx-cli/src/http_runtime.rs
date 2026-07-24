@@ -11,22 +11,22 @@ use greentic_sorx_core::{
     CapabilityOffer, CommandStep, ControlDecisionAction, DeploymentRegistryError,
     EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter, EndpointStatus,
     EntityRecord, FoundationDbProviderAdapter, FoundationDbProviderConfig, InvocationSource,
-    LocalDeploymentRegistryStore, ManagerContextDefaults, ManagerFieldRelationshipView,
-    ManagerFieldView, ManagerLocaleBundle, ManagerLocaleCatalog, ManagerLocaleContext,
-    ManagerNavItem, ManagerPolicyDecision, ManagerPolicyEffect, ManagerPolicySet,
-    ManagerRecordView, ManagerRelationshipView, McpToolDefinition, McpToolList,
+    LocalDeploymentRegistryStore, LocalMigrationLedger, ManagerContextDefaults,
+    ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle, ManagerLocaleCatalog,
+    ManagerLocaleContext, ManagerNavItem, ManagerPolicyDecision, ManagerPolicyEffect,
+    ManagerPolicySet, ManagerRecordView, ManagerRelationshipView, McpToolDefinition, McpToolList,
     MemoryStoreProvider, MetricAggregate, MetricQuery, MetricQueryFilter, MetricQueryResult,
     MetricResultRow, MetricRuntime, MetricRuntimeProvider, OperationKind, PolicyAction,
     ProviderBinding, ProviderNamespace, ProviderRegistry, QueryOp, RecordAccessPolicy, RiskLevel,
     RollbackAliasRequest, RuntimeCapabilities, RuntimeConfig, RuntimeInfo, RuntimeMetric,
     RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension, RuntimeMetricKind,
     RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult,
-    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
-    StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest, apply_value_patch,
-    command_event_topic, entity_event_topic, filter_manager_view, generate_manager_view,
-    humanize_identifier, localize_manager_view, render_dashboard_card, render_record_create_card,
-    render_record_detail_card, render_record_picker_card, render_relationship_summary_card,
-    resolve_manager_context,
+    SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StateMode, StdoutAuditSink,
+    StdoutBusinessEventSink, StoreProviderKind, TrafficUpdateRequest, apply_pending_migrations,
+    apply_value_patch, command_event_topic, entity_event_topic, filter_manager_view,
+    generate_manager_view, humanize_identifier, localize_manager_view, parse_pack_migrations,
+    render_dashboard_card, render_record_create_card, render_record_detail_card,
+    render_record_picker_card, render_relationship_summary_card, resolve_manager_context,
 };
 use greentic_sorx_pack::{
     BusinessAction, BusinessActionAssets, LoadedSorlaPack, MetricDefinition, contract_hash,
@@ -192,6 +192,11 @@ impl HttpRuntime {
             ),
             &config,
         )?;
+        // Apply any pending pack migrations against the canonical store before
+        // serving. No-op when the pack ships no migrations; fails startup when
+        // an unconfirmed breaking migration is pending. See
+        // `apply_pack_migrations_at_startup` for ledger/namespace resolution.
+        apply_pack_migrations_at_startup(pack, &config, &runtime)?;
         let deployment_id = deployment_id.into();
         let exposure = config.exposure.default_visibility.clone();
         let auth = http_auth_from_config(&config)?;
@@ -6895,6 +6900,117 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
     Ok(registry)
 }
 
+/// Apply any migrations declared in the pack's executable-contract against the
+/// runtime's canonical store, recording each in a durable ledger.
+///
+/// Resolution at this (local-start) pack-load point:
+///
+/// * **Migrations** — parsed from `pack.sorla_assets.executable_contract_json`
+///   via [`parse_pack_migrations`]. Absent/`null` contract or empty list →
+///   no-op (returns `Ok(())` immediately).
+/// * **Namespace** — `ProviderNamespace { tenant_id, sor_name }` from
+///   `config.deployment`.
+/// * **Store** — the canonical store registered for the default provider
+///   binding in the runtime's [`ProviderRegistry`].
+/// * **State mode** — the local-start config carries `deployment_mode`
+///   (`local_single` / `versioned_registry`), not a registry `StateMode`. We
+///   conservatively use [`StateMode::SharedRequiresMigration`] so the
+///   activation gate is *active*: an unconfirmed breaking migration fails
+///   startup rather than silently mutating the SoR.
+/// * **`confirm_breaking`** — from the `SORX_CONFIRM_BREAKING_MIGRATIONS` env
+///   var (`1`/`true`); default `false`.
+/// * **Ledger** — prefers the store's built-in durable ledger when the store
+///   exposes one via [`SorxCanonicalStore::as_migration_ledger`] (i.e. when
+///   the runtime is FoundationDB-backed). Falls back to a
+///   [`LocalMigrationLedger`] at the path from `SORX_MIGRATION_LEDGER_PATH`.
+///   When the pack ships migrations but neither a built-in nor a file-based
+///   ledger is available, we SKIP with a logged note rather than failing —
+///   idempotence cannot be guaranteed without a durable ledger, so applying
+///   would risk re-running backfills on restart.
+fn apply_pack_migrations_at_startup(
+    pack: &LoadedSorlaPack,
+    config: &SorxRuntimeConfig,
+    runtime: &SorxRuntime,
+) -> SorxResult<()> {
+    let Some(contract) = pack.sorla_assets.executable_contract_json.as_ref() else {
+        return Ok(());
+    };
+    let migrations = parse_pack_migrations(contract)?;
+    if migrations.is_empty() {
+        return Ok(());
+    }
+
+    let namespace = ProviderNamespace {
+        tenant_id: config.deployment.tenant_id.clone(),
+        sor_name: config.deployment.sor_name.clone(),
+    };
+    let binding = runtime.config.bindings.default_provider_id();
+    let store = runtime.providers.canonical_store(binding)?;
+    let confirm_breaking = env_flag("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+    // Prefer the store's own durable ledger (e.g. FoundationDB subspace) when
+    // available; no env-path configuration needed in that case.
+    let outcomes = if let Some(fdb_ledger) = store.as_migration_ledger() {
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            fdb_ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    } else {
+        // Fall back to the local-file ledger. Skip with a log when no path is
+        // configured — applying without a durable ledger risks duplicate
+        // backfills across restarts.
+        let ledger_path = std::env::var_os("SORX_MIGRATION_LEDGER_PATH").map(PathBuf::from);
+        let Some(ledger_path) = ledger_path else {
+            eprintln!(
+                "greentic-sorx: pack declares {} migration(s) but SORX_MIGRATION_LEDGER_PATH is \
+                 not set and no FoundationDB ledger is available; skipping migration application \
+                 (set SORX_MIGRATION_LEDGER_PATH or use a FoundationDB-backed store)",
+                migrations.len()
+            );
+            return Ok(());
+        };
+        let ledger = LocalMigrationLedger::new(ledger_path);
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            &ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    };
+
+    let applied = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                greentic_sorx_core::MigrationOutcome::Applied { .. }
+            )
+        })
+        .count();
+    eprintln!(
+        "greentic-sorx: pack migrations processed ({} declared, {} applied this run)",
+        migrations.len(),
+        applied
+    );
+    Ok(())
+}
+
+/// Read a boolean-ish env flag: `1`/`true`/`yes` (case-insensitive) => `true`.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false)
+}
+
 pub fn route_list(
     deployment_id: &str,
     exposure: &str,
@@ -7963,6 +8079,7 @@ mod tests {
                 business_actions: Some(business_action_assets()),
                 metrics: Some(metric_assets()),
                 operational_indexes: None,
+                executable_contract_json: None,
             },
             sorx_assets: SorxAssets {
                 start_schema_json: default_start_schema(),
@@ -8143,6 +8260,158 @@ mod tests {
             normalize_start_answers(&default_start_schema(), &answers("local"), true).unwrap();
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
         HttpRuntime::from_pack("local", &pack, config).unwrap()
+    }
+
+    /// Build the runtime config used by the migration-wiring tests.
+    fn migration_config() -> SorxRuntimeConfig {
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &answers("local"), true).unwrap();
+        runtime_config_from_answers("landlord-tenant-sor", &normalized.answers).unwrap()
+    }
+
+    /// Build a `SorxRuntime` (with a memory canonical store) for the wiring tests.
+    fn migration_runtime(config: &SorxRuntimeConfig) -> SorxRuntime {
+        let providers = provider_registry(config).unwrap();
+        let router =
+            EndpointRouter::from_agent_gateway(&pack().sorla_assets.agent_gateway_json).unwrap();
+        SorxRuntime::new(
+            RuntimePack {
+                name: "landlord-tenant-sor".to_string(),
+                version: "0.1.0".to_string(),
+                digest: None,
+                operational_indexes: Vec::new(),
+                record_access: Default::default(),
+            },
+            config.clone(),
+            router,
+            providers,
+        )
+    }
+
+    /// Pack whose executable-contract declares one additive migration.
+    fn pack_with_additive_migration() -> LoadedSorlaPack {
+        let mut pack = pack();
+        pack.sorla_assets.executable_contract_json = Some(json!({
+            "schema": "greentic.sorla.executable-contract.v1",
+            "migrations": [{
+                "name": "tenant-v2",
+                "compatibility": "additive",
+                "idempotence_key": "tenant-v2",
+                "backfills": [
+                    { "record": "Tenant", "field": "date_of_birth", "default": null }
+                ]
+            }]
+        }));
+        pack
+    }
+
+    /// Pack whose executable-contract declares one breaking migration.
+    fn pack_with_breaking_migration() -> LoadedSorlaPack {
+        let mut pack = pack();
+        pack.sorla_assets.executable_contract_json = Some(json!({
+            "schema": "greentic.sorla.executable-contract.v1",
+            "migrations": [{
+                "name": "tenant-split",
+                "compatibility": "breaking",
+                "idempotence_key": "tenant-split",
+                "backfills": []
+            }]
+        }));
+        pack
+    }
+
+    // The migration-ledger path is read from a process-global env var, so the
+    // env-touching tests serialize against one mutex and restore prior state.
+    static MIGRATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: all migration env tests hold MIGRATION_ENV_LOCK, so no
+            // other thread mutates or reads these vars concurrently.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn migration_wiring_noop_without_contract() {
+        // The default `pack()` has no executable_contract_json: the helper must
+        // be a clean no-op even when no ledger path is configured.
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::unset("SORX_MIGRATION_LEDGER_PATH");
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack(), &config, &runtime)
+            .expect("no-op without contract");
+    }
+
+    #[test]
+    fn migration_wiring_skips_when_no_ledger_path() {
+        // Migrations present but no ledger path configured => skip (Ok), no panic.
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::unset("SORX_MIGRATION_LEDGER_PATH");
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack_with_additive_migration(), &config, &runtime)
+            .expect("skip without ledger path");
+    }
+
+    #[test]
+    fn migration_wiring_applies_additive_and_is_idempotent() {
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("migrations.json");
+        let _guard = EnvGuard::set("SORX_MIGRATION_LEDGER_PATH", ledger_path.to_str().unwrap());
+        let _confirm = EnvGuard::unset("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+        let config = migration_config();
+        let pack = pack_with_additive_migration();
+
+        // First call applies and records.
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack, &config, &runtime).expect("first apply");
+        assert!(ledger_path.exists(), "ledger file should be written");
+
+        // Second call (fresh store + same ledger) must skip — the ledger is durable.
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack, &config, &runtime).expect("idempotent re-run");
+    }
+
+    #[test]
+    fn migration_wiring_unconfirmed_breaking_fails_startup() {
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("migrations.json");
+        let _guard = EnvGuard::set("SORX_MIGRATION_LEDGER_PATH", ledger_path.to_str().unwrap());
+        let _confirm = EnvGuard::unset("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        let err =
+            apply_pack_migrations_at_startup(&pack_with_breaking_migration(), &config, &runtime)
+                .expect_err("unconfirmed breaking must fail startup");
+        assert_eq!(err.code, "migration_breaking_unconfirmed");
     }
 
     fn runtime_with_model(model: Value) -> HttpRuntime {
