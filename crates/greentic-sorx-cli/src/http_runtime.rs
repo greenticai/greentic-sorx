@@ -985,6 +985,35 @@ impl HttpRuntime {
             .collect()
     }
 
+    /// Resolve the effective policy roles for an HTTP-sourced invocation.
+    ///
+    /// Security gate: when the admin roles overlay is configured it is the
+    /// authoritative source and the caller's self-asserted roles — whether from
+    /// the `x-greentic-caller-role` header or a request-body `context.roles` —
+    /// are ignored (see [`compute_effective_roles`]). `body_roles` carries any
+    /// caller-supplied roles from the request body so every HTTP entry point
+    /// runs through the same overlay check instead of trusting them directly.
+    fn effective_request_roles(
+        &self,
+        request: &HttpRequest,
+        tenant_id: &str,
+        body_roles: Option<Vec<String>>,
+    ) -> Vec<String> {
+        let header_roles = body_roles
+            .filter(|roles| !roles.is_empty())
+            .unwrap_or_else(|| request_roles(&request.headers));
+        let caller_email = request
+            .headers
+            .get("x-greentic-caller-email")
+            .map(String::as_str);
+        compute_effective_roles(
+            self.admin_roles_overlay.as_deref(),
+            tenant_id,
+            caller_email,
+            header_roles,
+        )
+    }
+
     fn invoke_capability(&self, request: &HttpRequest) -> HttpResponse {
         let body = match request_json(request, &BTreeMap::new(), None) {
             Ok(value) => value,
@@ -1078,11 +1107,10 @@ impl HttpRuntime {
             })
             .unwrap_or("capability")
             .to_string();
-        let roles = context
+        let body_roles = context
             .and_then(|context| context.get("roles"))
-            .and_then(string_array)
-            .filter(|roles| !roles.is_empty())
-            .unwrap_or_else(|| request_roles(&request.headers));
+            .and_then(string_array);
+        let roles = self.effective_request_roles(request, &tenant_id, body_roles);
         let invocation = EndpointInvocation {
             tenant_id,
             endpoint_id: endpoint.endpoint_id.clone(),
@@ -2667,6 +2695,7 @@ impl HttpRuntime {
             Ok(value) => value,
             Err(err) => return sorx_error_response(400, err),
         };
+        let roles = self.effective_request_roles(request, &tenant_id, None);
         let invocation = EndpointInvocation {
             tenant_id,
             endpoint_id: endpoint.endpoint_id.clone(),
@@ -2674,7 +2703,7 @@ impl HttpRuntime {
             input: values,
             caller: CallerContext {
                 subject: caller_id,
-                roles: request_roles(&request.headers),
+                roles,
             },
             idempotency_key,
             source: InvocationSource::Http,
@@ -7582,6 +7611,61 @@ mod tests {
         // No caller email (None) => ["local"], header still ignored.
         let roles = compute_effective_roles(Some(&overlay), "t", None, vec!["admin".to_string()]);
         assert_eq!(roles, vec!["local".to_string()]);
+    }
+
+    fn request_with(headers: &[(&str, &str)]) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            path: "/x".to_string(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), (*v).to_string()))
+                .collect(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn effective_request_roles_overlay_beats_self_asserted_header() {
+        let runtime = runtime("test").with_admin_roles_overlay(std::sync::Arc::new(seam_overlay(
+            &[("alice@x", &["sorla_composer"])],
+        )));
+        // Caller self-asserts "admin" via header; overlay is authoritative.
+        let request = request_with(&[
+            ("x-greentic-caller-role", "admin"),
+            ("x-greentic-caller-email", "alice@x"),
+        ]);
+        let roles = runtime.effective_request_roles(&request, "local", None);
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn effective_request_roles_overlay_beats_body_supplied_roles() {
+        let runtime = runtime("test").with_admin_roles_overlay(std::sync::Arc::new(seam_overlay(
+            &[("alice@x", &["sorla_composer"])],
+        )));
+        // The capability path lets a caller pass roles in the request body's
+        // `context.roles`; that self-grant must NOT bypass the overlay.
+        let request = request_with(&[("x-greentic-caller-email", "alice@x")]);
+        let roles =
+            runtime.effective_request_roles(&request, "local", Some(vec!["superuser".to_string()]));
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn effective_request_roles_passthrough_without_overlay() {
+        // No overlay configured: header roles are honored verbatim (back-compat).
+        let runtime = runtime("test");
+        let request = request_with(&[("x-greentic-caller-role", "leasing-agent")]);
+        assert_eq!(
+            runtime.effective_request_roles(&request, "local", None),
+            vec!["leasing-agent".to_string()]
+        );
+        // Body-supplied roles are honored when no overlay gates them.
+        assert_eq!(
+            runtime.effective_request_roles(&request, "local", Some(vec!["ops".to_string()])),
+            vec!["ops".to_string()]
+        );
     }
 
     #[derive(Debug)]
