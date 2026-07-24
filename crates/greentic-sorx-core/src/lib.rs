@@ -17,6 +17,7 @@ mod manager;
 mod mcp;
 mod metrics_runtime;
 mod model;
+mod native_extensions;
 mod ontology_graph;
 mod policy;
 mod provider;
@@ -102,6 +103,7 @@ pub use model::{
     InvocationSource, OperationKind, QueryPlan, RecordAccessPolicy, RiskLevel,
     RuntimeOperationalIndex, RuntimePack, SorxEvent, TraversalRequirement, ViewTransform,
 };
+pub use native_extensions::{NATIVE_AUDIT_PACK_REF, NativeAuditObserver};
 pub use ontology_graph::{
     OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,
 };
