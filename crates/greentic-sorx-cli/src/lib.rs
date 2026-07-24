@@ -38,6 +38,8 @@ mod mcp_jsonrpc;
 pub mod nats_events;
 mod test_runtime;
 mod validation;
+#[cfg(feature = "wasm-extensions")]
+pub mod wasm_extensions;
 
 const TRANSIENT_HTTP_INGEST_SECRET_ENV: &str = "GREENTIC_SORX_TRANSIENT_HTTP_INGEST_SECRET";
 const RUNTIME_CONFIG_ENV: &str = "GREENTIC_SORX_RUNTIME_CONFIG";
