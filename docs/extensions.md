@@ -28,4 +28,12 @@ runtime layer regardless of their declared `fail_mode`: the runtime discards
 observer errors, so audit can never fail a business call; the per-binding
 `fail_mode` is honored for the control path.
 
-Phase 2 (future) adds a WASM component adapter for third-party extension packs.
+## WASM extension packs (phase 2)
+
+Behind the `wasm-extensions` cargo feature (off by default), SoRX runs signed WASM
+extension packs via `greentic-ext-runtime` (world `greentic:extension-sorx`). A binding's
+`pack_ref` is the extension id; the operator installs the signed extension directory and
+points `SORX_EXTENSIONS_DIR` at the discovery root (default `~/.greentic/extensions/sorx/`).
+Unsigned local dev uses `greentic-ext-runtime`'s `dev-allow-unsigned` feature +
+`GREENTIC_EXT_ALLOW_UNSIGNED=1`. With the feature off, only native adapters (the audit
+observer) are available and no wasmtime dependency is compiled in.
