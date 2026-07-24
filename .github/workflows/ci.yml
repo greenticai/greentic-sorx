@@ -14,11 +14,16 @@ concurrency:
 jobs:
   ci:
     uses: greenticai/.github/.github/workflows/host-crate-ci.yml@main
-    # `foundationdb` is the only optional feature and needs a native FDB client
-    # lib + headers that CI runners don't have, so it cannot be built via
-    # --all-features here. It's default-off and verified by the dedicated FDB
-    # integration tests (run against a real fdbserver). Dropping --all-features
-    # is coverage-neutral: foundationdb is the sole feature in the workspace.
+    # This gate deliberately omits --all-features. Two optional features would
+    # otherwise be pulled in and neither is buildable on a stock CI runner:
+    #   * `foundationdb` needs a native FDB client lib + headers (default-off,
+    #     verified by the dedicated FDB integration tests against a real
+    #     fdbserver);
+    #   * `wasm-extensions` pulls the git-pinned `greentic-ext-runtime`
+    #     (default-off, verified by feature-gated adapter tests) and would need
+    #     credentials to fetch its private repo.
+    # Both are default-off, so dropping --all-features here keeps the gate
+    # coverage-relevant and credential-free.
     with:
       clippy-args: "--workspace --all-targets -- -D warnings"
       test-args: "--workspace"
