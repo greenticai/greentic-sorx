@@ -103,7 +103,9 @@ pub use model::{
     InvocationSource, OperationKind, QueryPlan, RecordAccessPolicy, RiskLevel,
     RuntimeOperationalIndex, RuntimePack, SorxEvent, TraversalRequirement, ViewTransform,
 };
-pub use native_extensions::{NATIVE_AUDIT_PACK_REF, NativeAuditObserver};
+pub use native_extensions::{
+    NATIVE_AUDIT_PACK_REF, NativeAuditObserver, native_extension_registry,
+};
 pub use ontology_graph::{
     OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,
 };

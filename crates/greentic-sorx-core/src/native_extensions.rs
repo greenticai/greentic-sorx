@@ -4,7 +4,8 @@ use serde_json::{Map, Value};
 
 use crate::{
     AuditSink, ControlDecision, ObserverEvent, RiskLevel, RuntimeExtensionAdapter,
-    RuntimeExtensionBinding, SorxAuditEvent, SorxResult, redact_audit_value,
+    RuntimeExtensionBinding, RuntimeExtensionRegistry, SorxAuditEvent, SorxResult,
+    redact_audit_value,
 };
 
 /// `pack_ref` advertised by the built-in audit observer.
@@ -88,6 +89,20 @@ impl NativeAuditObserver {
     }
 }
 
+/// Builds a registry of the built-in native extension adapters. Phase 1
+/// registers the audit observer under [`NATIVE_AUDIT_PACK_REF`]. New built-ins
+/// are added here.
+pub fn native_extension_registry(
+    audit_sink: Arc<dyn AuditSink>,
+    pack: impl Into<String>,
+    version: impl Into<String>,
+) -> RuntimeExtensionRegistry {
+    RuntimeExtensionRegistry::new().with_adapter(
+        NATIVE_AUDIT_PACK_REF,
+        Arc::new(NativeAuditObserver::new(audit_sink, pack, version)),
+    )
+}
+
 fn control_action_label(action: &crate::ControlDecisionAction) -> &'static str {
     match action {
         crate::ControlDecisionAction::Allow => "allow",
@@ -124,8 +139,8 @@ impl RuntimeExtensionAdapter for NativeAuditObserver {
 mod tests {
     use super::*;
     use crate::{
-        ExtensionFailMode, MemoryAuditSink, RiskLevel, RuntimeExtensionAdapter,
-        RuntimeExtensionBinding,
+        BoundObserverHook, ExtensionFailMode, MemoryAuditSink, ObserverHook, RiskLevel,
+        RuntimeExtensionAdapter, RuntimeExtensionBinding, RuntimeExtensions,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -194,5 +209,47 @@ mod tests {
             decision.action,
             crate::ControlDecisionAction::Allow
         ));
+    }
+
+    fn subscribe(extensions: &mut RuntimeExtensions, subscription: &str) {
+        extensions
+            .observer
+            .subscriptions
+            .entry(subscription.to_string())
+            .or_default()
+            .push(binding());
+    }
+
+    fn typed_event(event_type: &str) -> crate::ObserverEvent {
+        serde_json::from_value(observer_event(event_type)).unwrap()
+    }
+
+    #[test]
+    fn bound_observer_dispatches_declared_subscriptions_to_audit_sink() {
+        let sink = MemoryAuditSink::new();
+        let registry = native_extension_registry(Arc::new(sink.clone()), "landlord", "1.0.0");
+
+        let mut extensions = RuntimeExtensions::default();
+        subscribe(&mut extensions, "pre_call");
+        subscribe(&mut extensions, "post_call");
+
+        let hook = BoundObserverHook::new(extensions, registry);
+        hook.observe(&typed_event("stack.call.started")).unwrap();
+        hook.observe(&typed_event("stack.call.completed")).unwrap();
+
+        let events = sink.events().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, "observer.pre_call");
+        assert_eq!(events[1].event, "observer.post_call");
+    }
+
+    #[test]
+    fn bound_observer_ignores_undeclared_subscriptions() {
+        let sink = MemoryAuditSink::new();
+        let registry = native_extension_registry(Arc::new(sink.clone()), "landlord", "1.0.0");
+        // No subscriptions declared.
+        let hook = BoundObserverHook::new(RuntimeExtensions::default(), registry);
+        hook.observe(&typed_event("stack.call.completed")).unwrap();
+        assert!(sink.events().unwrap().is_empty());
     }
 }
