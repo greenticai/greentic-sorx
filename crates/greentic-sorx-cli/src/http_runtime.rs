@@ -11776,4 +11776,64 @@ mod tests {
         assert_eq!(invoked["ok"], true);
         assert_eq!(sink.events().unwrap().len(), 0);
     }
+
+    #[test]
+    fn bind_runtime_extensions_wires_bound_observer_end_to_end() {
+        // Spec parity requirement, the inverse of the noop test above: with a
+        // declared `post_call` binding to the native audit adapter,
+        // bind_runtime_extensions must build and wire the real
+        // BoundObserverHook/BoundControlHook registry itself (not a
+        // hand-reconstructed one) so that driving a real business-action
+        // invocation through the bound runtime produces an audit event on the
+        // shared sink. If bind_runtime_extensions dropped the observer wiring
+        // or wired the wrong sink, this would fail.
+        use greentic_sorx_core::{
+            ExtensionFailMode, NATIVE_AUDIT_PACK_REF, RuntimeExtensionBinding, RuntimeExtensions,
+        };
+
+        let mut runtime = runtime("local");
+        let sink = Arc::new(MemoryAuditSink::new());
+        let mut extensions = RuntimeExtensions::default();
+        extensions.observer.subscriptions.insert(
+            "post_call".to_string(),
+            vec![RuntimeExtensionBinding {
+                id: "audit".into(),
+                contract: "greentic.cap.extension.observer.v1".into(),
+                pack_ref: NATIVE_AUDIT_PACK_REF.into(),
+                fail_mode: ExtensionFailMode::Open,
+            }],
+        );
+
+        let inner = (*runtime.runtime).clone();
+        let bound =
+            bind_runtime_extensions(inner, Some(&extensions), sink.clone(), "landlord", "1.0.0");
+        runtime.runtime = Arc::new(bound);
+
+        let body = json!({
+            "action_ref": { "contract_hash": business_action_hash() },
+            "values": { "id": "tenant-bound-1", "name": "Acme", "active": true },
+            "options": { "idempotency_key": "business-action-bound" }
+        })
+        .to_string();
+        let invoked = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+            &tenant_headers(),
+            &body,
+        );
+        assert_eq!(invoked["ok"], true);
+
+        let events = sink.events().unwrap();
+        assert!(
+            !events.is_empty(),
+            "bound observer must record at least one audit event"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "observer.post_call"),
+            "expected an observer.post_call event, got: {events:?}"
+        );
+    }
 }

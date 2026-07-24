@@ -23,6 +23,9 @@ Enable it by declaring observer subscriptions, e.g.:
 ```
 
 Use `fail_mode: "open"` for audit so an audit failure never fails the business
-invocation.
+invocation. Note that observer bindings are effectively fail-open at the
+runtime layer regardless of their declared `fail_mode`: the runtime discards
+observer errors, so audit can never fail a business call; the per-binding
+`fail_mode` is honored for the control path.
 
 Phase 2 (future) adds a WASM component adapter for third-party extension packs.
