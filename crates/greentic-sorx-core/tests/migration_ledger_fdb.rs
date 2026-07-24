@@ -6,13 +6,13 @@
 #![cfg(feature = "foundationdb")]
 
 use greentic_sorx_core::ProviderNamespace;
+use greentic_sorx_core::migration::{CompatibilityMigration, CompatibilityMode, MigrationBackfill};
 use greentic_sorx_core::providers::foundationdb_real::FoundationDbStore;
 use greentic_sorx_core::providers::{FoundationDbProviderAdapter, FoundationDbProviderConfig};
 use greentic_sorx_core::{
     CreateOp, MigrationOutcome, SorStoreProvider, SorxCanonicalStore, StateMode,
     UniqueConflictBehavior, apply_pending_migrations,
 };
-use greentic_sorx_core::migration::{CompatibilityMigration, CompatibilityMode, MigrationBackfill};
 
 fn cluster_file() -> String {
     std::env::var("FDB_CLUSTER_FILE")
@@ -128,9 +128,7 @@ fn fdb_adapter_as_migration_ledger_apply_then_idempotent() {
     );
 
     // Second run with a freshly-borrowed ledger: must be Skipped (durable record).
-    let ledger2 = adapter
-        .as_migration_ledger()
-        .expect("second borrow");
+    let ledger2 = adapter.as_migration_ledger().expect("second borrow");
     let second = apply_pending_migrations(
         StateMode::SharedRequiresMigration,
         &[additive_migration()],
