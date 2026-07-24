@@ -190,12 +190,14 @@ impl HttpRuntime {
             ),
             audit_sink.clone(),
         );
+        let wasm_adapter = build_wasm_extension_adapter(&config);
         let runtime = bind_runtime_extensions(
             runtime,
             runtime_config.as_ref().map(|rc| &rc.extensions),
             audit_sink,
             &pack.pack_name,
             &pack.pack_version,
+            wasm_adapter,
         );
         let runtime = configure_runtime_events(runtime, &config)?;
         // Apply any pending pack migrations against the canonical store before
@@ -3030,11 +3032,17 @@ fn bind_runtime_extensions(
     audit_sink: Arc<dyn greentic_sorx_core::AuditSink>,
     pack: &str,
     version: &str,
+    wasm_adapter: Option<Arc<dyn greentic_sorx_core::RuntimeExtensionAdapter>>,
 ) -> SorxRuntime {
     let Some(extensions) = extensions.filter(|ext| !ext.is_empty()) else {
         return runtime;
     };
-    let registry = greentic_sorx_core::native_extension_registry(audit_sink, pack, version);
+    let mut registry = greentic_sorx_core::native_extension_registry(audit_sink, pack, version);
+    if let Some(adapter) = wasm_adapter {
+        for pack_ref in wasm_pack_refs(extensions) {
+            registry = registry.with_adapter(pack_ref, adapter.clone());
+        }
+    }
     let control = Arc::new(greentic_sorx_core::BoundControlHook::new(
         extensions.clone(),
         registry.clone(),
@@ -3046,6 +3054,58 @@ fn bind_runtime_extensions(
     runtime
         .with_control_hook(control)
         .with_observer_hook(observer, true)
+}
+
+/// Distinct pack_refs declared in control hooks + observer subscriptions,
+/// excluding the built-in native audit observer.
+fn wasm_pack_refs(extensions: &greentic_sorx_core::RuntimeExtensions) -> Vec<String> {
+    let mut refs = std::collections::BTreeSet::new();
+    for bindings in extensions.control.hooks.values() {
+        for b in bindings {
+            if b.pack_ref != greentic_sorx_core::NATIVE_AUDIT_PACK_REF {
+                refs.insert(b.pack_ref.clone());
+            }
+        }
+    }
+    for bindings in extensions.observer.subscriptions.values() {
+        for b in bindings {
+            if b.pack_ref != greentic_sorx_core::NATIVE_AUDIT_PACK_REF {
+                refs.insert(b.pack_ref.clone());
+            }
+        }
+    }
+    refs.into_iter().collect()
+}
+
+/// Builds the WASM extension runtime adapter from `SORX_EXTENSIONS_DIR`, when
+/// the `wasm-extensions` feature is enabled and the env var is set. Never
+/// fails startup: a missing env var or a failure to load the extension
+/// runtime both fall back to native-only (`None`).
+#[cfg(feature = "wasm-extensions")]
+fn build_wasm_extension_adapter(
+    _config: &SorxRuntimeConfig,
+) -> Option<Arc<dyn greentic_sorx_core::RuntimeExtensionAdapter>> {
+    let dir = std::env::var_os("SORX_EXTENSIONS_DIR").map(std::path::PathBuf::from)?;
+    let rt_config = greentic_ext_runtime::RuntimeConfig::from_paths(
+        greentic_ext_runtime::DiscoveryPaths::new(dir),
+    );
+    match greentic_ext_runtime::ExtensionRuntime::new(rt_config) {
+        Ok(runtime) => Some(Arc::new(crate::wasm_extensions::WasmExtensionRuntime::new(
+            Arc::new(runtime),
+        ))),
+        Err(err) => {
+            // Do not fail startup if extensions can't be loaded; log and run native-only.
+            eprintln!("wasm extension runtime disabled: {err}");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "wasm-extensions"))]
+fn build_wasm_extension_adapter(
+    _config: &SorxRuntimeConfig,
+) -> Option<Arc<dyn greentic_sorx_core::RuntimeExtensionAdapter>> {
+    None
 }
 
 fn configure_runtime_events(
@@ -11757,7 +11817,7 @@ mod tests {
         let mut runtime = runtime("local");
         let sink = Arc::new(MemoryAuditSink::new());
         let inner = (*runtime.runtime).clone();
-        let bound = bind_runtime_extensions(inner, None, sink.clone(), "landlord", "1.0.0");
+        let bound = bind_runtime_extensions(inner, None, sink.clone(), "landlord", "1.0.0", None);
         runtime.runtime = Arc::new(bound);
 
         let body = json!({
@@ -11805,8 +11865,14 @@ mod tests {
         );
 
         let inner = (*runtime.runtime).clone();
-        let bound =
-            bind_runtime_extensions(inner, Some(&extensions), sink.clone(), "landlord", "1.0.0");
+        let bound = bind_runtime_extensions(
+            inner,
+            Some(&extensions),
+            sink.clone(),
+            "landlord",
+            "1.0.0",
+            None,
+        );
         runtime.runtime = Arc::new(bound);
 
         let body = json!({
@@ -11834,6 +11900,76 @@ mod tests {
                 .iter()
                 .any(|event| event.event == "observer.post_call"),
             "expected an observer.post_call event, got: {events:?}"
+        );
+    }
+
+    #[test]
+    fn bind_runtime_extensions_registers_wasm_adapter_for_nonaudit_packref() {
+        use greentic_sorx_core::{
+            ControlDecision, ExtensionFailMode, RuntimeExtensionAdapter, RuntimeExtensionBinding,
+            RuntimeExtensions,
+        };
+        use std::sync::Arc;
+
+        // A stand-in adapter that records it was consulted, registered under a
+        // non-audit pack_ref, proving bind_runtime_extensions routes wasm packrefs to it.
+        #[derive(Debug)]
+        struct Spy(std::sync::atomic::AtomicBool);
+        impl RuntimeExtensionAdapter for Spy {
+            fn control(
+                &self,
+                _h: &str,
+                _b: &RuntimeExtensionBinding,
+                _r: &serde_json::Value,
+                _resp: Option<&serde_json::Value>,
+            ) -> greentic_sorx_core::SorxResult<ControlDecision> {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(ControlDecision::allow())
+            }
+        }
+        let spy = Arc::new(Spy(std::sync::atomic::AtomicBool::new(false)));
+
+        let mut extensions = RuntimeExtensions::default();
+        extensions.control.hooks.insert(
+            "pre_call".to_string(),
+            vec![RuntimeExtensionBinding {
+                id: "w".into(),
+                contract: "greentic.cap.extension.control.v1".into(),
+                pack_ref: "acme.guard.v1".into(),
+                fail_mode: ExtensionFailMode::Closed,
+            }],
+        );
+
+        let mut runtime = runtime("local");
+        let sink = Arc::new(MemoryAuditSink::new());
+        let inner = (*runtime.runtime).clone();
+        let bound = bind_runtime_extensions(
+            inner,
+            Some(&extensions),
+            sink.clone(),
+            "landlord",
+            "1.0.0",
+            Some(spy.clone() as Arc<dyn RuntimeExtensionAdapter>),
+        );
+        runtime.runtime = Arc::new(bound);
+
+        let body = json!({
+            "action_ref": { "contract_hash": business_action_hash() },
+            "values": { "id": "tenant-wasm-1", "name": "Acme", "active": true },
+            "options": { "idempotency_key": "business-action-wasm" }
+        })
+        .to_string();
+        let invoked = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+            &tenant_headers(),
+            &body,
+        );
+        assert_eq!(invoked["ok"], true);
+        assert!(
+            spy.0.load(std::sync::atomic::Ordering::SeqCst),
+            "wasm-registered adapter's control() must have fired for the non-audit pack_ref"
         );
     }
 }
