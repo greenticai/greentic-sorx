@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -197,6 +197,17 @@ fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<St
 
 impl FoundationDbProviderConfig {
     fn persistence_path(&self) -> PathBuf {
+        self.persistence_path_in(&sorx_state_dir())
+    }
+
+    /// Resolve the on-disk persistence file for this binding under `base`.
+    ///
+    /// An explicit `database` path (containing a separator or ending in
+    /// `.json`) is honored verbatim so operators can pin a durable location;
+    /// otherwise a stable per-binding filename is derived and placed under
+    /// `base`. Splitting the base out keeps the path derivation pure and
+    /// testable, independent of the process environment.
+    fn persistence_path_in(&self, base: &Path) -> PathBuf {
         if let Some(database) = self.database.as_deref()
             && (database.contains('/') || database.ends_with(".json"))
         {
@@ -209,7 +220,25 @@ impl FoundationDbProviderConfig {
         hasher.update(b"\0");
         hasher.update(self.database.as_deref().unwrap_or("default"));
         let digest = hex_prefix(&hasher.finalize());
-        std::env::temp_dir().join(format!("greentic-sorx-foundationdb-{digest}.json"))
+        base.join(format!("greentic-sorx-foundationdb-{digest}.json"))
+    }
+}
+
+/// Base directory for the local FoundationDB adapter's persistence files.
+///
+/// Honors `SORX_STATE_DIR` — consistent with the `SORX_REGISTRY_PATH` /
+/// `SORX_MIGRATION_LEDGER_PATH` durable-state conventions — so operators can
+/// point runtime state at a disk that survives reboots. Falls back to the
+/// system temp dir (the historical behavior) when the variable is unset or
+/// empty, preserving back-compat for ephemeral/test deployments.
+fn sorx_state_dir() -> PathBuf {
+    state_dir_base_from(std::env::var_os("SORX_STATE_DIR"))
+}
+
+fn state_dir_base_from(value: Option<std::ffi::OsString>) -> PathBuf {
+    match value {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => std::env::temp_dir(),
     }
 }
 
@@ -219,4 +248,65 @@ fn hex_prefix(bytes: &[u8]) -> String {
         .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    fn config_with_ref(config_ref: &str) -> FoundationDbProviderConfig {
+        FoundationDbProviderConfig {
+            cluster_file: None,
+            database: None,
+            config_ref: Some(config_ref.to_string()),
+        }
+    }
+
+    #[test]
+    fn persistence_path_uses_provided_durable_base() {
+        let config = config_with_ref("providers.foundationdb.acme");
+        let base = Path::new("/var/lib/greentic-sorx");
+
+        let path = config.persistence_path_in(base);
+
+        assert!(
+            path.starts_with(base),
+            "expected persistence path {path:?} under durable base {base:?}, not the system temp dir"
+        );
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("json"));
+    }
+
+    #[test]
+    fn explicit_database_path_overrides_durable_base() {
+        let config = FoundationDbProviderConfig {
+            cluster_file: None,
+            database: Some("/srv/data/landlord.json".to_string()),
+            config_ref: None,
+        };
+        let base = Path::new("/var/lib/greentic-sorx");
+
+        assert_eq!(
+            config.persistence_path_in(base),
+            PathBuf::from("/srv/data/landlord.json")
+        );
+    }
+
+    #[test]
+    fn state_dir_base_honors_configured_value() {
+        assert_eq!(
+            state_dir_base_from(Some(OsString::from("/data/greentic-sorx"))),
+            PathBuf::from("/data/greentic-sorx")
+        );
+    }
+
+    #[test]
+    fn state_dir_base_falls_back_to_temp_dir_when_unset_or_empty() {
+        assert_eq!(state_dir_base_from(None), std::env::temp_dir());
+        assert_eq!(
+            state_dir_base_from(Some(OsString::new())),
+            std::env::temp_dir()
+        );
+    }
 }
