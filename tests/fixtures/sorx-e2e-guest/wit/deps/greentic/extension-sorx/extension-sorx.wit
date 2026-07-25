@@ -1,0 +1,36 @@
+package greentic:extension-sorx@0.1.0;
+
+/// Control hooks let an extension inspect and gate a SoRX invocation.
+interface control {
+  /// `hook` is one of: pre_call | post_call | pre_admin | post_admin.
+  /// `binding-json` / `request-json` / `response-json` are the serde-JSON of
+  /// SoRX's RuntimeExtensionBinding / request / optional response. Returns the
+  /// JSON of a SoRX ControlDecision on Ok, or an error message on Err.
+  control: func(
+    hook: string,
+    binding-json: string,
+    request-json: string,
+    response-json: option<string>,
+  ) -> result<string, string>;
+}
+
+/// Observe hooks let an extension react to SoRX lifecycle events (side effects
+/// only; no control over the invocation).
+interface observe {
+  /// `subscription` is one of: pre_call | post_call | call_failed | control_denied.
+  observe: func(
+    subscription: string,
+    binding-json: string,
+    event-json: string,
+  ) -> result<_, string>;
+}
+
+world sorx-runtime-extension {
+  // Minimal host surface: control/observe need only logging. The host linker
+  // provides a superset (i18n/secrets/broker/http); importing a subset is
+  // compatible and keeps the operator-runtime extension surface small.
+  import greentic:extension-host/logging@0.1.0;
+
+  export control;
+  export observe;
+}
