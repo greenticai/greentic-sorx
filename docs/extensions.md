@@ -37,3 +37,18 @@ points `SORX_EXTENSIONS_DIR` at the discovery root (default `~/.greentic/extensi
 Unsigned local dev uses `greentic-ext-runtime`'s `dev-allow-unsigned` feature +
 `GREENTIC_EXT_ALLOW_UNSIGNED=1`. With the feature off, only native adapters (the audit
 observer) are available and no wasmtime dependency is compiled in.
+
+### End-to-end test (opt-in)
+
+`cargo test -p greentic-sorx --features wasm-extensions-dev-unsigned --test wasm_extension_e2e`
+builds the `tests/fixtures/sorx-e2e-guest` component (needs `cargo-component` + the `wasm32-wasip2`
+target), loads it dev-unsigned (`GREENTIC_EXT_ALLOW_UNSIGNED=1`), and dispatches real control/observe.
+Default CI does not run it.
+
+### Async-safety invariant
+
+`WasmExtensionRuntime::{control,observe}` and `SorxRuntime::invoke` are **synchronous and may block**
+(wasmtime store calls). The HTTP server runs each request on a dedicated `std::thread`, so no async
+reactor is stalled. Any *async* caller of `SorxRuntime::invoke` (or of the adapter directly) MUST
+dispatch on `tokio::task::spawn_blocking`, as the NATS event bridge already does
+(`crates/greentic-sorx-cli/src/event_bridge_invoker.rs`).
