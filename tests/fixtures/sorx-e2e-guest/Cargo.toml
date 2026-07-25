@@ -1,0 +1,23 @@
+[package]
+name = "sorx-e2e-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.41", features = ["bitflags"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[package.metadata.component]
+package = "greentic:sorx-e2e-guest"
+
+[package.metadata.component.target]
+path = "wit"
+
+[package.metadata.component.target.dependencies]
+"greentic:extension-sorx" = { path = "wit/deps/greentic/extension-sorx" }
+"greentic:extension-host" = { path = "wit/deps/greentic/extension-host" }

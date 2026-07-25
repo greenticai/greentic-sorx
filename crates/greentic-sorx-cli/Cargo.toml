@@ -51,11 +51,23 @@ events-nats = [
     "dep:sorx-event-bridge",
 ]
 
+## Enable running WASM extension packs via greentic-ext-runtime (wasmtime-based
+## host for Greentic Designer Extensions), so sorx can dispatch to the
+## sorx-runtime-extension world.
+wasm-extensions = ["dep:greentic-ext-runtime"]
+
+## Dev/test-only: additionally enables greentic-ext-runtime's
+## `dev-allow-unsigned` gate (honors `GREENTIC_EXT_ALLOW_UNSIGNED=1` to skip
+## signature verification). Used by the WASM extension e2e test to load a
+## dev-unsigned guest fixture. Never enable in production builds.
+wasm-extensions-dev-unsigned = ["wasm-extensions", "greentic-ext-runtime/dev-allow-unsigned"]
+
 [dependencies]
 anyhow = { version = "1", optional = true }
 async-nats = { workspace = true, optional = true }
 async-trait = { version = "0.1", optional = true }
 sorx-event-bridge = { path = "../sorx-event-bridge", optional = true }
+greentic-ext-runtime = { git = "https://github.com/greentic-biz/greentic-designer-extensions", rev = "c28e9577dbb3227fe38c20e948b2d8b036fdc26e", optional = true }
 chrono.workspace = true
 ciborium.workspace = true
 clap.workspace = true
