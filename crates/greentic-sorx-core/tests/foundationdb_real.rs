@@ -259,6 +259,7 @@ fn fdb_events_ordered() {
                 subject_entity: "Lease".to_string(),
                 subject_id: "lease-1".to_string(),
                 data: json!({"n": n}),
+                occurred_at: chrono::Utc::now(),
             })
             .expect("append event");
         sequences.push(record.sequence);

@@ -260,6 +260,7 @@ fn memory_provider_implements_canonical_store_contract() {
             subject_entity: "Tenant".to_string(),
             subject_id: "tenant-1".to_string(),
             data: json!({ "source": "test" }),
+            occurred_at: chrono::Utc::now(),
         })
         .unwrap();
     assert_eq!(event.sequence, 1);
@@ -300,6 +301,46 @@ fn memory_provider_implements_canonical_store_contract() {
         })
         .unwrap();
     assert_eq!(evidence.evidence[0]["evidence_id"], "ev-1");
+}
+
+#[test]
+fn append_event_carries_occurred_at() {
+    use chrono::TimeZone;
+
+    let provider = MemoryStoreProvider::new();
+    let namespace = ProviderNamespace {
+        tenant_id: "tenant-a".to_string(),
+        sor_name: "landlord".to_string(),
+    };
+    let when = chrono::Utc.with_ymd_and_hms(2026, 7, 24, 6, 0, 0).unwrap();
+    let record = provider
+        .append_event(AppendEventOp {
+            namespace,
+            stream: "tenant-1".to_string(),
+            event_type: "tenant.created".to_string(),
+            capability: None,
+            producer: None,
+            subject_entity: "Tenant".to_string(),
+            subject_id: "tenant-1".to_string(),
+            data: json!({ "source": "test" }),
+            occurred_at: when,
+        })
+        .unwrap();
+    assert_eq!(record.occurred_at, when);
+}
+
+#[test]
+fn append_event_op_deserializes_without_occurred_at() {
+    let json = json!({
+        "namespace": { "tenant_id": "tenant-a", "sor_name": "landlord" },
+        "stream": "tenant-1",
+        "event_type": "tenant.created",
+        "subject_entity": "Tenant",
+        "subject_id": "tenant-1",
+        "data": { "source": "test" }
+    });
+    let op: AppendEventOp = serde_json::from_value(json).expect("deser");
+    assert_eq!(op.occurred_at.timestamp(), 0);
 }
 
 #[test]
@@ -412,6 +453,7 @@ fn foundationdb_adapter_persists_store_operations() {
             subject_entity: "Tenant".to_string(),
             subject_id: "tenant-1".to_string(),
             data: json!({"active": true}),
+            occurred_at: chrono::Utc::now(),
         })
         .unwrap();
 
@@ -664,6 +706,7 @@ fn restart_preserves_entities() {
                 subject_entity: "Tenant".to_string(),
                 subject_id: "tenant-1".to_string(),
                 data: json!({ "source": "test" }),
+                occurred_at: chrono::Utc::now(),
             })
             .unwrap();
         provider

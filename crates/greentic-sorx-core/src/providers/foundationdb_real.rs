@@ -623,6 +623,7 @@ impl SorxCanonicalStore for FoundationDbStore {
             let subject_entity = op.subject_entity;
             let subject_id = op.subject_id;
             let data = op.data;
+            let occurred_at = op.occurred_at;
 
             self.db
                 .run(|trx, _| {
@@ -664,6 +665,7 @@ impl SorxCanonicalStore for FoundationDbStore {
                             data: data.clone(),
                             envelope,
                             sequence,
+                            occurred_at,
                         };
                         let ekey = event_key(&namespace, &stream, sequence);
                         let encoded =
