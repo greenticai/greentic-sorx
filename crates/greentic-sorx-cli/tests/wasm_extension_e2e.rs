@@ -63,6 +63,7 @@ fn binding() -> RuntimeExtensionBinding {
 }
 
 #[test]
+#[ignore = "requires cargo-component + the wasm32-wasip2 target; run explicitly with -- --ignored"]
 fn guest_control_and_observe_execute_end_to_end() {
     let wasm = guest_wasm();
     let root = tempfile::TempDir::new().unwrap();

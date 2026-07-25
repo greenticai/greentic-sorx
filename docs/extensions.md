@@ -40,10 +40,11 @@ observer) are available and no wasmtime dependency is compiled in.
 
 ### End-to-end test (opt-in)
 
-`cargo test -p greentic-sorx --features wasm-extensions-dev-unsigned --test wasm_extension_e2e`
+`cargo test -p greentic-sorx --features wasm-extensions-dev-unsigned --test wasm_extension_e2e -- --ignored`
 builds the `tests/fixtures/sorx-e2e-guest` component (needs `cargo-component` + the `wasm32-wasip2`
 target), loads it dev-unsigned (`GREENTIC_EXT_ALLOW_UNSIGNED=1`), and dispatches real control/observe.
-Default CI does not run it.
+The test is `#[ignore]`d so `--all-features` CI jobs (which lack `cargo-component`) skip it by
+default; run it explicitly with `-- --ignored` as shown above.
 
 ### Async-safety invariant
 
