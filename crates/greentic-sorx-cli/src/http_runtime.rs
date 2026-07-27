@@ -119,6 +119,12 @@ pub struct HttpRuntime {
     routes: Arc<RouteList>,
     tools: Arc<McpToolList>,
     business_actions: Arc<Option<BusinessActionAssets>>,
+    /// Raw `agent-gateway.json` manifest the pack shipped (the same document
+    /// used to build `runtime.router` via `EndpointRouter::from_agent_gateway`
+    /// at construction). Retained so agent-endpoint capability discovery can
+    /// read fields (title/intent/exports/...) that don't survive parsing into
+    /// [`EndpointDefinition`].
+    agent_gateway_json: Arc<Value>,
     manager_title: Arc<String>,
     manager_description: Arc<String>,
     manager_record_descriptions: Arc<BTreeMap<String, String>>,
@@ -273,6 +279,7 @@ impl HttpRuntime {
             routes: Arc::new(routes),
             tools: Arc::new(tools),
             business_actions: Arc::new(pack.sorla_assets.business_actions.clone()),
+            agent_gateway_json: Arc::new(pack.sorla_assets.agent_gateway_json.clone()),
             manager_title: Arc::new(manager_title),
             manager_description: Arc::new(manager_description),
             manager_record_descriptions: Arc::new(manager_record_descriptions),
@@ -1110,6 +1117,7 @@ impl HttpRuntime {
         capabilities
             .offers
             .extend(self.business_event_topic_offers());
+        capabilities.offers.extend(self.agent_endpoint_offers());
         capabilities
     }
 
@@ -1226,6 +1234,44 @@ impl HttpRuntime {
             .collect()
     }
 
+    /// Agent-endpoint capability offers — one per entry in the pack's
+    /// `agent-gateway.json` manifest (the same document that built
+    /// `runtime.router`). Every agent-endpoint is advertised uniformly, not
+    /// only the subset that happens to back a [`BusinessAction`]: a
+    /// `BusinessAction.execution` reference is pure lineage metadata and is
+    /// never part of the execution path, so agent-endpoints stand on their
+    /// own here (mirrors `business_action_offers`).
+    fn agent_endpoint_offers(&self) -> Vec<CapabilityOffer> {
+        let Some(endpoints) = self
+            .agent_gateway_json
+            .get("endpoints")
+            .and_then(Value::as_array)
+        else {
+            return Vec::new();
+        };
+        endpoints
+            .iter()
+            .filter_map(|entry| {
+                let endpoint_id = json_string_field(entry, "endpoint_id")
+                    .or_else(|| json_string_field(entry, "id"))?;
+                Some(CapabilityOffer {
+                    capability: agent_endpoint_capability(
+                        &self.runtime.pack.name,
+                        endpoint_id,
+                        &self.runtime.pack.version,
+                    ),
+                    contracts: vec!["greentic.sorx.agent-endpoint.invoke.v1".to_string()],
+                    metadata: Some(agent_endpoint_offer_metadata(
+                        &self.runtime.pack.name,
+                        &self.runtime.pack.version,
+                        endpoint_id,
+                        entry,
+                    )),
+                })
+            })
+            .collect()
+    }
+
     /// Resolve the effective policy roles for an HTTP-sourced invocation.
     ///
     /// Security gate: when the admin roles overlay is configured it is the
@@ -1268,11 +1314,7 @@ impl HttpRuntime {
             );
         };
         let Some(action) = self.find_business_action_by_capability(capability) else {
-            return error_response(
-                404,
-                "RUNTIME_CAPABILITY_NOT_FOUND",
-                "capability does not resolve to a business action",
-            );
+            return self.invoke_agent_endpoint_capability(request, capability, &body);
         };
         let Some(endpoint) = self.execution_endpoint(action) else {
             return error_response(
@@ -1393,6 +1435,141 @@ impl HttpRuntime {
                     "schema": "greentic.sorx.capability-invoke-result.v1",
                     "capability": capability,
                     "action_ref": capability_action_ref_json(action, self.locked_contract_hash(action)),
+                    "status": format!("{:?}", result.status).to_ascii_lowercase(),
+                    "result": result.output,
+                    "events": result.events
+                }),
+            ),
+            Err(err) => sorx_error_response(400, err),
+        }
+    }
+
+    /// Invoke an agent-endpoint capability (`cap://greentic/agent-endpoints/...`).
+    /// Reached from `invoke_capability` when the capability does not resolve
+    /// to a [`BusinessAction`]. Mirrors the business-action invoke path's
+    /// request-building (dry-run, tenant/caller/role resolution,
+    /// approval/risk gating, error mapping) but executes the endpoint
+    /// directly — there is no backing action, contract-hash lock, or
+    /// idempotency struct for an agent-endpoint, so the response carries the
+    /// endpoint id/version + invoke result instead of an `action_ref`.
+    fn invoke_agent_endpoint_capability(
+        &self,
+        request: &HttpRequest,
+        capability: &str,
+        body: &Value,
+    ) -> HttpResponse {
+        let Some(endpoint) = self.find_router_endpoint_by_agent_endpoint_capability(capability)
+        else {
+            return error_response(
+                404,
+                "RUNTIME_CAPABILITY_NOT_FOUND",
+                "capability does not resolve to a business action or agent endpoint",
+            );
+        };
+        let values = body.get("input").cloned().unwrap_or_else(|| json!({}));
+        let idempotency_key = body
+            .get("idempotency_key")
+            .or_else(|| {
+                body.get("options")
+                    .and_then(|options| options.get("idempotency_key"))
+            })
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let dry_run = body
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let policy_decision = self.runtime.policy.decide(endpoint);
+        if dry_run {
+            return json_response(
+                200,
+                json!({
+                    "valid": true,
+                    "capability": capability,
+                    "canonical_payload": values,
+                    "policy_decision": policy_decision_label(&policy_decision.action),
+                    "approval_required": matches!(policy_decision.action, PolicyAction::RequireApproval),
+                    "execution_target": {
+                        "endpoint_id": endpoint.endpoint_id,
+                        "operation_id": endpoint.operation_id
+                    }
+                }),
+            );
+        }
+        let context = body.get("context").and_then(Value::as_object);
+        let tenant_id = context
+            .and_then(|context| context.get("tenant_id").and_then(Value::as_str))
+            .or_else(|| body.get("tenant_id").and_then(Value::as_str))
+            .or_else(|| {
+                request
+                    .headers
+                    .get("x-greentic-tenant-id")
+                    .map(String::as_str)
+            })
+            .unwrap_or(&self.runtime.config.tenant_id)
+            .to_string();
+        let caller_id = context
+            .and_then(|context| context.get("caller_id").and_then(Value::as_str))
+            .or_else(|| body.get("caller_id").and_then(Value::as_str))
+            .or_else(|| {
+                request
+                    .headers
+                    .get("x-greentic-caller-id")
+                    .map(String::as_str)
+            })
+            .unwrap_or("capability")
+            .to_string();
+        let body_roles = context
+            .and_then(|context| context.get("roles"))
+            .and_then(string_array);
+        let roles = self.effective_request_roles(request, &tenant_id, body_roles);
+        let invocation = EndpointInvocation {
+            tenant_id,
+            endpoint_id: endpoint.endpoint_id.clone(),
+            operation_id: endpoint.operation_id.clone(),
+            input: values,
+            caller: CallerContext {
+                subject: caller_id,
+                roles,
+            },
+            idempotency_key,
+            source: InvocationSource::Direct,
+        };
+        match self.runtime.invoke(invocation) {
+            Ok(result) if result.status == EndpointStatus::ApprovalRequired => json_response(
+                202,
+                json!({
+                    "ok": false,
+                    "status": "approval_required",
+                    "capability": capability,
+                    "approval": result.output["approval"]
+                }),
+            ),
+            Ok(result) if result.status == EndpointStatus::Denied => json_response(
+                403,
+                json!({
+                    "ok": false,
+                    "error": {
+                        "code": "RUNTIME_CAPABILITY_DENIED",
+                        "message": result.output["reason"].as_str().unwrap_or("capability invocation denied"),
+                        "details": result.output
+                    }
+                }),
+            ),
+            Ok(result) => json_response(
+                200,
+                json!({
+                    "ok": true,
+                    "schema": "greentic.sorx.agent-endpoint-invoke-result.v1",
+                    "capability": capability,
+                    "endpoint": {
+                        "id": endpoint.endpoint_id,
+                        "operation_id": endpoint.operation_id,
+                        "pack": {
+                            "name": self.runtime.pack.name,
+                            "version": self.runtime.pack.version
+                        }
+                    },
                     "status": format!("{:?}", result.status).to_ascii_lowercase(),
                     "result": result.output,
                     "events": result.events
@@ -3055,6 +3232,24 @@ impl HttpRuntime {
             return self.runtime.router.endpoints.get(&tool.endpoint_id);
         }
         None
+    }
+
+    /// Resolve a `cap://greentic/agent-endpoints/<pack>/<endpoint_id>/v<ver>`
+    /// capability to its router-compiled [`EndpointDefinition`] — the same
+    /// definition `EndpointRouter::from_agent_gateway` produced from the
+    /// pack's `agent-gateway.json` at construction, and the same map
+    /// `execution_endpoint`/`match_endpoint` read. Returns `None` for a
+    /// malformed capability, the wrong namespace, a pack mismatch, or an
+    /// endpoint id the router doesn't know about.
+    fn find_router_endpoint_by_agent_endpoint_capability(
+        &self,
+        capability: &str,
+    ) -> Option<&EndpointDefinition> {
+        let (pack, endpoint_id) = parse_agent_endpoint_capability(capability)?;
+        if pack != clean_capability_segment(&self.runtime.pack.name) {
+            return None;
+        }
+        self.runtime.router.endpoints.get(&endpoint_id)
     }
 
     fn match_endpoint(
@@ -7411,6 +7606,89 @@ fn business_event_capability(pack_name: &str, event_type: &str) -> String {
         clean_capability_segment(pack_name),
         clean_capability_segment(event_type)
     )
+}
+
+/// Namespace prefix for agent-endpoint capabilities, parallel to
+/// `business_action_capability`'s `cap://greentic/business-functions/...`.
+const AGENT_ENDPOINT_CAPABILITY_PREFIX: &str = "cap://greentic/agent-endpoints/";
+
+fn agent_endpoint_capability(pack_name: &str, endpoint_id: &str, pack_version: &str) -> String {
+    format!(
+        "{AGENT_ENDPOINT_CAPABILITY_PREFIX}{}/{}/v{}",
+        clean_capability_segment(pack_name),
+        clean_capability_segment(endpoint_id),
+        clean_capability_segment(pack_version)
+    )
+}
+
+/// Parse a `cap://greentic/agent-endpoints/<pack>/<endpoint_id>/v<version>`
+/// capability into its `(pack, endpoint_id)` segments. Returns `None` for the
+/// wrong namespace, a wrong segment count, or any empty segment — never
+/// panics on malformed input.
+fn parse_agent_endpoint_capability(capability: &str) -> Option<(String, String)> {
+    let rest = capability.strip_prefix(AGENT_ENDPOINT_CAPABILITY_PREFIX)?;
+    let mut segments = rest.split('/');
+    let pack = segments.next()?;
+    let endpoint_id = segments.next()?;
+    let version = segments.next()?;
+    if pack.is_empty() || endpoint_id.is_empty() || !version.starts_with('v') {
+        return None;
+    }
+    // Guard segment count: exactly `<pack>/<endpoint_id>/v<version>`, nothing more.
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((pack.to_string(), endpoint_id.to_string()))
+}
+
+/// Reads a string field from a raw agent-gateway endpoint JSON entry, the
+/// same shape `EndpointRouter::from_agent_gateway` parses (`endpoint_id`/`id`
+/// fallback, etc.), without failing the whole offer when a field is absent.
+fn json_string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+/// Builds the `metadata` payload for one agent-endpoint capability offer.
+/// Only fields actually present on the raw `agent-gateway.json` entry are
+/// included — this manifest shape is looser than [`EndpointDefinition`]
+/// (e.g. `title`/`intent`/`exports` never survive router parsing), so we
+/// read directly off the raw JSON entry rather than the parsed endpoint.
+fn agent_endpoint_offer_metadata(
+    pack_name: &str,
+    pack_version: &str,
+    endpoint_id: &str,
+    entry: &Value,
+) -> Value {
+    let mut endpoint_meta = Map::new();
+    endpoint_meta.insert("id".to_string(), json!(endpoint_id));
+    for field in ["title", "intent", "risk", "method", "path", "approval"] {
+        if let Some(value) = entry.get(field) {
+            endpoint_meta.insert(field.to_string(), value.clone());
+        }
+    }
+    if let Some(operation_id) =
+        json_string_field(entry, "operation_id").or_else(|| json_string_field(entry, "operationId"))
+    {
+        endpoint_meta.insert("operation_id".to_string(), json!(operation_id));
+    }
+
+    let mut metadata = Map::new();
+    metadata.insert("kind".to_string(), json!("agent_endpoint"));
+    metadata.insert(
+        "pack".to_string(),
+        json!({ "name": pack_name, "version": pack_version }),
+    );
+    metadata.insert("endpoint".to_string(), Value::Object(endpoint_meta));
+    if let Some(input_schema) = entry.get("input_schema") {
+        metadata.insert("input_schema".to_string(), input_schema.clone());
+    }
+    if let Some(output_schema) = entry.get("output_schema") {
+        metadata.insert("output_schema".to_string(), output_schema.clone());
+    }
+    if let Some(exports) = entry.get("exports") {
+        metadata.insert("exports".to_string(), exports.clone());
+    }
+    Value::Object(metadata)
 }
 
 fn clean_capability_segment(value: &str) -> String {
@@ -11808,6 +12086,238 @@ mod tests {
             command_offer.unwrap().metadata.as_ref().unwrap()["topic"],
             expected_topic,
             "command-event offer must carry the canonical topic string"
+        );
+    }
+
+    #[test]
+    fn agent_endpoint_capability_round_trips_through_parser() {
+        let capability = agent_endpoint_capability("landlord-tenant-sor", "tenant.get", "0.1.0");
+        assert_eq!(
+            capability,
+            "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0"
+        );
+        assert_eq!(
+            parse_agent_endpoint_capability(&capability),
+            Some(("landlord-tenant-sor".to_string(), "tenant.get".to_string()))
+        );
+    }
+
+    #[test]
+    fn agent_endpoint_capability_builder_sanitizes_segments() {
+        // Mirrors `clean_capability_segment`'s behavior via `business_action_capability`:
+        // disallowed characters become `-`, and the sanitized segment still parses back.
+        let capability = agent_endpoint_capability("pack name!", "endpoint/id", "1.0.0-rc 1");
+        assert_eq!(
+            capability,
+            "cap://greentic/agent-endpoints/pack-name/endpoint-id/v1.0.0-rc-1"
+        );
+        assert_eq!(
+            parse_agent_endpoint_capability(&capability),
+            Some(("pack-name".to_string(), "endpoint-id".to_string()))
+        );
+    }
+
+    #[test]
+    fn agent_endpoint_capability_parser_rejects_malformed_or_wrong_namespace() {
+        // Wrong namespace (business-functions, not agent-endpoints).
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/business-functions/pack/action/v1.0.0"),
+            None
+        );
+        // Missing segments.
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/agent-endpoints/pack/endpoint"),
+            None
+        );
+        // Too many segments.
+        assert_eq!(
+            parse_agent_endpoint_capability(
+                "cap://greentic/agent-endpoints/pack/endpoint/v1.0.0/extra"
+            ),
+            None
+        );
+        // Version segment missing the `v` prefix.
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/agent-endpoints/pack/endpoint/1.0.0"),
+            None
+        );
+        // Empty pack segment.
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/agent-endpoints//endpoint/v1.0.0"),
+            None
+        );
+        // Not a capability URI at all.
+        assert_eq!(parse_agent_endpoint_capability("not-a-capability"), None);
+    }
+
+    #[test]
+    fn capability_discovery_includes_agent_endpoint_offer() {
+        let runtime = runtime("local");
+        let capabilities = request(&runtime, "GET", "/admin/v1/capabilities", &[], "");
+        let offers = capabilities["offers"].as_array().unwrap();
+
+        // `tenant.get` ships no risk/approval/input_schema/output_schema in the
+        // fixture — those keys must be omitted from the offer, not emitted as null.
+        let get_offer = offers
+            .iter()
+            .find(|offer| {
+                offer["capability"]
+                    == "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0"
+            })
+            .expect("expected an agent_endpoint offer for tenant.get");
+        assert_eq!(get_offer["metadata"]["kind"], "agent_endpoint");
+        assert_eq!(get_offer["metadata"]["pack"]["name"], "landlord-tenant-sor");
+        assert_eq!(get_offer["metadata"]["pack"]["version"], "0.1.0");
+        assert_eq!(get_offer["metadata"]["endpoint"]["id"], "tenant.get");
+        assert_eq!(
+            get_offer["metadata"]["endpoint"]["operation_id"],
+            "tenant.get"
+        );
+        assert_eq!(get_offer["metadata"]["endpoint"]["method"], "GET");
+        assert_eq!(
+            get_offer["metadata"]["endpoint"]["path"],
+            "/v1/agent/tenants/{tenant_id}"
+        );
+        assert!(get_offer["metadata"]["endpoint"].get("risk").is_none());
+        assert!(get_offer["metadata"]["endpoint"].get("approval").is_none());
+        assert!(get_offer["metadata"].get("input_schema").is_none());
+        assert!(get_offer["metadata"].get("output_schema").is_none());
+        assert_eq!(
+            get_offer["contracts"][0],
+            "greentic.sorx.agent-endpoint.invoke.v1"
+        );
+
+        // `tenant.create` carries risk + input_schema in the fixture — confirm
+        // those surface when present.
+        let create_offer = offers
+            .iter()
+            .find(|offer| {
+                offer["capability"]
+                    == "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.create/v0.1.0"
+            })
+            .expect("expected an agent_endpoint offer for tenant.create");
+        assert_eq!(create_offer["metadata"]["endpoint"]["risk"], "medium");
+        assert!(create_offer["metadata"]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn capability_invoke_executes_agent_endpoint_and_matches_direct_route() {
+        let runtime = runtime("local");
+        let capability = "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0";
+
+        let created = request(
+            &runtime,
+            "POST",
+            "/v1/agent/tenants/create",
+            &tenant_headers(),
+            &json!({ "id": "tenant-agent-cap-1", "name": "Agent Cap", "active": true }).to_string(),
+        );
+        assert_eq!(created["ok"], true);
+
+        let via_capability = request(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": capability,
+                "input": { "id": "tenant-agent-cap-1" },
+                "context": {
+                    "tenant_id": "tenant-a",
+                    "caller_id": "capability-client",
+                    "roles": ["local"]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(via_capability["ok"], true);
+        assert_eq!(
+            via_capability["schema"],
+            "greentic.sorx.agent-endpoint-invoke-result.v1"
+        );
+        assert_eq!(via_capability["capability"], capability);
+        assert_eq!(via_capability["endpoint"]["id"], "tenant.get");
+        assert_eq!(via_capability["endpoint"]["operation_id"], "tenant.get");
+        assert_eq!(
+            via_capability["endpoint"]["pack"]["name"],
+            "landlord-tenant-sor"
+        );
+        assert_eq!(via_capability["endpoint"]["pack"]["version"], "0.1.0");
+
+        let via_direct_route = request(
+            &runtime,
+            "GET",
+            "/v1/agent/tenants/tenant-agent-cap-1",
+            &tenant_headers(),
+            "",
+        );
+        assert_eq!(via_direct_route["ok"], true);
+        assert_eq!(via_capability["result"], via_direct_route["result"]);
+    }
+
+    #[test]
+    fn capability_invoke_agent_endpoint_dry_run_reports_execution_target() {
+        let runtime = runtime("local");
+        let capability = "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0";
+        let dry_run = request(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": capability,
+                "dry_run": true,
+                "input": { "id": "tenant-agent-cap-2" }
+            })
+            .to_string(),
+        );
+        assert_eq!(dry_run["valid"], true);
+        assert_eq!(dry_run["execution_target"]["endpoint_id"], "tenant.get");
+        assert_eq!(dry_run["execution_target"]["operation_id"], "tenant.get");
+    }
+
+    #[test]
+    fn capability_invoke_unknown_agent_endpoint_capability_is_404() {
+        let runtime = runtime("local");
+        let response = response(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability":
+                    "cap://greentic/agent-endpoints/landlord-tenant-sor/does-not-exist/v0.1.0",
+                "input": {}
+            })
+            .to_string(),
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response.body["error"]["code"],
+            "RUNTIME_CAPABILITY_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn capability_invoke_capability_from_other_pack_namespace_is_404() {
+        let runtime = runtime("local");
+        // Well-formed agent-endpoint capability, but for a different pack —
+        // must not resolve against this runtime's router.
+        let response = response(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": "cap://greentic/agent-endpoints/some-other-pack/tenant.get/v0.1.0",
+                "input": {}
+            })
+            .to_string(),
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response.body["error"]["code"],
+            "RUNTIME_CAPABILITY_NOT_FOUND"
         );
     }
 
