@@ -36,6 +36,7 @@ mod mcp_auth;
 mod mcp_jsonrpc;
 #[cfg(feature = "events-nats")]
 pub mod nats_events;
+mod presence_publish;
 mod test_runtime;
 mod validation;
 #[cfg(feature = "wasm-extensions")]
@@ -3695,6 +3696,8 @@ fn run_start(
             .map_err(|err| CliError::answers(err.to_string()))?;
         let bind = config.server.bind.clone();
         let public_base_url = config.server.public_base_url.clone();
+        let presence_tenant_id = config.tenant_id.clone();
+        let presence_environment = config.environment.clone();
         let initial_runtime_config =
             load_initial_runtime_config(&config.environment, context)?.map(|(_, config)| config);
         // Only enable the HTTP registry API when the operator explicitly opts
@@ -3741,6 +3744,28 @@ fn run_start(
         if server_registry_path.is_some() {
             eprintln!("Sorx deployment registry API: {base_url}/v1/sorx/routing-table");
         }
+        // Opt-in, default-OFF: when SORX_PRESENCE_NATS_URL is set (and this
+        // binary was built with the `presence-nats` feature), publish a
+        // best-effort SorxPresence boot announcement on
+        // `greentic.presence.<tenant>.sorx.<sor>` so NATS-based consumers can
+        // discover this instance without a directory lookup (push-discovery,
+        // epic #3 producer half). Building the presence payload itself is
+        // cheap and unconditional; publishing is a no-op when the feature is
+        // off or the env var is unset, and any connect/publish failure only
+        // logs a warning — HTTP serving is never affected.
+        let presence_subject =
+            presence_publish::presence_subject(&presence_tenant_id, &pack.pack_name);
+        let presence = presence_publish::build_presence(
+            &presence_tenant_id,
+            &presence_environment,
+            &pack.pack_name,
+            &pack.pack_version,
+            &base_url,
+            public_base_url.is_some(),
+            server.runtime_capabilities(),
+            chrono::Utc::now().to_rfc3339(),
+        );
+        presence_publish::publish_presence_on_boot(presence, presence_subject);
         // Opt-in, default-OFF: when GREENTIC_EVENTS_NATS_URL is set, start the
         // NATS event bridge so the runtime can be driven over the events fabric
         // (greentic.sorla.request.v1 -> response.v1) alongside HTTP. The bridge

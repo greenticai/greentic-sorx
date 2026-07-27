@@ -51,6 +51,15 @@ events-nats = [
     "dep:sorx-event-bridge",
 ]
 
+## Enable the best-effort boot-time SorxPresence NATS publish hook (epic #3
+## push-discovery producer half). Adds async-nats + tokio. The hook activates
+## at runtime only when SORX_PRESENCE_NATS_URL is set; otherwise it is a no-op.
+## Default-off.
+presence-nats = [
+    "dep:async-nats",
+    "dep:tokio",
+]
+
 ## Enable running WASM extension packs via greentic-ext-runtime (wasmtime-based
 ## host for Greentic Designer Extensions), so sorx can dispatch to the
 ## sorx-runtime-extension world.

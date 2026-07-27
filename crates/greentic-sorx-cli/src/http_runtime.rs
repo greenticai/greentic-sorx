@@ -1104,7 +1104,7 @@ impl HttpRuntime {
         }
     }
 
-    fn runtime_capabilities(&self) -> RuntimeCapabilities {
+    pub(crate) fn runtime_capabilities(&self) -> RuntimeCapabilities {
         let mut capabilities = RuntimeCapabilities::sorx_runtime_host();
         capabilities.offers.extend(self.business_action_offers());
         capabilities
