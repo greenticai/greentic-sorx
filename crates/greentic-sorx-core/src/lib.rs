@@ -20,6 +20,7 @@ mod model;
 mod native_extensions;
 mod ontology_graph;
 mod policy;
+pub mod presence;
 mod provider;
 mod provider_compatibility;
 pub mod providers;
