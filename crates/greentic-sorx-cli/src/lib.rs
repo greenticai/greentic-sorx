@@ -3766,6 +3766,31 @@ fn run_start(
             chrono::Utc::now().to_rfc3339(),
         );
         presence_publish::publish_presence_on_boot(presence, presence_subject);
+        // Opt-in, default-OFF: when SORX_PRESENCE_NATS_URL is set (same gate
+        // as the boot announcement above) and the heartbeat is not disabled
+        // via SORX_PRESENCE_HEARTBEAT_SECS=0, periodically re-publish a
+        // presence (with a fresh ts on every tick) so consumers' soft-state
+        // directories don't evict this still-live instance. Best-effort,
+        // like the boot publish: `spawn_presence_heartbeat_if_enabled` is
+        // always compiled (its "enabled" check and the actual NATS/tokio
+        // work behind it are `presence-nats`-gated internally with a no-op
+        // stub), so this call site stays feature-agnostic. Rebuilding the
+        // presence template here (rather than cloning the one just consumed
+        // above) keeps that boot-publish path byte-for-byte unchanged when
+        // the feature is off or the env var is unset.
+        presence_publish::spawn_presence_heartbeat_if_enabled(
+            presence_publish::build_presence(
+                &presence_tenant_id,
+                &presence_environment,
+                &pack.pack_name,
+                &pack.pack_version,
+                &base_url,
+                public_base_url.is_some(),
+                server.runtime_capabilities(),
+                chrono::Utc::now().to_rfc3339(),
+            ),
+            presence_publish::presence_subject(&presence_tenant_id, &pack.pack_name),
+        );
         // Opt-in, default-OFF: when GREENTIC_EVENTS_NATS_URL is set, start the
         // NATS event bridge so the runtime can be driven over the events fabric
         // (greentic.sorla.request.v1 -> response.v1) alongside HTTP. The bridge
