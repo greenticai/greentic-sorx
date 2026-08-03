@@ -23,6 +23,7 @@ jobs:
   dev-prepare:
     uses: greenticai/.github/.github/workflows/dev-prepare.yml@main
     with:
+      all-features: false
       require-pre-release: true
 
   dev-binaries-greentic-sorx:
