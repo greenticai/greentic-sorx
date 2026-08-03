@@ -48,9 +48,18 @@ jobs:
           # rust-cache restores ~/.cargo/.crates.toml but prunes ~/.cargo/bin of
           # binstall-installed binaries, so binstall says "already installed"
           # while the binary is gone. --force sidesteps that.
-          cargo binstall -y --force cargo-nextest
-          cargo binstall -y --force cargo-llvm-cov
-          cargo binstall -y --force greentic-dev
+          #
+          # --disable-strategies compile: on an api.github.com 403 (anonymous
+          # rate limit, or a token that ran out of budget) binstall does not
+          # fail -- it silently falls back to `cargo install <tool>` WITHOUT
+          # --locked. cargo-nextest carries a deliberate compile_error!
+          # rejecting exactly that, so the job burns ~11 minutes compiling and
+          # then exits 70 looking like a Rust build break. Disabling the
+          # compile strategy turns that into an immediate, honest failure.
+          # All three tools ship prebuilt binaries, so the fast path is intact.
+          cargo binstall -y --force --disable-strategies compile cargo-nextest
+          cargo binstall -y --force --disable-strategies compile cargo-llvm-cov
+          cargo binstall -y --force --disable-strategies compile greentic-dev
           command -v cargo-nextest
           command -v cargo-llvm-cov
           greentic-dev --version
