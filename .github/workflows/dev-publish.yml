@@ -38,7 +38,7 @@ jobs:
     uses: greenticai/.github/.github/workflows/dev-publish.yml@main
     with:
       version: ${{ needs.dev-prepare.outputs.version }}
-      crates: "greentic-sorx-core greentic-sorx-pack greentic-sorx"
+      crates: "greentic-sorx-core greentic-sorx-pack"
       binary-version: ${{ needs.dev-prepare.outputs.binary-version }}
       binary-crates: "greentic-sorx"
       dual-role-binary-crates: "greentic-sorx"
