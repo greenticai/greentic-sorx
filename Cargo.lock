@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-sorx"
-version = "0.1.9"
+version = "0.2.0-dev.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-sorx-core"
-version = "0.1.9"
+version = "0.2.0-dev.0"
 dependencies = [
  "chrono",
  "foundationdb",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-sorx-pack"
-version = "0.1.9"
+version = "0.2.0-dev.0"
 dependencies = [
  "ciborium",
  "greentic-pack-lib",
@@ -5237,7 +5237,7 @@ dependencies = [
 
 [[package]]
 name = "sorx-event-bridge"
-version = "0.1.9"
+version = "0.2.0-dev.0"
 dependencies = [
  "anyhow",
  "async-nats",
