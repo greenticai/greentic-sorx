@@ -1,5 +1,8 @@
 /target
 .greentic/
+temp_auto_push.bat
 node_modules/
 playwright-report/
 test-results/
+.gitignore
+branch_structure.json
