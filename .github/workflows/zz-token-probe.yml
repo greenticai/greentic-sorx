@@ -1,0 +1,49 @@
+# TEMPORARY diagnostic — delete this file and its branch once the crates.io
+# token question is settled. It publishes nothing and prints no secret: the
+# only things it echoes are an HTTP status and the crates.io login the token
+# resolves to.
+name: crates.io token probe
+
+on:
+  push:
+    branches: [probe/crates-token]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask crates.io who this token is
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "RESULT: secret is EMPTY / not visible to this repo"
+            exit 0
+          fi
+          printf 'RESULT: secret present, length %s\n' "$(printf '%s' "${CARGO_REGISTRY_TOKEN}" | wc -c)"
+          case "${CARGO_REGISTRY_TOKEN}" in
+            *[[:space:]]*) echo "RESULT: secret CONTAINS whitespace" ;;
+            *) echo "RESULT: secret contains no whitespace" ;;
+          esac
+          # crates.io refuses a request whose User-Agent is not descriptive,
+          # with a 403 and a NON-JSON body — indistinguishable from a rejected
+          # token unless you send one. The first run of this probe did not, and
+          # the unauthenticated owners endpoint 403d too, which is the tell.
+          UA="greentic-ci token probe (github.com/greenticai/greentic-sorx)"
+          code=$(curl -s -A "$UA" -o me.json -w '%{http_code}' -H "Authorization: ${CARGO_REGISTRY_TOKEN}" https://crates.io/api/v1/me || echo 000)
+          echo "RESULT: crates.io /me -> HTTP ${code}"
+          echo "RESULT: /me raw body -> $(head -c 200 me.json)"
+          python3 -c "import json;d=json.load(open('me.json'));u=d.get('user') or {};print('RESULT: token belongs to login', repr(u.get('login')), 'id', u.get('id')) if u else print('RESULT: no user in body')" || echo "RESULT: /me body was not JSON"
+
+      - name: Ask crates.io who owns the crates this run failed on
+        run: |
+          set -uo pipefail
+          for c in greentic-sorx-core bundle-standard-core greentic-x-types; do
+            UA="greentic-ci token probe (github.com/greenticai/greentic-sorx)"
+            curl -s -A "$UA" "https://crates.io/api/v1/crates/$c/owners" -o owners.json || true
+            python3 -c "import json;d=json.load(open('owners.json'));print('RESULT: $c owners ->', ', '.join(o['login'] for o in d.get('users',[])) or json.dumps(d)[:160])" || echo "RESULT: $c owners lookup failed"
+          done
