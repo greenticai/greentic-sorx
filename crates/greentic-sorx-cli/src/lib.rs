@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod admin_roles;
+mod answers_source;
 #[cfg(feature = "events-nats")]
 mod event_bridge_invoker;
 mod http_runtime;
@@ -36,6 +37,7 @@ mod mcp_auth;
 mod mcp_jsonrpc;
 #[cfg(feature = "events-nats")]
 pub mod nats_events;
+mod pack_ref;
 mod presence_publish;
 mod test_runtime;
 mod validation;
@@ -295,7 +297,9 @@ pub enum Commands {
     },
     /// Start a SORX runtime from a SoRLa .gtpack and startup answers.
     Start {
-        /// Path to a SoRLa .gtpack archive.
+        /// Path to a SoRLa .gtpack archive, or an `oci://` reference
+        /// (e.g. `oci://registry.example/greentic/sor-landlord:t1@sha256:<hex>`)
+        /// pulled to a local cache before starting.
         pack: PathBuf,
 
         /// Emit the startup answer schema and exit.
@@ -320,7 +324,9 @@ pub enum Commands {
     },
     /// Alias for start.
     Run {
-        /// Path to a SoRLa .gtpack archive.
+        /// Path to a SoRLa .gtpack archive, or an `oci://` reference
+        /// (e.g. `oci://registry.example/greentic/sor-landlord:t1@sha256:<hex>`)
+        /// pulled to a local cache before starting.
         pack: PathBuf,
 
         /// Path to startup answers JSON.
@@ -1063,6 +1069,8 @@ fn dispatch(
                     "start requires --schema or --answers <FILE> in non-interactive mode",
                 ));
             }
+            let answers = answers.map(answers_source::resolve).transpose()?;
+            let pack = pack_ref::materialize(&pack)?;
             run_start(
                 pack,
                 schema,
@@ -1080,6 +1088,8 @@ fn dispatch(
                     "run requires --answers <FILE> in non-interactive mode",
                 ));
             }
+            let answers = answers.map(answers_source::resolve).transpose()?;
+            let pack = pack_ref::materialize(&pack)?;
             run_start(
                 pack,
                 false,
@@ -2677,21 +2687,29 @@ fn ontology_graph_hash(ontology: &greentic_sorx_pack::OntologyAssets) -> String 
 fn normalize_or_prompt_start_answers(
     pack_name: &str,
     start_schema: &serde_json::Value,
-    answers: Option<PathBuf>,
+    answers: Option<answers_source::AnswersSource>,
     context: &SorxCommandContext,
 ) -> CliResult<greentic_sorx_core::SorxNormalizedAnswers> {
     let effective_schema = effective_start_schema(start_schema);
     let mut raw_answers = match answers {
-        Some(path) => {
+        Some(source) => {
+            let path = source.path().to_path_buf();
             let raw = fs::read_to_string(&path).map_err(|err| {
                 CliError::answers(format!("failed to read answers {}: {err}", path.display()))
             })?;
-            serde_json::from_str(&raw).map_err(|err| {
+            let parsed = serde_json::from_str(&raw).map_err(|err| {
                 CliError::answers(format!(
                     "answers {} are invalid JSON: {err}",
                     path.display()
                 ))
-            })?
+            })?;
+            // The answers have now been read into `parsed`; drop the source
+            // here (rather than at the end of `run_start`, or process exit)
+            // so a staged `env:NAME` file and its directory are removed as
+            // soon as they are no longer needed, not for the life of the
+            // running server.
+            drop(source);
+            parsed
         }
         None => serde_json::json!({}),
     };
@@ -3663,7 +3681,7 @@ fn run_mcp_start(pack: PathBuf, answers: PathBuf, context: &SorxCommandContext) 
 fn run_start(
     pack: PathBuf,
     schema: bool,
-    answers: Option<PathBuf>,
+    answers: Option<answers_source::AnswersSource>,
     dry_run: bool,
     emit_answers: bool,
     _json: bool,

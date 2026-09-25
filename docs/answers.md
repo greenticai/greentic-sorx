@@ -37,6 +37,43 @@ Provider entries may include optional ontology/evidence capability metadata:
 Dry-run startup plans use these fields to report provider compatibility for
 ontology-enabled packs.
 
+## OCI packs
+
+`start` (alias `run`) accepts an `oci://` reference in place of a local
+`.gtpack` path, so a container needs no pack volume — the pack is pulled at
+boot:
+
+```bash
+greentic-sorx start oci://registry.example/greentic/sor-landlord:1.0.0@sha256:<digest> \
+  --answers env:SORX_ANSWERS
+```
+
+- **Credentials** are `OCI_USERNAME` / `OCI_PASSWORD` — the same pair
+  greentic-start honours, so one Kubernetes Secret serves both. With no
+  credentials set, the pull is anonymous HTTPS.
+- **Plain HTTP** is used only for hosts listed in
+  `GREENTIC_OCI_INSECURE_REGISTRIES` (comma-separated `host[:port]`), and only
+  when the reference itself pins a digest (`…@sha256:<hex>`) — an unpinned,
+  tag-only reference against a plain-HTTP registry has no transport integrity
+  and is refused before any network call. A digest-pinned reference is
+  verified against the pulled bytes regardless of transport, so a registry
+  that serves something else fails the pull rather than booting a different
+  pack.
+- **The pushed layer's media type** is `application/vnd.greentic.gtpack.v1+zip`.
+- Explicit credentials always win: if `OCI_USERNAME`/`OCI_PASSWORD` are set,
+  the pull stays HTTPS even when `GREENTIC_OCI_INSECURE_REGISTRIES` also
+  names the host, so a credential is never sent over plain HTTP.
+
+## `--answers env:NAME`
+
+`--answers` may name an environment variable instead of a file:
+`--answers env:SORX_ANSWERS` reads the answers JSON from `$SORX_ANSWERS`. The
+value is staged into a uniquely named, owner-only temp file (directory
+`0700`, file `0600`) for the existing file-based answers loader, and that
+file — and its directory — is removed as soon as it has been read. Use it so
+a container carries no answers file on disk; an unset or blank variable is
+refused by name.
+
 ## Postgres store
 
 `providers.store.kind: postgres` keeps records in a Postgres database, used as
