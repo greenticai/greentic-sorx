@@ -11,6 +11,7 @@ use crate::{EndpointDefinition, SorxError, SorxResult};
 pub enum StoreProviderKind {
     Memory,
     FoundationDb,
+    Postgres,
     External(String),
 }
 
@@ -19,6 +20,7 @@ impl StoreProviderKind {
         match value.to_ascii_lowercase().as_str() {
             "memory" => Self::Memory,
             "foundationdb" | "foundation_db" | "foundation-db" => Self::FoundationDb,
+            "postgres" | "postgresql" => Self::Postgres,
             other => Self::External(other.to_string()),
         }
     }
@@ -27,6 +29,7 @@ impl StoreProviderKind {
         match self {
             Self::Memory => "memory",
             Self::FoundationDb => "foundationdb",
+            Self::Postgres => "postgres",
             Self::External(value) => value.as_str(),
         }
     }

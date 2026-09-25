@@ -7337,6 +7337,7 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
                     ))?;
                 registry.register_canonical_store(binding, Arc::new(adapter));
             }
+            StoreProviderKind::Postgres => register_postgres(&mut registry, binding, provider)?,
             StoreProviderKind::External(other) => {
                 return Err(SorxError::new(
                     "provider_unsupported",
@@ -7346,6 +7347,39 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
         }
     }
     Ok(registry)
+}
+
+#[cfg(feature = "postgres")]
+fn register_postgres(
+    registry: &mut ProviderRegistry,
+    binding: &str,
+    provider: &greentic_sorx_core::ProviderBindingConfig,
+) -> SorxResult<()> {
+    let config = greentic_sorx_core::PostgresProviderConfig::from_parts(
+        provider.config_ref.clone(),
+        provider.config.clone(),
+    )?;
+    let store = greentic_sorx_core::PostgresStore::connect(&config)?;
+    registry.register_canonical_store(binding, Arc::new(store));
+    Ok(())
+}
+
+/// Refuses a `postgres` store in a build without the feature, rather than
+/// silently serving from memory: a system of record that forgets its records
+/// on restart is the failure this store kind exists to remove.
+#[cfg(not(feature = "postgres"))]
+fn register_postgres(
+    _registry: &mut ProviderRegistry,
+    binding: &str,
+    _provider: &greentic_sorx_core::ProviderBindingConfig,
+) -> SorxResult<()> {
+    Err(SorxError::new(
+        "provider_unsupported",
+        format!(
+            "provider `{binding}` asks for the postgres store, which this greentic-sorx build \
+             was compiled without (feature `postgres`)"
+        ),
+    ))
 }
 
 /// Apply any migrations declared in the pack's executable-contract against the

@@ -38,6 +38,10 @@ name = "perf"
 harness = false
 
 [features]
+default = ["postgres"]
+## Postgres-backed canonical store (`providers.store.kind: postgres`).
+postgres = ["greentic-sorx-core/postgres"]
+
 ## Enable the NATS-backed business event sink and the async runtime dispatch
 ## (`sorla.call`) event bridge (adds async-nats + tokio + the event-bridge crate).
 ## The business-event sink is wired automatically when events.sink = "nats" in the
