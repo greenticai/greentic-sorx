@@ -28,6 +28,27 @@ fn answers_from_an_unset_variable_fail_naming_the_variable() {
 }
 
 #[test]
+fn the_run_alias_also_resolves_env_answers_naming_the_variable() {
+    // `run` is documented as an alias for `start` and must not drift: it
+    // goes through the same pack_ref::materialize / answers_source::resolve
+    // wiring, so an unset `env:NAME` fails the same way here as it does for
+    // `start`.
+    let out = sorx()
+        .args([
+            "run",
+            "does-not-matter.gtpack",
+            "--answers",
+            "env:SORX_TEST_RUN_UNSET_ANSWERS",
+        ])
+        .env_remove("SORX_TEST_RUN_UNSET_ANSWERS")
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("SORX_TEST_RUN_UNSET_ANSWERS"), "{stderr}");
+}
+
+#[test]
 fn an_unreachable_oci_reference_fails_before_serving() {
     let out = sorx()
         .args([

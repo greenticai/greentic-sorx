@@ -1084,6 +1084,8 @@ fn dispatch(
                     "run requires --answers <FILE> in non-interactive mode",
                 ));
             }
+            let pack = pack_ref::materialize(&pack)?;
+            let answers = answers.map(answers_source::resolve).transpose()?;
             run_start(
                 pack,
                 false,
@@ -2681,21 +2683,29 @@ fn ontology_graph_hash(ontology: &greentic_sorx_pack::OntologyAssets) -> String 
 fn normalize_or_prompt_start_answers(
     pack_name: &str,
     start_schema: &serde_json::Value,
-    answers: Option<PathBuf>,
+    answers: Option<answers_source::AnswersSource>,
     context: &SorxCommandContext,
 ) -> CliResult<greentic_sorx_core::SorxNormalizedAnswers> {
     let effective_schema = effective_start_schema(start_schema);
     let mut raw_answers = match answers {
-        Some(path) => {
+        Some(source) => {
+            let path = source.path().to_path_buf();
             let raw = fs::read_to_string(&path).map_err(|err| {
                 CliError::answers(format!("failed to read answers {}: {err}", path.display()))
             })?;
-            serde_json::from_str(&raw).map_err(|err| {
+            let parsed = serde_json::from_str(&raw).map_err(|err| {
                 CliError::answers(format!(
                     "answers {} are invalid JSON: {err}",
                     path.display()
                 ))
-            })?
+            })?;
+            // The answers have now been read into `parsed`; drop the source
+            // here (rather than at the end of `run_start`, or process exit)
+            // so a staged `env:NAME` file and its directory are removed as
+            // soon as they are no longer needed, not for the life of the
+            // running server.
+            drop(source);
+            parsed
         }
         None => serde_json::json!({}),
     };
@@ -3667,7 +3677,7 @@ fn run_mcp_start(pack: PathBuf, answers: PathBuf, context: &SorxCommandContext) 
 fn run_start(
     pack: PathBuf,
     schema: bool,
-    answers: Option<PathBuf>,
+    answers: Option<answers_source::AnswersSource>,
     dry_run: bool,
     emit_answers: bool,
     _json: bool,
