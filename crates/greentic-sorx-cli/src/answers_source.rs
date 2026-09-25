@@ -1,12 +1,13 @@
 //! `--answers env:NAME` reads the answers JSON from an environment variable,
 //! so a container needs no file for them. Anything else is a file path.
 //!
-//! A value staged from an environment variable is written to a per-process
-//! temp file so the existing file-based answers loader can read it
+//! A value staged from an environment variable is written to a uniquely
+//! named temp file so the existing file-based answers loader can read it
 //! unchanged. That file carries the raw answers payload, so it is created
 //! owner-only (unix: directory `0700`, file `0600`) and removed — file and
-//! directory — as soon as it has been read, via [`AnswersSource`]'s `Drop`
-//! impl. It is never left on disk for the life of a long-running `start`.
+//! directory — as soon as it has been read, when [`AnswersSource`]'s staged
+//! [`tempfile::TempDir`] drops. It is never left on disk for the life of a
+//! long-running `start`.
 
 use std::path::{Path, PathBuf};
 
@@ -16,15 +17,20 @@ use crate::{CliError, CliResult};
 ///
 /// For a plain file path this is a thin wrapper with nothing to clean up.
 /// For a value staged from `env:NAME`, dropping it removes the staged file
-/// and its directory — callers that read the file should do so and then
-/// explicitly `drop` (or otherwise let go of) the value at that point,
-/// rather than holding it until the end of a long-running command.
+/// and its directory (via the held `TempDir`'s own `Drop`) — callers that
+/// read the file should do so and then explicitly `drop` (or otherwise let
+/// go of) the value at that point, rather than holding it until the end of
+/// a long-running command.
 #[derive(Debug)]
 pub(crate) struct AnswersSource {
     path: PathBuf,
-    /// The directory to remove on drop. `None` for a plain file path, which
-    /// this type does not own and must not delete.
-    staged_dir: Option<PathBuf>,
+    /// Kept alive only so its directory is removed when this drops; `None`
+    /// for a plain file path, which this type does not own and must not
+    /// delete. Each call to `resolve` that stages a value gets its OWN
+    /// uniquely named directory (via `tempfile`), so two concurrent staged
+    /// answers — e.g. two tests in one process — can never collide on one
+    /// path and race each other's cleanup.
+    _staged: Option<tempfile::TempDir>,
 }
 
 impl AnswersSource {
@@ -33,20 +39,12 @@ impl AnswersSource {
     }
 }
 
-impl Drop for AnswersSource {
-    fn drop(&mut self) {
-        if let Some(dir) = &self.staged_dir {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
-}
-
 /// Resolve an `--answers` argument to a readable answers source.
 pub(crate) fn resolve(raw: PathBuf) -> CliResult<AnswersSource> {
     let Some(name) = raw.to_str().and_then(|text| text.strip_prefix("env:")) else {
         return Ok(AnswersSource {
             path: raw,
-            staged_dir: None,
+            _staged: None,
         });
     };
     let value = std::env::var(name)
@@ -57,33 +55,41 @@ pub(crate) fn resolve(raw: PathBuf) -> CliResult<AnswersSource> {
                 "--answers names the environment variable `{name}`, which is unset or empty"
             ))
         })?;
-    let dir = std::env::temp_dir().join(format!("greentic-sorx-answers-{}", std::process::id()));
-    create_staging_dir(&dir)
+    let dir = create_staging_dir()
         .map_err(|err| CliError::runtime(format!("cannot stage answers: {err}")))?;
-    let path = dir.join("answers.json");
+    let path = dir.path().join("answers.json");
     write_staged_answers(&path, &value)
         .map_err(|err| CliError::runtime(format!("cannot stage answers: {err}")))?;
     Ok(AnswersSource {
         path,
-        staged_dir: Some(dir),
+        _staged: Some(dir),
     })
 }
 
-/// Create the staging directory owner-only (`0700` on unix). Not-unix has no
-/// portable owner-only directory mode, so it falls back to the platform
-/// default.
+/// Create a uniquely named staging directory, owner-only (`0700`) on unix.
+///
+/// `tempfile::Builder` (rather than a fixed, pid-keyed path) is what makes
+/// this safe to call more than once per process: `std::process::id()` is
+/// stable for the whole process, so a fixed `greentic-sorx-answers-<pid>`
+/// path staged by two calls in one process — e.g. two tests running under
+/// the default parallel test harness — resolves to the SAME directory, and
+/// the first one to finish removes it out from under the other. A `tempfile`
+/// directory carries its own random suffix, so each call gets its own path
+/// regardless of how many run concurrently in this process.
 #[cfg(unix)]
-fn create_staging_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
+fn create_staging_dir() -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .prefix("greentic-sorx-answers-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
 }
 
 #[cfg(not(unix))]
-fn create_staging_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
+fn create_staging_dir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("greentic-sorx-answers-")
+        .tempdir()
 }
 
 /// Write the staged answers file owner-only (`0600` on unix), rather than
@@ -211,6 +217,40 @@ mod tests {
         // SAFETY: test-only; see above.
         unsafe {
             std::env::remove_var("SORX_ANSWERS_SOURCE_TEST_PERMS");
+        }
+    }
+
+    /// Regression for the staging-path collision: two calls in one process
+    /// must never resolve to the same directory. Before `tempfile` replaced
+    /// the fixed `greentic-sorx-answers-<pid>` path, this raced with any
+    /// other test staging a value at the same time under the default
+    /// parallel test harness — one call's `Drop` could delete the other's
+    /// still-in-use file.
+    #[test]
+    fn two_concurrent_staged_sources_never_share_a_directory() {
+        // SAFETY: test-only; see above.
+        unsafe {
+            std::env::set_var("SORX_ANSWERS_SOURCE_TEST_COLLISION_A", "{\"a\":1}");
+            std::env::set_var("SORX_ANSWERS_SOURCE_TEST_COLLISION_B", "{\"b\":2}");
+        }
+        let a =
+            resolve(PathBuf::from("env:SORX_ANSWERS_SOURCE_TEST_COLLISION_A")).expect("staged a");
+        let b =
+            resolve(PathBuf::from("env:SORX_ANSWERS_SOURCE_TEST_COLLISION_B")).expect("staged b");
+        assert_ne!(
+            a.path().parent(),
+            b.path().parent(),
+            "two staged answers must not share a directory"
+        );
+        // Dropping `a` must not disturb `b`, which is exactly the failure
+        // mode a shared pid-keyed directory produced.
+        drop(a);
+        let staged = std::fs::read_to_string(b.path()).expect("b must still be readable");
+        assert_eq!(staged, "{\"b\":2}");
+        // SAFETY: test-only; see above.
+        unsafe {
+            std::env::remove_var("SORX_ANSWERS_SOURCE_TEST_COLLISION_A");
+            std::env::remove_var("SORX_ANSWERS_SOURCE_TEST_COLLISION_B");
         }
     }
 }
