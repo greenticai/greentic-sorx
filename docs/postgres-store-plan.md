@@ -49,10 +49,14 @@ is, never retried.
 
 ### Code layout
 
-Two deliberate differences from the FoundationDB store, both in the shared
-`kv` module. First, an update clears the unique-index entries the record's
-OLD values held; FoundationDB leaves them, so a value a record moved away
-from stays taken. Second, the `meta/schema_version` marker is written only
+Three deliberate differences from the FoundationDB store, all in the shared
+`kv` module. First, an update releases the old value of each unique index it
+NAMES whose value changed (and only while the entry is still this record's);
+FoundationDB leaves it, so a value a record moved away from stays taken. An
+update naming no indexes touches no index entry. Third, auto-ids come from a
+per-collection counter (`idseq/{collection}`, seeded from the record count),
+not from the count itself: after a delete the count drops and a count-derived
+id lands on a live record, which the write then overwrites. Second, the `meta/schema_version` marker is written only
 when absent; an unconditional write makes every writer in a namespace update
 the same row, which serializes them on its lock and quietly becomes a second,
 unintended guarantee behind the unique index. The multi-writer test was
@@ -93,7 +97,9 @@ The connection string is never written into the answers:
 - `url_env` names an environment variable, default `SORX_POSTGRES_URL`;
 - `url_file` names a file, for a mounted secret.
 
-Exactly one of them must resolve. A missing, empty, or unreachable URL fails
+Exactly one of them must resolve. Direct `config` is only accepted in the
+`local` and `test` environments (sorx's own rule), so production uses the
+environment variables `SORX_POSTGRES_URL` and `SORX_POSTGRES_CA_FILE`. A missing, empty, or unreachable URL fails
 start-up with `provider_postgres_error` naming the variable or file, never the
 value.
 

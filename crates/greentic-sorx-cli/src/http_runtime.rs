@@ -7358,7 +7358,7 @@ fn register_postgres(
     let config = greentic_sorx_core::PostgresProviderConfig::from_parts(
         provider.config_ref.clone(),
         provider.config.clone(),
-    );
+    )?;
     let store = greentic_sorx_core::PostgresStore::connect(&config)?;
     registry.register_canonical_store(binding, Arc::new(store));
     Ok(())

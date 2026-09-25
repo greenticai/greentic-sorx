@@ -546,3 +546,140 @@ fn pg_is_its_own_durable_migration_ledger() {
         .expect("load other");
     assert!(!other.contains("0001_init"), "the ledger is per namespace");
 }
+
+fn create_auto(ns: &ProviderNamespace, label: &str) -> CreateOp {
+    CreateOp {
+        namespace: ns.clone(),
+        entity: "Order".to_string(),
+        collection: "orders".to_string(),
+        input: json!({"label": label}),
+        idempotency_key: None,
+        unique_indexes: Vec::new(),
+        unique_behavior: UniqueConflictBehavior::Reject,
+    }
+}
+
+/// An update that names NO indexes (a migration backfill, a manager submit)
+/// must leave every unique index's protection in place.
+#[test]
+fn pg_an_update_naming_no_indexes_keeps_unique_protection() {
+    require_db!();
+    let store = store();
+    let ns = unique_namespace("keep-uniq");
+    store
+        .create(create_with_email(&ns, "t1", "a@example.com"))
+        .expect("t1");
+    store
+        .update(UpdateOp {
+            namespace: ns.clone(),
+            entity: "Tenant".to_string(),
+            collection: "tenants".to_string(),
+            id: "t1".to_string(),
+            patch: json!({"plan": "basic"}),
+            unique_indexes: Vec::new(),
+        })
+        .expect("backfill-style update");
+    let err = store
+        .create(create_with_email(&ns, "t2", "a@example.com"))
+        .expect_err("the value is still held by t1");
+    assert_eq!(err.code, "unique_constraint_violation");
+}
+
+/// Deleting an earlier record must not make the next auto-id land on a later
+/// record that still exists (a count-derived id would, and overwrite it).
+#[test]
+fn pg_an_auto_id_never_reuses_a_live_record_after_a_delete() {
+    require_db!();
+    let store = store();
+    let ns = unique_namespace("autoid");
+    let first = store.create(create_auto(&ns, "first")).expect("first");
+    let second = store.create(create_auto(&ns, "second")).expect("second");
+    store
+        .delete(DeleteOp {
+            namespace: ns.clone(),
+            entity: "Order".to_string(),
+            collection: "orders".to_string(),
+            id: first.id.clone(),
+        })
+        .expect("delete first");
+    let third = store.create(create_auto(&ns, "third")).expect("third");
+    assert_ne!(third.id, second.id, "the new record took a live id");
+    let still = store
+        .get(GetOp {
+            namespace: ns,
+            entity: "Order".to_string(),
+            collection: "orders".to_string(),
+            id: second.id,
+        })
+        .expect("get")
+        .expect("second still exists");
+    assert_eq!(still.data["label"], "second", "second was overwritten");
+}
+
+/// Concurrent creates without ids all succeed with distinct ids: they contend
+/// on the collection counter and retry within the time budget.
+#[test]
+fn pg_concurrent_auto_id_creates_all_succeed_with_distinct_ids() {
+    require_db!();
+    let writers = 16;
+    let store = Arc::new(
+        PostgresStore::connect_url(&url().expect("url"), writers as u32).expect("connect"),
+    );
+    let ns = unique_namespace("autoid-race");
+    let barrier = Arc::new(Barrier::new(writers));
+    let handles: Vec<_> = (0..writers)
+        .map(|i| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let ns = ns.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.create(create_auto(&ns, &format!("w{i}")))
+            })
+        })
+        .collect();
+    let mut ids: Vec<String> = handles
+        .into_iter()
+        .map(|h| h.join().expect("join").expect("every create succeeds").id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), writers, "ids must be distinct: {ids:?}");
+}
+
+/// A role granted only DML on a table a DBA created must be able to boot.
+#[test]
+fn pg_a_dml_only_role_connects_to_an_existing_table() {
+    require_db!();
+    let admin = url().expect("url");
+    // Make sure the table exists (created by the admin connection).
+    drop(store());
+    let role = format!("sorx_dml_{}", std::process::id());
+    let mut client = postgres::Client::connect(&admin, postgres::NoTls).expect("admin");
+    client
+        .batch_execute(&format!(
+            "DROP ROLE IF EXISTS {role}; \
+             CREATE ROLE {role} LOGIN PASSWORD 'dml'; \
+             REVOKE CREATE ON SCHEMA public FROM PUBLIC; \
+             GRANT USAGE ON SCHEMA public TO {role}; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON sorx_kv TO {role};"
+        ))
+        .expect("create role");
+    let mut parsed: postgres::Config = admin.parse().expect("parse");
+    parsed.user(&role).password("dml");
+    let host = match &parsed.get_hosts()[0] {
+        postgres::config::Host::Tcp(host) => host.clone(),
+        other => panic!("tcp host expected: {other:?}"),
+    };
+    let port = parsed.get_ports().first().copied().unwrap_or(5432);
+    let db = parsed.get_dbname().unwrap_or("postgres").to_string();
+    let dml_url = format!("postgres://{role}:dml@{host}:{port}/{db}?sslmode=disable");
+    let result = PostgresStore::connect_url(&dml_url, 1);
+    client
+        .batch_execute(&format!(
+            "REVOKE ALL ON sorx_kv FROM {role}; REVOKE ALL ON SCHEMA public FROM {role}; \
+             DROP ROLE {role};"
+        ))
+        .expect("cleanup");
+    result.expect("a DML-only role must boot against an existing table");
+}

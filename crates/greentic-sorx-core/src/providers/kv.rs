@@ -80,6 +80,13 @@ fn event_key(namespace: &ProviderNamespace, stream: &str, seq: u64) -> Vec<u8> {
     )
 }
 
+/// Per-collection auto-id counter. Not in the FoundationDB layout, which
+/// derives an id from the live record count and so reuses the id of a record
+/// after an earlier one is deleted — overwriting it. See [`next_auto_id`].
+fn idseq_key(namespace: &ProviderNamespace, collection: &str) -> Vec<u8> {
+    join(namespace, &["idseq", &clean_key(collection)])
+}
+
 fn evseq_key(namespace: &ProviderNamespace, stream: &str) -> Vec<u8> {
     join(namespace, &["evseq", &clean_key(stream)])
 }
@@ -164,10 +171,7 @@ pub(crate) fn create(txn: &mut impl KvTxn, op: &CreateOp) -> SorxResult<EntityRe
 
     let id = match value_id(&op.input) {
         Some(id) => id,
-        None => format!(
-            "{collection}-{}",
-            scan_entities(txn, namespace, collection)?.len() + 1
-        ),
+        None => next_auto_id(txn, namespace, collection)?,
     };
     let mut data = object_clone(&op.input);
     data.insert("id".to_string(), Value::String(id.clone()));
@@ -234,11 +238,24 @@ pub(crate) fn update(txn: &mut impl KvTxn, op: &UpdateOp) -> SorxResult<EntityRe
         return Err(unique_conflict_error(&conflict.index, &conflict.values));
     }
 
-    // Unlike the FoundationDB store, drop the entries the OLD values held
-    // before writing the new ones: a changed unique field would otherwise leave
-    // an entry pointing at this id under a value it no longer has, and a later
-    // record taking that value would be refused as a conflict.
-    clear_unique_for_record(txn, namespace, collection, &record.id)?;
+    // Unlike the FoundationDB store, release the value a changed unique field
+    // held: otherwise its entry keeps pointing at this id and a later record
+    // taking that value is refused as a conflict. ONLY the indexes this update
+    // names, and only when their value changed and the entry is still this
+    // record's: an update that names no indexes (a migration backfill, a
+    // manager submit) must leave every other index's protection in place.
+    for index in &op.unique_indexes {
+        let old = index_values(&record.data, &index.fields);
+        let new = index_values(&data, &index.fields);
+        if let Some(old) = old
+            && Some(&old) != new.as_ref()
+        {
+            let old_key = uniq_key(namespace, collection, &index.id, &old);
+            if txn.get(&old_key)?.as_deref() == Some(record.id.as_bytes()) {
+                txn.clear(&old_key)?;
+            }
+        }
+    }
     record.data = data;
     record.version += 1;
     txn.set(&ekey, &encode_json(&record)?)?;
@@ -275,10 +292,10 @@ pub(crate) fn append_event(txn: &mut impl KvTxn, op: &AppendEventOp) -> SorxResu
     let namespace = &op.namespace;
     write_schema_version(txn, namespace)?;
     let seq_key = evseq_key(namespace, &op.stream);
-    let last = txn
-        .get(&seq_key)?
-        .map(|bytes| decode_u64(&bytes))
-        .unwrap_or(0);
+    let last = match txn.get(&seq_key)? {
+        Some(bytes) => decode_u64(&bytes)?,
+        None => 0,
+    };
     let sequence = last + 1;
     let event_id = format!("{}-{}", clean_key(&op.stream), sequence);
     let envelope = json!({
@@ -364,7 +381,15 @@ pub(crate) fn load_migrations(
     let (start, end) = child_range(namespace, &["migrations"]);
     let mut applied = AppliedMigrations::default();
     for (_, value) in txn.scan(&start, &end)? {
-        applied.record(&String::from_utf8_lossy(&value));
+        // Strict: a lossy decode would record a mangled id, and the real
+        // migration would then run a second time.
+        let id = String::from_utf8(value).map_err(|err| {
+            SorxError::new(
+                "provider_decode_failed",
+                format!("a migration ledger entry is not UTF-8: {err}"),
+            )
+        })?;
+        applied.record(&id);
     }
     Ok(applied)
 }
@@ -385,6 +410,33 @@ fn write_schema_version(txn: &mut impl KvTxn, namespace: &ProviderNamespace) -> 
         return Ok(());
     }
     txn.set(&key, b"1")
+}
+
+/// The next `{collection}-{n}` id no live record holds.
+///
+/// A counter, not the record count: after a delete the count drops, and a
+/// count-derived id lands on a record that still exists, which `set` then
+/// overwrites. The counter is seeded from the count the first time, so a
+/// collection written by an older build continues where it was; ids already
+/// taken (an explicit id, or data written before the counter) are skipped.
+fn next_auto_id(
+    txn: &mut impl KvTxn,
+    namespace: &ProviderNamespace,
+    collection: &str,
+) -> SorxResult<String> {
+    let counter = idseq_key(namespace, collection);
+    let mut n = match txn.get(&counter)? {
+        Some(bytes) => decode_u64(&bytes)?,
+        None => scan_entities(txn, namespace, collection)?.len() as u64,
+    };
+    loop {
+        n += 1;
+        let id = format!("{collection}-{n}");
+        if txn.get(&entity_key(namespace, collection, &id))?.is_none() {
+            txn.set(&counter, &n.to_le_bytes())?;
+            return Ok(id);
+        }
+    }
 }
 
 fn scan_entities(
@@ -420,7 +472,12 @@ fn find_unique_conflict(
         let Some(owner) = txn.get(&uniq_key(namespace, collection, &index.id, &values))? else {
             continue;
         };
-        let owner = String::from_utf8_lossy(&owner).to_string();
+        let owner = String::from_utf8(owner).map_err(|err| {
+            SorxError::new(
+                "provider_decode_failed",
+                format!("a unique-index entry does not hold a UTF-8 id: {err}"),
+            )
+        })?;
         if current_id == Some(owner.as_str()) {
             continue;
         }
@@ -478,11 +535,17 @@ fn decode_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> SorxResult<T> {
         .map_err(|err| SorxError::new("provider_decode_failed", err.to_string()))
 }
 
-fn decode_u64(bytes: &[u8]) -> u64 {
-    let mut buf = [0u8; 8];
-    let len = bytes.len().min(8);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    u64::from_le_bytes(buf)
+/// A counter is exactly eight little-endian bytes. Anything else is refused:
+/// reading a damaged counter as 0 would restart the sequence and overwrite the
+/// events (or records) it already numbered.
+fn decode_u64(bytes: &[u8]) -> SorxResult<u64> {
+    let buf: [u8; 8] = bytes.try_into().map_err(|_| {
+        SorxError::new(
+            "provider_decode_failed",
+            format!("a sequence counter is {} bytes, not 8", bytes.len()),
+        )
+    })?;
+    Ok(u64::from_le_bytes(buf))
 }
 
 fn value_id(value: &Value) -> Option<String> {

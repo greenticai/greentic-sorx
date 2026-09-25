@@ -31,7 +31,7 @@
 //! [`DEFAULT_URL_ENV`]) or from the file named by `config.url_file` (a mounted
 //! secret). Errors name the variable or file, never the value.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use postgres::error::SqlState;
 use postgres::{IsolationLevel, Transaction};
@@ -53,12 +53,24 @@ use crate::{
 /// Environment variable read for the connection string when the answers name
 /// none.
 pub const DEFAULT_URL_ENV: &str = "SORX_POSTGRES_URL";
+/// Environment variable naming a PEM file of extra trusted root certificates.
+/// Managed databases (RDS/Aurora, Cloud SQL, Supabase) sign with CAs that are
+/// not in the public webpki set, so without this their TLS never verifies.
+pub const CA_FILE_ENV: &str = "SORX_POSTGRES_CA_FILE";
 const DEFAULT_POOL_SIZE: u32 = 8;
-const MAX_ATTEMPTS: u32 = 8;
+/// How long one operation may keep retrying serialization conflicts. A time
+/// budget, not an attempt count: sixteen writers racing one collection's id
+/// counter need up to sixteen rounds each, which a small fixed count cut short.
+const RETRY_BUDGET: Duration = Duration::from_secs(10);
+const CONFIG_KEYS: &[&str] = &["url_env", "url_file", "ca_file", "pool_size"];
 /// `CREATE TABLE IF NOT EXISTS` is not safe against itself: two sessions
 /// racing it can both pass the existence check and one then fails on the
 /// catalog's unique index. Several sorx replicas booting at once do exactly
 /// that, so creation runs under a transaction-scoped advisory lock.
+///
+/// It runs only when the table is absent: Postgres checks CREATE privilege on
+/// the schema BEFORE honouring `IF NOT EXISTS`, so a role granted only DML on a
+/// table a DBA created would otherwise be refused at every boot.
 const SCHEMA_SQL: &str = "BEGIN; \
     SELECT pg_advisory_xact_lock(7305001); \
     CREATE TABLE IF NOT EXISTS sorx_kv (key BYTEA PRIMARY KEY, value BYTEA NOT NULL); \
@@ -72,33 +84,73 @@ pub struct PostgresProviderConfig {
     pub url_env: Option<String>,
     /// File holding the connection string (a mounted secret).
     pub url_file: Option<String>,
+    /// PEM file of extra trusted roots; [`CA_FILE_ENV`] is read when unset.
+    pub ca_file: Option<String>,
     pub pool_size: Option<u32>,
     pub config_ref: Option<String>,
 }
 
 impl PostgresProviderConfig {
-    pub fn from_parts(config_ref: Option<String>, config: Option<Value>) -> Self {
-        let object = config.and_then(|value| value.as_object().cloned());
-        let text = |key: &str| {
-            object
-                .as_ref()
-                .and_then(|value| value.get(key))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
+    /// Read the binding's `config`. Unknown keys and wrong types are REFUSED,
+    /// not ignored: a misspelled `url_env` would otherwise fall back to
+    /// [`DEFAULT_URL_ENV`], which may name a different database.
+    pub fn from_parts(config_ref: Option<String>, config: Option<Value>) -> SorxResult<Self> {
+        let object = match config {
+            None | Some(Value::Null) => serde_json::Map::new(),
+            Some(Value::Object(object)) => object,
+            Some(other) => {
+                // Name the type only: a value here may well be a pasted
+                // connection string, and errors reach logs.
+                let kind = match other {
+                    Value::String(_) => "a string",
+                    Value::Array(_) => "an array",
+                    Value::Number(_) => "a number",
+                    _ => "a boolean",
+                };
+                return Err(pg_error(format!(
+                    "the postgres store's `config` must be an object, not {kind}"
+                )));
+            }
         };
-        Self {
-            url_env: text("url_env"),
-            url_file: text("url_file"),
-            pool_size: object
-                .as_ref()
-                .and_then(|value| value.get("pool_size"))
-                .and_then(Value::as_u64)
-                .and_then(|size| u32::try_from(size).ok())
-                .filter(|size| *size > 0),
-            config_ref,
+        if let Some(unknown) = object
+            .keys()
+            .find(|key| !CONFIG_KEYS.contains(&key.as_str()))
+        {
+            return Err(pg_error(format!(
+                "the postgres store does not know the config key `{unknown}` (known: {})",
+                CONFIG_KEYS.join(", ")
+            )));
         }
+        let text = |key: &str| -> SorxResult<Option<String>> {
+            match object.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(value)) if !value.trim().is_empty() => {
+                    Ok(Some(value.trim().to_string()))
+                }
+                Some(_) => Err(pg_error(format!(
+                    "the postgres store's `{key}` must be a non-empty string"
+                ))),
+            }
+        };
+        let pool_size = match object.get("pool_size") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_u64()
+                    .and_then(|size| u32::try_from(size).ok())
+                    .filter(|size| *size > 0)
+                    .ok_or_else(|| {
+                        pg_error("the postgres store's `pool_size` must be a positive integer")
+                    })?,
+            ),
+        };
+        Ok(Self {
+            url_env: text("url_env")?,
+            url_file: text("url_file")?,
+            ca_file: text("ca_file")?,
+            pool_size,
+            config_ref,
+        })
     }
 
     /// Resolve the connection string. `url_file` wins when both are named.
@@ -116,11 +168,24 @@ impl PostgresProviderConfig {
         let var = self.url_env.as_deref().unwrap_or(DEFAULT_URL_ENV);
         match std::env::var(var) {
             Ok(url) if !url.trim().is_empty() => Ok(url.trim().to_string()),
+            Err(std::env::VarError::NotUnicode(_)) => Err(pg_error(format!(
+                "the environment variable `{var}` is set but is not valid Unicode"
+            ))),
             _ => Err(pg_error(format!(
                 "the postgres store needs a connection string in the environment \
                  variable `{var}` (or name a file with `url_file`)"
             ))),
         }
+    }
+
+    /// The extra-roots file: `ca_file`, else [`CA_FILE_ENV`], else none.
+    pub fn resolve_ca_file(&self) -> Option<String> {
+        self.ca_file.clone().or_else(|| {
+            std::env::var(CA_FILE_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
     }
 }
 
@@ -138,17 +203,24 @@ impl std::fmt::Debug for PostgresStore {
 impl PostgresStore {
     /// Resolve the URL, open the pool and create the table when absent.
     pub fn connect(config: &PostgresProviderConfig) -> SorxResult<Self> {
-        Self::connect_url(
+        Self::connect_with(
             &config.resolve_url()?,
             config.pool_size.unwrap_or(DEFAULT_POOL_SIZE),
+            config.resolve_ca_file().as_deref(),
         )
     }
 
+    /// Connect with the public webpki roots plus [`CA_FILE_ENV`] when set.
     pub fn connect_url(url: &str, pool_size: u32) -> SorxResult<Self> {
+        let ca_file = PostgresProviderConfig::default().resolve_ca_file();
+        Self::connect_with(url, pool_size, ca_file.as_deref())
+    }
+
+    fn connect_with(url: &str, pool_size: u32, ca_file: Option<&str>) -> SorxResult<Self> {
         let config: postgres::Config = url
             .parse()
             .map_err(|err| pg_error(format!("the Postgres URL does not parse: {err}")))?;
-        let tls = tls_connector()?;
+        let tls = tls_connector(ca_file)?;
         let manager = PostgresConnectionManager::new(config.clone(), tls.clone());
         let store = run_blocking(|| {
             // One direct connection first: the pool reports every failure as
@@ -165,26 +237,35 @@ impl PostgresStore {
             let mut client = pool
                 .get()
                 .map_err(|err| pg_error(format!("cannot connect to Postgres: {err}")))?;
-            client.batch_execute(SCHEMA_SQL).map_err(|err| {
-                pg_error(format!(
-                    "cannot create the sorx_kv table: {}",
-                    describe(&err)
-                ))
-            })?;
+            let exists: bool = client
+                .query_one("SELECT to_regclass('sorx_kv') IS NOT NULL", &[])
+                .map_err(|err| {
+                    pg_error(format!("cannot inspect the database: {}", describe(&err)))
+                })?
+                .get(0);
+            if !exists {
+                client.batch_execute(SCHEMA_SQL).map_err(|err| {
+                    pg_error(format!(
+                        "cannot create the sorx_kv table: {}",
+                        describe(&err)
+                    ))
+                })?;
+            }
             Ok(Self { pool })
         })?;
         Ok(store)
     }
 
-    /// Run `body` in one SERIALIZABLE transaction, retrying on serialization
-    /// failure and deadlock.
+    /// Run `body` in one SERIALIZABLE transaction, retrying serialization
+    /// failures and deadlocks for up to [`RETRY_BUDGET`].
     fn transact<T>(&self, body: impl Fn(&mut PgTxn<'_, '_>) -> SorxResult<T>) -> SorxResult<T> {
         run_blocking(|| {
             let mut client = self
                 .pool
                 .get()
                 .map_err(|err| pg_error(format!("no Postgres connection available: {err}")))?;
-            let mut attempt = 0;
+            let started = Instant::now();
+            let mut attempt: u32 = 0;
             loop {
                 attempt += 1;
                 let result = (|| {
@@ -192,32 +273,43 @@ impl PostgresStore {
                         .build_transaction()
                         .isolation_level(IsolationLevel::Serializable)
                         .start()
-                        .map_err(Failure::Db)?;
+                        .map_err(Failure::from_db)?;
                     let value = {
                         let mut txn = PgTxn { tx: &mut tx };
-                        body(&mut txn).map_err(|err| match txn_db_error(&err) {
-                            true => Failure::Retry,
-                            false => Failure::Sorx(err),
+                        body(&mut txn).map_err(|err| {
+                            if err.code == RETRYABLE_CODE {
+                                Failure::Retry(err.message)
+                            } else {
+                                Failure::Sorx(err)
+                            }
                         })?
                     };
-                    tx.commit().map_err(Failure::Db)?;
+                    tx.commit().map_err(Failure::from_commit)?;
                     Ok(value)
                 })();
                 match result {
                     Ok(value) => return Ok(value),
                     Err(Failure::Sorx(err)) => return Err(err),
-                    Err(failure) if failure.retryable() && attempt < MAX_ATTEMPTS => {
+                    Err(Failure::Retry(last)) => {
+                        if started.elapsed() >= RETRY_BUDGET {
+                            return Err(pg_error(format!(
+                                "Postgres transaction kept conflicting with concurrent \
+                                 writers ({attempt} attempts over {:?}; last: {last})",
+                                started.elapsed()
+                            )));
+                        }
                         std::thread::sleep(backoff(attempt));
                     }
-                    Err(Failure::Db(err)) => {
-                        return Err(pg_error(format!(
-                            "Postgres transaction failed: {}",
-                            describe(&err)
-                        )));
+                    Err(Failure::Db(message)) => {
+                        return Err(pg_error(format!("Postgres transaction failed: {message}")));
                     }
-                    Err(Failure::Retry) => {
-                        return Err(pg_error(
-                            "Postgres transaction kept conflicting with concurrent writers",
+                    Err(Failure::CommitUnknown(message)) => {
+                        return Err(SorxError::new(
+                            "provider_postgres_commit_unknown",
+                            format!(
+                                "the connection failed while committing, so the write may or \
+                                 may not have been applied; check before retrying: {message}"
+                            ),
                         ));
                     }
                 }
@@ -245,18 +337,31 @@ impl PostgresStore {
 enum Failure {
     /// The operation itself refused (conflict, not found, decode): final.
     Sorx(SorxError),
-    /// A database error at BEGIN or COMMIT.
-    Db(postgres::Error),
-    /// A retryable database error surfaced from inside the body.
-    Retry,
+    /// A serialization failure or deadlock: the attempt was NOT applied and
+    /// may be retried. Carries the server's message for the give-up error.
+    Retry(String),
+    /// A definite database failure; nothing was applied.
+    Db(String),
+    /// COMMIT failed without a server answer (the connection dropped): the
+    /// transaction may have been applied. Never retried, never reported as a
+    /// plain failure — a caller retrying a create would duplicate it.
+    CommitUnknown(String),
 }
 
 impl Failure {
-    fn retryable(&self) -> bool {
-        match self {
-            Self::Retry => true,
-            Self::Db(err) => is_retryable(err),
-            Self::Sorx(_) => false,
+    fn from_db(err: postgres::Error) -> Self {
+        if is_retryable(&err) {
+            Self::Retry(describe(&err))
+        } else {
+            Self::Db(describe(&err))
+        }
+    }
+
+    fn from_commit(err: postgres::Error) -> Self {
+        if err.as_db_error().is_none() {
+            Self::CommitUnknown(describe(&err))
+        } else {
+            Self::from_db(err)
         }
     }
 }
@@ -266,10 +371,6 @@ impl Failure {
 /// operation's own refusals.
 const RETRYABLE_CODE: &str = "provider_postgres_retryable";
 
-fn txn_db_error(err: &SorxError) -> bool {
-    err.code == RETRYABLE_CODE
-}
-
 fn is_retryable(err: &postgres::Error) -> bool {
     matches!(
         err.code(),
@@ -278,17 +379,17 @@ fn is_retryable(err: &postgres::Error) -> bool {
     )
 }
 
+/// Jittered backoff: a few milliseconds, growing slowly to a 50 ms ceiling.
+/// Jitter comes from the clock and the thread, so writers that collided do not
+/// collide again in lockstep.
 fn backoff(attempt: u32) -> Duration {
-    // 10, 20, 40 … ms, capped, plus sub-millisecond jitter from the clock so
-    // two replicas that collided do not retry in lockstep.
-    let base = 10u64.saturating_mul(1 << attempt.min(6));
-    let jitter = u64::from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() % 10_000_000)
-            .unwrap_or(0),
-    ) / 1_000_000;
-    Duration::from_millis(base.min(500) + jitter)
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    Instant::now().hash(&mut hasher);
+    attempt.hash(&mut hasher);
+    let ceiling = u64::from(attempt.min(10)) * 5 + 5;
+    Duration::from_millis(1 + hasher.finish() % ceiling)
 }
 
 struct PgTxn<'a, 'b> {
@@ -298,7 +399,7 @@ struct PgTxn<'a, 'b> {
 impl PgTxn<'_, '_> {
     fn map(err: postgres::Error) -> SorxError {
         if is_retryable(&err) {
-            SorxError::new(RETRYABLE_CODE, err.to_string())
+            SorxError::new(RETRYABLE_CODE, describe(&err))
         } else {
             pg_error(format!("Postgres query failed: {}", describe(&err)))
         }
@@ -451,11 +552,44 @@ fn run_blocking<T>(work: impl FnOnce() -> SorxResult<T>) -> SorxResult<T> {
     }
 }
 
-fn tls_connector() -> SorxResult<MakeRustlsConnect> {
+/// rustls with the public webpki roots, plus the PEM roots in `ca_file`.
+///
+/// Note the sslmode semantics differ from libpq: `require` VERIFIES the
+/// certificate here, and `verify-ca` / `verify-full` are not accepted by the
+/// URL parser. A managed database therefore needs its CA in `ca_file` (or
+/// [`CA_FILE_ENV`]); `sslmode=disable` is the only way around it, and sends
+/// the credentials in plaintext.
+fn tls_connector(ca_file: Option<&str>) -> SorxResult<MakeRustlsConnect> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-    let roots = rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
+    if let Some(path) = ca_file {
+        let mut added = 0usize;
+        for cert in CertificateDer::pem_file_iter(path)
+            .map_err(|err| pg_error(format!("cannot read the Postgres CA file `{path}`: {err}")))?
+        {
+            let cert = cert.map_err(|err| {
+                pg_error(format!(
+                    "the Postgres CA file `{path}` is not valid PEM: {err}"
+                ))
+            })?;
+            roots.add(cert).map_err(|err| {
+                pg_error(format!(
+                    "the Postgres CA file `{path}` holds a bad certificate: {err}"
+                ))
+            })?;
+            added += 1;
+        }
+        if added == 0 {
+            return Err(pg_error(format!(
+                "the Postgres CA file `{path}` holds no certificate"
+            )));
+        }
+    }
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|err| pg_error(format!("cannot configure TLS: {err}")))?
@@ -486,11 +620,33 @@ mod tests {
     fn config_reads_url_env_file_and_pool_size() {
         let config = PostgresProviderConfig::from_parts(
             Some("providers.store".into()),
-            Some(json!({"url_env": "MY_PG", "url_file": " ", "pool_size": 3})),
-        );
+            Some(json!({"url_env": "MY_PG", "url_file": "/run/pg", "pool_size": 3})),
+        )
+        .expect("valid config");
         assert_eq!(config.url_env.as_deref(), Some("MY_PG"));
-        assert_eq!(config.url_file, None, "a blank file name is no file");
+        assert_eq!(config.url_file.as_deref(), Some("/run/pg"));
         assert_eq!(config.pool_size, Some(3));
+    }
+
+    #[test]
+    fn a_misspelled_or_mistyped_key_is_refused_not_ignored() {
+        for bad in [
+            json!({"urlEnv": "MY_PG"}),
+            json!({"url_env": 5}),
+            json!({"url_file": " "}),
+            json!({"pool_size": "4"}),
+            json!({"pool_size": 0}),
+            json!("postgres://secret@host/db"),
+        ] {
+            let err =
+                PostgresProviderConfig::from_parts(None, Some(bad.clone())).expect_err("refused");
+            assert_eq!(err.code, "provider_postgres_error", "{bad}");
+            assert!(
+                !err.message.contains("secret@host"),
+                "never echo a value: {}",
+                err.message
+            );
+        }
     }
 
     #[test]
@@ -515,5 +671,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.resolve_url().expect("url"), "postgres://u@h/db");
+    }
+
+    #[test]
+    fn a_ca_file_that_is_missing_or_empty_is_refused_by_name() {
+        let err = tls_connector(Some("/nonexistent/sorx-ca.pem"))
+            .err()
+            .expect("missing file");
+        assert!(
+            err.message.contains("/nonexistent/sorx-ca.pem"),
+            "{}",
+            err.message
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "").expect("write");
+        let err = tls_connector(Some(&empty.display().to_string()))
+            .err()
+            .expect("empty file");
+        assert!(err.message.contains("no certificate"), "{}", err.message);
+
+        tls_connector(None).expect("the public roots alone are fine");
     }
 }
