@@ -43,25 +43,24 @@ default = ["postgres"]
 postgres = ["greentic-sorx-core/postgres"]
 
 ## Enable the NATS-backed business event sink and the async runtime dispatch
-## (`sorla.call`) event bridge (adds async-nats + tokio + the event-bridge crate).
+## (`sorla.call`) event bridge (adds async-nats + the event-bridge crate;
+## tokio itself is an unconditional dependency — see `pack_ref`).
 ## The business-event sink is wired automatically when events.sink = "nats" in the
 ## runtime config; the dispatch bridge additionally activates at runtime when
 ## GREENTIC_EVENTS_NATS_URL is set.
 events-nats = [
     "dep:async-nats",
-    "dep:tokio",
     "dep:async-trait",
     "dep:anyhow",
     "dep:sorx-event-bridge",
 ]
 
 ## Enable the best-effort boot-time SorxPresence NATS publish hook (epic #3
-## push-discovery producer half). Adds async-nats + tokio. The hook activates
-## at runtime only when SORX_PRESENCE_NATS_URL is set; otherwise it is a no-op.
-## Default-off.
+## push-discovery producer half). Adds async-nats (tokio is unconditional).
+## The hook activates at runtime only when SORX_PRESENCE_NATS_URL is set;
+## otherwise it is a no-op. Default-off.
 presence-nats = [
     "dep:async-nats",
-    "dep:tokio",
 ]
 
 ## Enable running WASM extension packs via greentic-ext-runtime (wasmtime-based
@@ -84,6 +83,7 @@ greentic-ext-runtime = { git = "https://github.com/greentic-biz/greentic-designe
 chrono.workspace = true
 ciborium.workspace = true
 clap.workspace = true
+greentic-distributor-client.workspace = true
 greentic-qa-lib = "0.5"
 greentic-sorx-core.workspace = true
 greentic-sorx-pack.workspace = true
@@ -93,7 +93,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, optional = true, features = ["time"] }
+# Unconditional (not feature-gated): `pack_ref::materialize` needs a runtime
+# to pull an `oci://` pack at boot regardless of which optional features are
+# enabled. `time` stays here for the events-nats/presence-nats code paths
+# that used to pull it in through this same (previously optional) dependency.
+tokio = { workspace = true, features = ["rt", "time"] }
 jsonwebtoken = "9"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 zip.workspace = true
