@@ -131,6 +131,8 @@ pub use provider_compatibility::{
     ProviderResolutionMode, ResolvedProviderBinding, resolve_provider_compatibility,
 };
 pub use providers::{FoundationDbProviderAdapter, FoundationDbProviderConfig, MemoryStoreProvider};
+#[cfg(feature = "postgres")]
+pub use providers::{POSTGRES_DEFAULT_URL_ENV, PostgresProviderConfig, PostgresStore};
 pub use router::EndpointRouter;
 pub use runtime::{SorxRuntime, empty_object, invocation, runtime_pack};
 pub use startup::{

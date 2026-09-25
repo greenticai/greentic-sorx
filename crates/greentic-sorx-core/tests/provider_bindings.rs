@@ -355,7 +355,11 @@ fn provider_kind_parses_memory_foundationdb_and_external() {
     );
     assert_eq!(
         StoreProviderKind::parse("postgres"),
-        StoreProviderKind::External("postgres".to_string())
+        StoreProviderKind::Postgres
+    );
+    assert_eq!(
+        StoreProviderKind::parse("cassandra"),
+        StoreProviderKind::External("cassandra".to_string())
     );
 }
 

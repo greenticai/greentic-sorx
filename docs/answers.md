@@ -36,3 +36,26 @@ Provider entries may include optional ontology/evidence capability metadata:
 
 Dry-run startup plans use these fields to report provider compatibility for
 ontology-enabled packs.
+
+## Postgres store
+
+`providers.store.kind: postgres` keeps records in a Postgres database, used as
+an ordered key-value table (`sorx_kv`, created on first connect). It survives
+restarts and is safe with several sorx replicas on one database: every
+operation runs in one `SERIALIZABLE` transaction, retried on conflict.
+
+The connection string is never an answer. It comes from the environment:
+
+```json
+{ "providers": { "store": { "kind": "postgres", "config_ref": "providers.postgres.prod" } } }
+```
+
+```bash
+SORX_POSTGRES_URL='postgres://user:pass@host:5432/db?sslmode=require' \
+  greentic-sorx start landlord.gtpack --answers answers.json
+```
+
+In `local` or `test` environments, `config` may name a different variable
+(`url_env`), a file holding the URL (`url_file`, for a mounted secret), and a
+`pool_size` (default 8). TLS is used whenever the URL's `sslmode` asks for it,
+verified against the webpki root set.

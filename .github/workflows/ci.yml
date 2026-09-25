@@ -27,3 +27,32 @@ jobs:
     with:
       clippy-args: "--workspace --all-targets -- -D warnings"
       test-args: "--workspace"
+
+  # The postgres store's integration tests SKIP when SORX_TEST_POSTGRES_URL is
+  # unset, which is every other job here. This one gives them a real database,
+  # so the unique-index and multi-writer guarantees are checked on every PR
+  # rather than only on a developer box.
+  postgres-store:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: sorx
+          POSTGRES_DB: sorx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SORX_TEST_POSTGRES_URL: postgres://postgres:sorx@127.0.0.1:5432/sorx?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Postgres store tests
+        run: |
+          cargo test -p greentic-sorx-core --features postgres --lib providers::
+          cargo test -p greentic-sorx-core --features postgres --test postgres_store

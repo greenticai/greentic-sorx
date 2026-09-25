@@ -221,7 +221,7 @@ pub fn default_start_schema() -> Value {
                         },
                         "required": ["kind"],
                         "properties": {
-                            "kind": { "type": "string", "enum": ["memory", "foundationdb"], "default": "foundationdb" },
+                            "kind": { "type": "string", "enum": ["memory", "foundationdb", "postgres"], "default": "foundationdb" },
                             "config_ref": { "type": "string" },
                             "capabilities": {
                                 "type": "array",
@@ -237,7 +237,7 @@ pub fn default_start_schema() -> Value {
                     "type": "object",
                     "required": ["kind"],
                     "properties": {
-                        "kind": { "type": "string", "enum": ["memory", "foundationdb"] },
+                        "kind": { "type": "string", "enum": ["memory", "foundationdb", "postgres"] },
                         "config_ref": { "type": "string" },
                         "capabilities": {
                             "type": "array",
@@ -433,6 +433,7 @@ fn apply_provider_defaults(value: &mut Value) {
     let config_ref = match kind.as_str() {
         "memory" => "providers.memory.local",
         "foundationdb" => "providers.foundationdb.local",
+        "postgres" => "providers.postgres.local",
         _ => return,
     };
     store.insert("config_ref".to_string(), json!(config_ref));
@@ -1104,9 +1105,22 @@ mod tests {
     }
 
     #[test]
+    fn postgres_is_an_accepted_store_kind() {
+        let mut answers = full_answers();
+        answers["providers"]["store"] = json!({ "kind": "postgres" });
+        let normalized = normalize_start_answers(&default_start_schema(), &answers, true)
+            .expect("postgres is a valid store kind");
+        assert_eq!(normalized.answers["providers"]["store"]["kind"], "postgres");
+        assert_eq!(
+            normalized.answers["providers"]["store"]["config_ref"],
+            "providers.postgres.local"
+        );
+    }
+
+    #[test]
     fn invalid_provider_kind_fails() {
         let mut answers = full_answers();
-        answers["providers"]["store"]["kind"] = json!("postgres");
+        answers["providers"]["store"]["kind"] = json!("cassandra");
         let err = normalize_start_answers(&default_start_schema(), &answers, true).unwrap_err();
         assert_eq!(err.code, "invalid_answers");
         assert!(

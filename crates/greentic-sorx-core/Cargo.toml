@@ -26,6 +26,12 @@ serde_json.workspace = true
 sha2.workspace = true
 foundationdb = { version = "0.9", features = ["fdb-7_3"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+postgres = { version = "0.19", optional = true }
+r2d2 = { version = "0.8", optional = true }
+r2d2_postgres = { version = "0.18", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+webpki-roots = { version = "1", optional = true }
 
 [features]
 default = []
@@ -34,6 +40,17 @@ default = []
 # Building/testing this feature locally requires the FDB header/lib harness
 # (see crate docs on `foundationdb_real`). The default build does NOT pull it.
 foundationdb = ["dep:foundationdb", "dep:tokio"]
+# Enables the Postgres-backed canonical store (Postgres used as an ordered
+# key-value table). Pure Rust: no system library at build or run time.
+postgres = [
+    "dep:postgres",
+    "dep:r2d2",
+    "dep:r2d2_postgres",
+    "dep:rustls",
+    "dep:tokio",
+    "dep:tokio-postgres-rustls",
+    "dep:webpki-roots",
+]
 
 [dev-dependencies]
 tempfile.workspace = true
