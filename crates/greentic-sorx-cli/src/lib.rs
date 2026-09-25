@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod admin_roles;
+mod answers_source;
 #[cfg(feature = "events-nats")]
 mod event_bridge_invoker;
 mod http_runtime;
@@ -1064,6 +1065,8 @@ fn dispatch(
                     "start requires --schema or --answers <FILE> in non-interactive mode",
                 ));
             }
+            let pack = pack_ref::materialize(&pack)?;
+            let answers = answers.map(answers_source::resolve).transpose()?;
             run_start(
                 pack,
                 schema,

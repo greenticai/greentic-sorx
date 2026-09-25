@@ -103,6 +103,7 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "json"] 
 zip.workspace = true
 
 [dev-dependencies]
+assert_cmd = "2"
 async-nats.workspace = true
 ciborium.workspace = true
 criterion.workspace = true
