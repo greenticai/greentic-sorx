@@ -50,18 +50,23 @@ is, never retried.
 ### Code layout
 
 Three deliberate differences from the FoundationDB store, all in the shared
-`kv` module. First, an update releases the old value of each unique index it
-NAMES whose value changed (and only while the entry is still this record's);
-FoundationDB leaves it, so a value a record moved away from stays taken. An
-update naming no indexes touches no index entry. Third, auto-ids come from a
-per-collection counter (`idseq/{collection}`, seeded from the record count),
-not from the count itself: after a delete the count drops and a count-derived
-id lands on a live record, which the write then overwrites. Second, the `meta/schema_version` marker is written only
-when absent; an unconditional write makes every writer in a namespace update
-the same row, which serializes them on its lock and quietly becomes a second,
-unintended guarantee behind the unique index. The multi-writer test was
-verified to FAIL at `READ COMMITTED` once that was removed, so the guarantee
-it checks is the isolation level's.
+`kv` module:
+
+1. **An update releases changed unique values.** It frees the old value of
+   each unique index it NAMES whose value changed, and only while the entry
+   still points at this record. FoundationDB leaves the entry, so a value a
+   record moved away from stays taken. An update that names no indexes
+   touches no index entry.
+2. **Auto-ids come from a counter.** Each collection has a counter
+   (`idseq/{collection}`, seeded from the record count), rather than deriving
+   the id from the count itself. After a delete the count drops, so a
+   count-derived id lands on a live record and the write overwrites it.
+3. **The `meta/schema_version` marker is written only when absent.** An
+   unconditional write makes every writer in a namespace update the same row.
+   That serializes them on its lock, and quietly becomes a second, unintended
+   guarantee behind the unique index. With that write removed, the
+   multi-writer test was verified to FAIL at `READ COMMITTED`, so the
+   guarantee it checks is the isolation level's.
 
 The operation logic (create, get, update, query, delete, events, index
 queries, traversal, external refs, evidence, migration ledger) is written once
