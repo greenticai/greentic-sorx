@@ -36,6 +36,7 @@ mod mcp_auth;
 mod mcp_jsonrpc;
 #[cfg(feature = "events-nats")]
 pub mod nats_events;
+mod pack_ref;
 mod presence_publish;
 mod test_runtime;
 mod validation;
