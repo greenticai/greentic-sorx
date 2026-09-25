@@ -63,8 +63,9 @@ docker run --rm \
   start /work/landlord.gtpack --answers /work/answers.json --non-interactive
 ```
 
-`start` (alias `run`) takes the pack path as a positional argument; see
-[commands](commands.md) and [startup answers](answers.md).
+`start` (alias `run`) takes the pack path — a local file or an `oci://`
+reference — as a positional argument; see [commands](commands.md) and
+[startup answers](answers.md).
 `start <pack> --schema` prints the answers the pack accepts, and
 `--dry-run --json` validates pack and answers without starting.
 
@@ -82,14 +83,45 @@ address callers use (the Service or Cloud Run URL). Minimal answers:
 }
 ```
 
+## Kubernetes
+
+The env-canvas k8s lane renders one Deployment + Service per SoR unit and
+runs the image with no pack volume — the pack itself is pulled over OCI at
+boot, and every secret-like value arrives as an environment variable rather
+than inside the answers file:
+
+```
+command: greentic-sorx
+args:
+  - start
+  - oci://<registry>/<repo>:<tag>@sha256:<digest>
+  - --answers
+  - env:SORX_ANSWERS
+```
+
+Port `8787`, readiness `GET /healthz`. The pod's Secret carries:
+
+| env var | purpose |
+|---|---|
+| `SORX_ANSWERS` | the startup answers JSON (see [startup answers](answers.md)) |
+| `SORX_POSTGRES_URL` | the Postgres connection string (see Store configuration below) |
+| `SORX_SHARED_SECRET` | the value `server.auth.shared_secret_ref: env:SORX_SHARED_SECRET` in the answers resolves to, when `server.auth.mode` is `shared_secret` |
+| `SORX_POSTGRES_CA_FILE` (optional) | path to a mounted CA bundle, when `SORX_POSTGRES_CA` is projected as a file rather than a variable |
+| `OCI_USERNAME` / `OCI_PASSWORD` | registry credentials for the pack pull — the same Secret the worker's own OCI pull uses |
+
+Pin the pack reference by digest (`…@sha256:<hex>`); see
+[startup answers](answers.md#oci-packs) for why a plain-HTTP registry
+requires it.
+
 ## Store configuration
 
 The store comes from the startup answers (`providers.store.kind` plus
-`config_ref` / `config`) and from environment variables. A `postgres` store
-kind that reads its connection URL from `SORX_POSTGRES_URL` is being added
-separately; once it lands, pass the URL as an environment variable (from a
-Kubernetes Secret or Cloud Run secret), never inside the answers file, which
-rejects inline secret-like values outside `local`/`test`.
+`config_ref` / `config`) and from environment variables. The `postgres` store
+kind reads its connection URL from `SORX_POSTGRES_URL` (and, optionally, a CA
+bundle from `SORX_POSTGRES_CA_FILE`) — see
+[startup answers](answers.md#postgres-store). Pass both as environment
+variables (from a Kubernetes Secret or Cloud Run secret), never inside the
+answers file, which rejects inline secret-like values outside `local`/`test`.
 
 The container filesystem is ephemeral: a `memory` store, or anything written
 under `/home/nonroot`, is lost when the pod or instance restarts.
