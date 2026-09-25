@@ -102,3 +102,21 @@ docker buildx build --platform linux/amd64 -f docker/Dockerfile \
   -t greentic-sorx:local --load /tmp/sorx-context
 docker run --rm greentic-sorx:local --version
 ```
+
+## Operational notes
+
+- **First publish is private.** A ghcr package created by `GITHUB_TOKEN` is
+  private by default. After the first successful run, set
+  `ghcr.io/greenticai/greentic-sorx` to public in the org's package settings,
+  or every unauthenticated pull (Kubernetes or Cloud Run without a pull
+  secret) fails while the workflow stays green.
+- **Not every develop push gets an image.** Runs share one concurrency group
+  and GitHub keeps only one pending run, so a burst of pushes builds the
+  first and the last. `:develop` only ever moves forward.
+- **A rerun of Dev Publish does not rebuild the image.** If Dev Publish failed
+  and was rerun successfully, rerun this workflow's failed job too
+  (`gh run rerun <id> --failed`).
+- **The sha256 check proves integrity, not origin.** The digest is read from
+  the release's own `.sha256` sidecar, so it catches a corrupted download, not
+  a replaced release asset. Provenance attestation on the release build is the
+  stronger check, and is not in place yet.

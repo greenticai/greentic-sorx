@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 #
 # Runtime image for the `greentic-sorx` binary: ghcr.io/greenticai/greentic-sorx.
 #

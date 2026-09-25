@@ -80,12 +80,15 @@ jobs:
             if [ -z "$run_id" ]; then
               run_id="$(gh run list -R "$REPO" --workflow dev-publish.yml \
                 --commit "$SHA" --event push --limit 1 \
-                --json databaseId --jq '.[0].databaseId // empty')"
+                --json databaseId --jq '.[0].databaseId // empty' || true)"
             fi
             if [ -n "$run_id" ]; then
               # Status first, release second: if the run completes between the
               # two reads, the release check still sees what it attached.
-              status="$(gh run view "$run_id" -R "$REPO" --json status --jq .status)"
+              # A transient API error (502, rate limit) must not end a wait
+              # that may be an hour in; an empty status just loops again, and
+              # the deadline bounds a persistent failure.
+              status="$(gh run view "$run_id" -R "$REPO" --json status --jq .status || true)"
               if ready; then
                 break
               fi
@@ -113,7 +116,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        run: docker/fetch-release-binaries.sh "${{ steps.release.outputs.tag }}" "$RUNNER_TEMP/image-context"
+          # Passed through the environment, never pasted into the script: a
+          # tag name is API data and may contain shell metacharacters.
+          TAG: ${{ steps.release.outputs.tag }}
+        run: docker/fetch-release-binaries.sh "$TAG" "$RUNNER_TEMP/image-context"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
