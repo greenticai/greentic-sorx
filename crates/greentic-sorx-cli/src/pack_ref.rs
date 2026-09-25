@@ -33,7 +33,10 @@ pub(crate) fn parse_pack_ref(raw: &Path) -> PackRef {
 /// in this module's tests). Credentials are the same `OCI_USERNAME` /
 /// `OCI_PASSWORD` pair greentic-start honours, so one Kubernetes Secret
 /// serves both.
-#[allow(dead_code)] // wired into start by the next task
+///
+/// A tag-only reference resolved onto a plain-HTTP registry (via
+/// `GREENTIC_OCI_INSECURE_REGISTRIES`) is refused before any network call —
+/// see `digest_required_for_plain_http`.
 pub(crate) fn materialize(pack: &Path) -> CliResult<PathBuf> {
     let reference = match parse_pack_ref(pack) {
         PackRef::Local(path) => return Ok(path),
@@ -49,31 +52,36 @@ pub(crate) fn materialize(pack: &Path) -> CliResult<PathBuf> {
         ..PackFetchOptions::default()
     };
     let insecure_registries = insecure_registries_from_env();
-    let fetcher: OciPackFetcher<DefaultRegistryClient> =
-        match decide_transport(pull_credentials(), insecure_registries) {
-            TransportDecision::Default => OciPackFetcher::new(options),
-            TransportDecision::Authenticated {
-                username,
-                password,
-                insecure_registries_ignored,
-            } => {
-                if !insecure_registries_ignored.is_empty() {
-                    eprintln!(
-                        "greentic-sorx: GREENTIC_OCI_INSECURE_REGISTRIES is set but this pull is \
-                         authenticated; DefaultRegistryClient's basic-auth constructor stays \
-                         HTTPS, so this pull will fail if the registry only serves plain HTTP"
-                    );
-                }
-                OciPackFetcher::with_client(
-                    DefaultRegistryClient::with_basic_auth(username, password),
-                    options,
-                )
+    let decision = decide_transport(pull_credentials(), insecure_registries);
+    if let TransportDecision::InsecureRegistries(ref registries) = decision
+        && let Some(err) = digest_required_for_plain_http(&reference, registries)
+    {
+        return Err(err);
+    }
+    let fetcher: OciPackFetcher<DefaultRegistryClient> = match decision {
+        TransportDecision::Default => OciPackFetcher::new(options),
+        TransportDecision::Authenticated {
+            username,
+            password,
+            insecure_registries_ignored,
+        } => {
+            if !insecure_registries_ignored.is_empty() {
+                eprintln!(
+                    "greentic-sorx: GREENTIC_OCI_INSECURE_REGISTRIES is set but this pull is \
+                     authenticated; DefaultRegistryClient's basic-auth constructor stays \
+                     HTTPS, so this pull will fail if the registry only serves plain HTTP"
+                );
             }
-            TransportDecision::InsecureRegistries(registries) => OciPackFetcher::with_client(
-                DefaultRegistryClient::with_insecure_registries(registries),
+            OciPackFetcher::with_client(
+                DefaultRegistryClient::with_basic_auth(username, password),
                 options,
-            ),
-        };
+            )
+        }
+        TransportDecision::InsecureRegistries(registries) => OciPackFetcher::with_client(
+            DefaultRegistryClient::with_insecure_registries(registries),
+            options,
+        ),
+    };
     let fetched = runtime
         .block_on(fetcher.fetch_pack_to_cache(&reference))
         .map_err(|err| CliError::runtime(format!("cannot pull pack oci://{reference}: {err}")))?;
@@ -143,9 +151,14 @@ fn credentials_from(
 /// empty yields an empty list (HTTPS for every registry, the default).
 ///
 /// Unlike greentic-start's `insecure_registries_for_fetch`, `materialize` has
-/// exactly one pull site and it is always digest-gated when the reference
-/// pins one, so there is no separate "non-boot resolution" caller to keep
-/// HTTPS-only — the env var is honoured unconditionally here.
+/// exactly one pull site, so there is no separate "non-boot resolution"
+/// caller to keep HTTPS-only — the env var is honoured unconditionally here.
+/// That does **not** mean every insecure pull is digest-gated automatically:
+/// digest verification only happens when the REFERENCE itself pins one, and a
+/// tag-only reference resolved onto one of these registries carries no such
+/// pin. `digest_required_for_plain_http` is what closes that gap — a
+/// plain-HTTP pull with no digest is refused before the network call, rather
+/// than trusted.
 fn insecure_registries_from_env() -> Vec<String> {
     std::env::var("GREENTIC_OCI_INSECURE_REGISTRIES")
         .ok()
@@ -159,6 +172,43 @@ fn parse_insecure_registries(raw: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// The `host[:port]` segment of a bare OCI reference (no `oci://` scheme):
+/// the part before the first `/`. Used to test a reference's host against
+/// the plain-HTTP allow-list.
+fn reference_host(reference: &str) -> &str {
+    reference.split('/').next().unwrap_or(reference)
+}
+
+/// A plain-HTTP registry pull has no transport integrity — anything on the
+/// path can serve different bytes — so it is safe only when the reference
+/// itself pins a digest the fetcher then verifies
+/// (`OciPackError::DigestMismatch` on a mismatch, see this module's doc
+/// comment). A tag-only reference resolved onto an insecure registry is
+/// refused up front instead: the same trade-off greentic-start makes for its
+/// own plain-HTTP pulls.
+///
+/// Returns `None` when the reference already carries a `@sha256:` digest, or
+/// when its host is not on the plain-HTTP allow-list (HTTPS still applies,
+/// where a tag-only reference is fine — the fetcher trusts the certificate
+/// chain instead).
+fn digest_required_for_plain_http(
+    reference: &str,
+    insecure_registries: &[String],
+) -> Option<CliError> {
+    if reference.contains("@sha256:") {
+        return None;
+    }
+    let host = reference_host(reference);
+    if !insecure_registries.iter().any(|registry| registry == host) {
+        return None;
+    }
+    Some(CliError::runtime(format!(
+        "cannot pull pack oci://{reference}: {host} is pulled over plain HTTP via \
+         GREENTIC_OCI_INSECURE_REGISTRIES, which requires a digest pin (…@sha256:<hex>) so an \
+         unauthenticated plain-HTTP registry cannot silently serve different bytes"
+    )))
 }
 
 #[cfg(test)]
@@ -249,6 +299,46 @@ mod tests {
         assert_eq!(
             decide_transport(None, Vec::new()),
             TransportDecision::Default
+        );
+    }
+
+    #[test]
+    fn a_tag_only_reference_is_refused_on_a_plain_http_registry() {
+        let err = digest_required_for_plain_http(
+            "localhost:5000/greentic/sor-landlord:t1",
+            &["localhost:5000".to_string()],
+        )
+        .expect("a tag-only reference on the insecure allow-list must be refused");
+        assert!(
+            err.message
+                .contains("oci://localhost:5000/greentic/sor-landlord:t1"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("digest pin"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_digest_pinned_reference_is_allowed_on_a_plain_http_registry() {
+        assert_eq!(
+            digest_required_for_plain_http(
+                "localhost:5000/greentic/sor-landlord:t1@sha256:ab",
+                &["localhost:5000".to_string()],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tag_only_reference_off_the_insecure_allow_list_is_not_refused() {
+        // HTTPS still applies to this host, where the fetcher trusts the
+        // certificate chain instead of a pinned digest.
+        assert_eq!(
+            digest_required_for_plain_http(
+                "reg.example/greentic/sor-landlord:t1",
+                &["localhost:5000".to_string()],
+            ),
+            None
         );
     }
 
