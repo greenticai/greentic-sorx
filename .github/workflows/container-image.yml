@@ -1,0 +1,143 @@
+# Publishes ghcr.io/greenticai/greentic-sorx for every push to develop.
+#
+# The image is built from the release binaries Dev Publish attaches to a GitHub
+# release, never compiled here — so the image runs exactly the bytes the
+# release shipped, and the build takes seconds instead of a second full
+# compile per architecture.
+#
+# Trigger: `push` to develop, then WAIT for that push's Dev Publish release.
+# `workflow_run` would be the natural trigger, but GitHub only fires it for
+# workflow files on the DEFAULT branch, and this repo's default branch is
+# `main`, which carries neither this file nor dev-publish.yml. A
+# `workflow_run` trigger would therefore never fire. `workflow_dispatch` is
+# disabled for the account that publishes here, so it cannot be the only way
+# in either.
+#
+# Waiting on the RELEASE rather than on Dev Publish's conclusion is deliberate:
+# Dev Publish's last job publishes crates to crates.io and can fail (it did on
+# run 34194313992) after the release, with both linux binaries, is already
+# attached. The image depends on the release, not on crates.io.
+
+name: Container Image
+
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+  packages: write
+  actions: read
+
+concurrency:
+  group: container-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/greenticai/greentic-sorx
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    # Dev Publish takes ~25 min to attach its release (CI, then five target
+    # builds); the wait below gives up at 90.
+    timeout-minutes: 110
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Wait for this push's Dev Publish release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Dev Publish stamps its version with its own run id, so the release
+          # tag ends in `.<run id>` (v0.2.<id> or vX.Y.Z-dev.<id>). Find the run
+          # for THIS commit, then the release carrying that id — matching on
+          # the commit alone is ambiguous when a commit was published twice.
+          release_for_run() {
+            gh api "repos/$REPO/releases?per_page=30" --jq \
+              "[.[] | select(.tag_name | endswith(\".$1\"))][0].tag_name // empty"
+          }
+          linux_assets() {
+            gh release view "$1" -R "$REPO" --json assets --jq \
+              '[.assets[].name | select(test("-(x86_64|aarch64)-unknown-linux-gnu\\.tgz(\\.sha256)?$"))] | length'
+          }
+          ready() {
+            tag="$(release_for_run "$run_id")"
+            [ -n "$tag" ] && [ "$(linux_assets "$tag")" -ge 4 ]
+          }
+
+          deadline=$(( $(date +%s) + 90 * 60 ))
+          run_id=""
+          tag=""
+          while :; do
+            if [ -z "$run_id" ]; then
+              run_id="$(gh run list -R "$REPO" --workflow dev-publish.yml \
+                --commit "$SHA" --event push --limit 1 \
+                --json databaseId --jq '.[0].databaseId // empty')"
+            fi
+            if [ -n "$run_id" ]; then
+              # Status first, release second: if the run completes between the
+              # two reads, the release check still sees what it attached.
+              status="$(gh run view "$run_id" -R "$REPO" --json status --jq .status)"
+              if ready; then
+                break
+              fi
+              if [ "$status" = "completed" ]; then
+                # Completed and no full release: the binaries never attached,
+                # and waiting longer cannot change that.
+                echo "::error::Dev Publish run $run_id completed without a release carrying both linux-gnu archives for $SHA"
+                exit 1
+              fi
+              echo "Dev Publish run $run_id is $status; release ${tag:-not created yet}"
+            else
+              echo "no Dev Publish run registered for $SHA yet"
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::timed out waiting for the Dev Publish release for $SHA (run: ${run_id:-none})"
+              exit 1
+            fi
+            sleep 60
+          done
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Dev Publish run $run_id -> release $tag"
+
+      - name: Download and verify release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: docker/fetch-release-binaries.sh "${{ steps.release.outputs.tag }}" "$RUNNER_TEMP/image-context"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # No QEMU: the Dockerfile has no RUN step, so BuildKit assembles the
+      # arm64 image on an amd64 runner without executing anything.
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ runner.temp }}/image-context
+          file: ${{ github.workspace }}/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          build-args: |
+            VERSION=${{ steps.release.outputs.version }}
+            REVISION=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE }}:develop
+            ${{ env.IMAGE }}:${{ steps.release.outputs.version }}
