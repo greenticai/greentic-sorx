@@ -35,6 +35,7 @@ greentic-sorx start landlord.gtpack --schema --json
 greentic-sorx start landlord.gtpack --answers landlord.answers.json
 greentic-sorx start landlord.gtpack --answers landlord.answers.json --dry-run --json
 greentic-sorx start landlord.gtpack --answers landlord.answers.json --emit-answers
+greentic-sorx start oci://registry.example/greentic/sor-landlord:t1@sha256:<hex> --answers landlord.answers.json --non-interactive
 greentic-sorx run landlord.gtpack --answers landlord.answers.json
 greentic-sorx mcp start landlord.gtpack --answers landlord.answers.json
 ```

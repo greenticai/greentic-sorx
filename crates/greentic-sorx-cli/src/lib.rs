@@ -297,7 +297,9 @@ pub enum Commands {
     },
     /// Start a SORX runtime from a SoRLa .gtpack and startup answers.
     Start {
-        /// Path to a SoRLa .gtpack archive.
+        /// Path to a SoRLa .gtpack archive, or an `oci://` reference
+        /// (e.g. `oci://registry.example/greentic/sor-landlord:t1@sha256:<hex>`)
+        /// pulled to a local cache before starting.
         pack: PathBuf,
 
         /// Emit the startup answer schema and exit.
@@ -322,7 +324,9 @@ pub enum Commands {
     },
     /// Alias for start.
     Run {
-        /// Path to a SoRLa .gtpack archive.
+        /// Path to a SoRLa .gtpack archive, or an `oci://` reference
+        /// (e.g. `oci://registry.example/greentic/sor-landlord:t1@sha256:<hex>`)
+        /// pulled to a local cache before starting.
         pack: PathBuf,
 
         /// Path to startup answers JSON.
@@ -1065,8 +1069,8 @@ fn dispatch(
                     "start requires --schema or --answers <FILE> in non-interactive mode",
                 ));
             }
-            let pack = pack_ref::materialize(&pack)?;
             let answers = answers.map(answers_source::resolve).transpose()?;
+            let pack = pack_ref::materialize(&pack)?;
             run_start(
                 pack,
                 schema,
@@ -1084,8 +1088,8 @@ fn dispatch(
                     "run requires --answers <FILE> in non-interactive mode",
                 ));
             }
-            let pack = pack_ref::materialize(&pack)?;
             let answers = answers.map(answers_source::resolve).transpose()?;
+            let pack = pack_ref::materialize(&pack)?;
             run_start(
                 pack,
                 false,

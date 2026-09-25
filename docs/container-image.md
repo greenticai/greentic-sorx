@@ -97,7 +97,16 @@ args:
   - oci://<registry>/<repo>:<tag>@sha256:<digest>
   - --answers
   - env:SORX_ANSWERS
+  - --non-interactive
 ```
+
+`--non-interactive` is required here, not optional polish: `start` accepts an
+incomplete answers file by falling back to an interactive prompt wizard, which
+has no terminal to prompt on inside a pod and fails without ever naming which
+answer was missing. `--non-interactive` is a global flag (works in any
+position relative to the subcommand — see `greentic-sorx --help`), but the
+form above, after the subcommand's own arguments, is the one verified against
+a running container; use that exact form.
 
 Port `8787`, readiness `GET /healthz`. The pod's Secret carries:
 
