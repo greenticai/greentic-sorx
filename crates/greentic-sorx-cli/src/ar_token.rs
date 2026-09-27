@@ -25,7 +25,6 @@ pub(crate) const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The basic-auth username Artifact Registry expects alongside an OAuth
 /// access token as the password.
-#[allow(dead_code)] // wired in by pack_ref in the next commit
 pub(crate) const AR_USERNAME: &str = "oauth2accesstoken";
 
 /// Whether `host` (a registry host as `pack_ref::reference_host` resolves it,
@@ -39,7 +38,6 @@ pub(crate) fn is_artifact_registry_host(host: &str) -> bool {
 /// answer usefully — the normal case off GCP. `None`, never an error, so every
 /// existing pull keeps working unchanged and an AR pull without a token still
 /// fails at the registry with the registry's own message.
-#[allow(dead_code)] // wired in by pack_ref in the next commit
 pub(crate) fn artifact_registry_token(host: &str) -> Option<String> {
     artifact_registry_token_from(host, METADATA_TOKEN_URL, METADATA_TIMEOUT)
 }
