@@ -30,6 +30,7 @@ use sha2::{Digest, Sha256};
 
 mod admin_roles;
 mod answers_source;
+mod ar_token;
 #[cfg(feature = "events-nats")]
 mod event_bridge_invoker;
 mod http_runtime;
