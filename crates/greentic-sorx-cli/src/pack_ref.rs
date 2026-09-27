@@ -7,6 +7,7 @@ use greentic_distributor_client::{
     OciPackFetcher, PackFetchOptions, oci_packs::DefaultRegistryClient,
 };
 
+use crate::ar_token;
 use crate::{CliError, CliResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,9 +31,11 @@ pub(crate) fn parse_pack_ref(raw: &Path) -> PackRef {
 /// another pack (`greentic_distributor_client::oci_packs::OciPackFetcher::fetch_pack_to_cache`
 /// compares the resolved digest against the one pinned in the reference and
 /// returns `OciPackError::DigestMismatch` on a mismatch — see the live check
-/// in this module's tests). Credentials are the same `OCI_USERNAME` /
-/// `OCI_PASSWORD` pair greentic-start honours, so one Kubernetes Secret
-/// serves both.
+/// in this module's tests). Credentials, in order: `OCI_USERNAME` /
+/// `OCI_PASSWORD` (the pair greentic-start honours, so one Kubernetes Secret
+/// serves both); otherwise, for an Artifact Registry host (`*-docker.pkg.dev`),
+/// the attached service account's token from the GCP metadata server as
+/// `oauth2accesstoken` (see `ar_token`); otherwise an anonymous pull.
 ///
 /// A tag-only reference resolved onto a plain-HTTP registry (via
 /// `GREENTIC_OCI_INSECURE_REGISTRIES`) is refused before any network call —
@@ -53,7 +56,17 @@ pub(crate) fn materialize(pack: &Path) -> CliResult<PathBuf> {
         ..PackFetchOptions::default()
     };
     let insecure_registries = insecure_registries_from_env();
-    let decision = decide_transport(pull_credentials(), insecure_registries);
+    let host = reference_host(&reference);
+    let credentials =
+        resolve_pull_credentials(&host, pull_credentials(), ar_token::artifact_registry_token);
+    let source = credentials.as_ref().map(|credentials| credentials.source);
+    if source == Some(CredentialSource::ArtifactRegistryMetadata) {
+        eprintln!(
+            "greentic-sorx: pulling oci://{reference} with {}",
+            CredentialSource::ArtifactRegistryMetadata.describe()
+        );
+    }
+    let decision = decide_transport(credentials, insecure_registries);
     if let TransportDecision::InsecureRegistries(ref registries) = decision
         && let Some(err) = digest_required_for_plain_http(&reference, registries)
     {
@@ -62,8 +75,7 @@ pub(crate) fn materialize(pack: &Path) -> CliResult<PathBuf> {
     let fetcher: OciPackFetcher<DefaultRegistryClient> = match decision {
         TransportDecision::Default => OciPackFetcher::new(options),
         TransportDecision::Authenticated {
-            username,
-            password,
+            credentials,
             insecure_registries_ignored,
         } => {
             if !insecure_registries_ignored.is_empty() {
@@ -74,7 +86,7 @@ pub(crate) fn materialize(pack: &Path) -> CliResult<PathBuf> {
                 );
             }
             OciPackFetcher::with_client(
-                DefaultRegistryClient::with_basic_auth(username, password),
+                DefaultRegistryClient::with_basic_auth(credentials.username, credentials.password),
                 options,
             )
         }
@@ -85,7 +97,9 @@ pub(crate) fn materialize(pack: &Path) -> CliResult<PathBuf> {
     };
     let fetched = runtime
         .block_on(fetcher.fetch_pack_to_cache(&reference))
-        .map_err(|err| CliError::runtime(format!("cannot pull pack oci://{reference}: {err}")))?;
+        .map_err(|err| {
+            CliError::runtime(pull_error_message(&reference, &err.to_string(), source))
+        })?;
     Ok(fetched.path)
 }
 
@@ -121,19 +135,20 @@ fn pack_cache_dir_from(override_dir: Option<String>) -> PathBuf {
 ///
 /// Mirrors greentic-start's `fetch_remote_bundle`: `DefaultRegistryClient`'s
 /// `with_basic_auth` and `with_insecure_registries` constructors each
-/// hardcode the OTHER axis (auth vs. transport), so an operator who set
-/// `OCI_USERNAME`/`OCI_PASSWORD` must not be silently downgraded to plain
-/// HTTP by an also-set `GREENTIC_OCI_INSECURE_REGISTRIES` — that would send
-/// credentials in the clear to whichever registry the pull resolves to.
+/// hardcode the OTHER axis (auth vs. transport), so a pull carrying any
+/// credential must not be silently downgraded to plain HTTP by an also-set
+/// `GREENTIC_OCI_INSECURE_REGISTRIES` — that would send credentials in the
+/// clear to whichever registry the pull resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TransportDecision {
     /// No credentials, no insecure registries: HTTPS, anonymous.
     Default,
-    /// Explicit credentials win outright; `insecure_registries_ignored` is
-    /// carried through only so the caller can warn that it had no effect.
+    /// Credentials (explicit, or the Artifact Registry metadata token) win
+    /// outright; `insecure_registries_ignored` is carried through only so the
+    /// caller can warn that it had no effect. `PullCredentials`' own `Debug`
+    /// redacts the password, so this derive cannot leak it.
     Authenticated {
-        username: String,
-        password: String,
+        credentials: PullCredentials,
         insecure_registries_ignored: Vec<String>,
     },
     /// No credentials: the listed `host[:port]` registries are pulled over
@@ -142,13 +157,12 @@ enum TransportDecision {
 }
 
 fn decide_transport(
-    credentials: Option<(String, String)>,
+    credentials: Option<PullCredentials>,
     insecure_registries: Vec<String>,
 ) -> TransportDecision {
     match credentials {
-        Some((username, password)) => TransportDecision::Authenticated {
-            username,
-            password,
+        Some(credentials) => TransportDecision::Authenticated {
+            credentials,
             insecure_registries_ignored: insecure_registries,
         },
         None if insecure_registries.is_empty() => TransportDecision::Default,
@@ -170,6 +184,92 @@ fn credentials_from(
     match (username, password) {
         (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => Some((u, p)),
         _ => None,
+    }
+}
+
+/// Where a pull's credential came from — reported in a failed pull's message,
+/// never the credential itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialSource {
+    /// `OCI_USERNAME` / `OCI_PASSWORD`, set by the operator.
+    Explicit,
+    /// The attached service account's token from the GCP metadata server.
+    ArtifactRegistryMetadata,
+}
+
+impl CredentialSource {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Explicit => "OCI_USERNAME/OCI_PASSWORD",
+            Self::ArtifactRegistryMetadata => {
+                "the runtime service account's token from the GCP metadata server"
+            }
+        }
+    }
+}
+
+/// A registry credential for one pull. `Debug` is written by hand so the
+/// password can never reach a log line through `{:?}`.
+#[derive(Clone, PartialEq, Eq)]
+struct PullCredentials {
+    username: String,
+    password: String,
+    source: CredentialSource,
+}
+
+impl std::fmt::Debug for PullCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PullCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// Which credential authenticates a pull from `host`.
+///
+/// Explicit wins: an operator who set `OCI_USERNAME`/`OCI_PASSWORD` must not
+/// be silently overridden by a GCP token that merely happens to be ambient.
+/// `ar_token` is only invoked when `explicit` is `None` — a pure function of
+/// its inputs, so the precedence is tested without a metadata server
+/// (mirrors greentic-start `resolve_pull_credentials`).
+fn resolve_pull_credentials(
+    host: &str,
+    explicit: Option<(String, String)>,
+    ar_token: impl FnOnce(&str) -> Option<String>,
+) -> Option<PullCredentials> {
+    match explicit {
+        Some((username, password)) => Some(PullCredentials {
+            username,
+            password,
+            source: CredentialSource::Explicit,
+        }),
+        None => ar_token(host).map(|token| PullCredentials {
+            // Full path: the closure parameter `ar_token` shadows the module here.
+            username: crate::ar_token::AR_USERNAME.to_string(),
+            password: token,
+            source: CredentialSource::ArtifactRegistryMetadata,
+        }),
+    }
+}
+
+/// The message for a failed pull. Names which credential was used — never its
+/// value — and, for the metadata token, the grant whose absence is the usual
+/// cause, so the deployer can report something actionable.
+fn pull_error_message(reference: &str, error: &str, source: Option<CredentialSource>) -> String {
+    match source {
+        None => format!("cannot pull pack oci://{reference}: {error} (pulled anonymously)"),
+        Some(CredentialSource::Explicit) => format!(
+            "cannot pull pack oci://{reference}: {error} (pulled with {})",
+            CredentialSource::Explicit.describe()
+        ),
+        Some(CredentialSource::ArtifactRegistryMetadata) => format!(
+            "cannot pull pack oci://{reference}: {error} (pulled with {}; if the registry \
+             refused it, grant that service account roles/artifactregistry.reader on the \
+             repository)",
+            CredentialSource::ArtifactRegistryMetadata.describe()
+        ),
     }
 }
 
@@ -255,7 +355,17 @@ fn digest_required_for_plain_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ar_token::mock_metadata::{refused, serve_once};
     use std::path::Path;
+    use std::time::Duration;
+
+    fn explicit(user: &str, pass: &str) -> PullCredentials {
+        PullCredentials {
+            username: user.to_string(),
+            password: pass.to_string(),
+            source: CredentialSource::Explicit,
+        }
+    }
 
     #[test]
     fn a_plain_path_stays_local() {
@@ -336,17 +446,129 @@ mod tests {
 
     #[test]
     fn an_authenticated_pull_never_downgrades_to_http() {
-        let decision = decide_transport(
-            Some(("u".to_string(), "p".to_string())),
-            vec!["localhost:5000".to_string()],
-        );
+        let decision =
+            decide_transport(Some(explicit("u", "p")), vec!["localhost:5000".to_string()]);
         assert_eq!(
             decision,
             TransportDecision::Authenticated {
-                username: "u".to_string(),
-                password: "p".to_string(),
+                credentials: explicit("u", "p"),
                 insecure_registries_ignored: vec!["localhost:5000".to_string()],
             }
+        );
+    }
+
+    #[test]
+    fn explicit_credentials_win_and_the_metadata_server_is_never_asked() {
+        let resolved = resolve_pull_credentials(
+            "europe-west1-docker.pkg.dev",
+            Some(("u".to_string(), "p".to_string())),
+            |_| panic!("explicit credentials must short-circuit the metadata token"),
+        );
+        assert_eq!(resolved, Some(explicit("u", "p")));
+    }
+
+    #[test]
+    fn an_ar_host_without_explicit_credentials_pulls_as_oauth2accesstoken() {
+        let server = serve_once(200, r#"{"access_token":"ya29.from-metadata"}"#);
+        let url = server.url.clone();
+        let resolved = resolve_pull_credentials("europe-west1-docker.pkg.dev", None, |host| {
+            crate::ar_token::artifact_registry_token_from(host, &url, Duration::from_secs(5))
+        });
+        assert_eq!(
+            resolved,
+            Some(PullCredentials {
+                username: "oauth2accesstoken".to_string(),
+                password: "ya29.from-metadata".to_string(),
+                source: CredentialSource::ArtifactRegistryMetadata,
+            })
+        );
+    }
+
+    #[test]
+    fn an_unreachable_metadata_server_falls_back_to_the_anonymous_default() {
+        let url = refused();
+        let resolved = resolve_pull_credentials("europe-west1-docker.pkg.dev", None, |host| {
+            crate::ar_token::artifact_registry_token_from(host, &url, Duration::from_secs(5))
+        });
+        assert_eq!(resolved, None);
+        assert_eq!(
+            decide_transport(resolved, Vec::new()),
+            TransportDecision::Default
+        );
+    }
+
+    #[test]
+    fn a_non_ar_reference_resolves_to_no_credentials_and_never_asks_for_a_token() {
+        let server = serve_once(200, r#"{"access_token":"ya29.must-not-leak"}"#);
+        let url = server.url.clone();
+        let host = reference_host("ghcr.io/greenticai/sor-landlord:t1");
+        let resolved = resolve_pull_credentials(&host, None, |host| {
+            crate::ar_token::artifact_registry_token_from(host, &url, Duration::from_secs(5))
+        });
+        assert_eq!(resolved, None);
+        assert!(
+            server
+                .seen
+                .recv_timeout(Duration::from_millis(300))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_host_comes_from_the_registry_not_from_a_path_segment() {
+        assert_eq!(
+            reference_host("europe-west1-docker.pkg.dev/proj/repo/sorla/landlord:t1@sha256:ab"),
+            "europe-west1-docker.pkg.dev"
+        );
+        assert_eq!(
+            reference_host("reg.example/attacker-docker.pkg.dev/sor:t1"),
+            "reg.example"
+        );
+    }
+
+    #[test]
+    fn pull_credentials_debug_never_prints_the_password() {
+        let creds = PullCredentials {
+            username: "oauth2accesstoken".to_string(),
+            password: "ya29.super-secret".to_string(),
+            source: CredentialSource::ArtifactRegistryMetadata,
+        };
+        let rendered = format!("{creds:?}");
+        assert!(!rendered.contains("ya29.super-secret"), "{rendered}");
+        assert!(rendered.contains("oauth2accesstoken"), "{rendered}");
+        let decision = decide_transport(Some(creds), Vec::new());
+        assert!(!format!("{decision:?}").contains("ya29.super-secret"));
+    }
+
+    #[test]
+    fn a_failed_ar_token_pull_names_the_source_and_the_reader_grant() {
+        let message = pull_error_message(
+            "europe-west1-docker.pkg.dev/p/r/sorla/landlord:t1",
+            "401 Unauthorized",
+            Some(CredentialSource::ArtifactRegistryMetadata),
+        );
+        assert!(
+            message.contains("oci://europe-west1-docker.pkg.dev/p/r/sorla/landlord:t1"),
+            "{message}"
+        );
+        assert!(message.contains("401 Unauthorized"), "{message}");
+        assert!(message.contains("metadata server"), "{message}");
+        assert!(
+            message.contains("roles/artifactregistry.reader"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_failed_anonymous_or_explicit_pull_keeps_its_plain_message() {
+        let anonymous = pull_error_message("ghcr.io/x/y:t", "boom", None);
+        assert!(anonymous.contains("pulled anonymously"), "{anonymous}");
+        assert!(!anonymous.contains("artifactregistry"), "{anonymous}");
+        let explicit_msg =
+            pull_error_message("ghcr.io/x/y:t", "boom", Some(CredentialSource::Explicit));
+        assert!(
+            explicit_msg.contains("OCI_USERNAME/OCI_PASSWORD"),
+            "{explicit_msg}"
         );
     }
 

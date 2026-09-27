@@ -116,7 +116,7 @@ Port `8787`, readiness `GET /healthz`. The pod's Secret carries:
 | `SORX_POSTGRES_URL` | the Postgres connection string (see Store configuration below) |
 | `SORX_SHARED_SECRET` | the value `server.auth.shared_secret_ref: env:SORX_SHARED_SECRET` in the answers resolves to, when `server.auth.mode` is `shared_secret` |
 | `SORX_POSTGRES_CA_FILE` (optional) | path to a mounted CA bundle, when `SORX_POSTGRES_CA` is projected as a file rather than a variable |
-| `OCI_USERNAME` / `OCI_PASSWORD` | registry credentials for the pack pull — the same Secret the worker's own OCI pull uses |
+| `OCI_USERNAME` / `OCI_PASSWORD` (optional) | registry credentials for the pack pull — the same Secret the worker's own OCI pull uses. On Cloud Run with an Artifact Registry `pack_ref`, leave both unset: sorx uses the runtime service account's metadata-server token (it needs `roles/artifactregistry.reader` on the repository) |
 
 Pin the pack reference by digest (`…@sha256:<hex>`); see
 [startup answers](answers.md#oci-packs) for why a plain-HTTP registry
