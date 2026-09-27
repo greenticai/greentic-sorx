@@ -53,8 +53,9 @@ greentic-sorx start oci://registry.example/greentic/sor-landlord:1.0.0@sha256:<d
      so one Kubernetes Secret serves both. When both are set they always win.
   2. Otherwise, for a Google Artifact Registry host (`<region>-docker.pkg.dev`),
      the attached service account's access token from the GCP metadata server
-     (`Metadata-Flavor: Google`, 5 s timeout), sent as `oauth2accesstoken` /
-     `<token>`. This is how a Cloud Run sorx service pulls its pack with no key:
+     (`Metadata-Flavor: Google`, 5 s timeout for TCP connect and reads; DNS
+     lookup is not bounded), sent as `oauth2accesstoken` / `<token>`. This is
+     how a Cloud Run sorx service pulls its pack with no key:
      grant its runtime service account `roles/artifactregistry.reader` on the
      repository. The token is fetched once, at boot, and never logged.
   3. Otherwise — not on GCP, metadata server unreachable, or any other

@@ -18,17 +18,22 @@ pub(crate) const ARTIFACT_REGISTRY_SUFFIX: &str = "-docker.pkg.dev";
 pub(crate) const METADATA_TOKEN_URL: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
-/// Upper bound on the whole metadata request. Off GCP the name does not
-/// resolve and this is never reached; it matters for a link-local route that
-/// accepts and then stalls, where boot must continue anonymously.
+/// Upper bound on the TCP connect and reads of the metadata request. Off GCP
+/// the name does not resolve and this is never reached; it matters for a
+/// link-local route that accepts and then stalls, where boot must continue
+/// anonymously. Note: this bound does not cover DNS resolution of
+/// `metadata.google.internal`, which on GCP-less hosts may take several seconds.
 pub(crate) const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The basic-auth username Artifact Registry expects alongside an OAuth
 /// access token as the password.
 pub(crate) const AR_USERNAME: &str = "oauth2accesstoken";
 
-/// Whether `host` (a registry host as `pack_ref::reference_host` resolves it,
-/// `host[:port]`) is a Google Artifact Registry Docker host.
+/// Whether `host` (a registry host as `pack_ref::reference_host` resolves it)
+/// is a Google Artifact Registry Docker host. Matching is case-sensitive; a
+/// `host:port` does not match (the port suffix is not stripped). When this
+/// returns false, the pull falls back to anonymous HTTPS — both the match
+/// failure and the absence of an accessible metadata server fail closed.
 pub(crate) fn is_artifact_registry_host(host: &str) -> bool {
     host.ends_with(ARTIFACT_REGISTRY_SUFFIX)
 }
