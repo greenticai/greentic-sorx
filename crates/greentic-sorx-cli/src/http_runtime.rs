@@ -1,26 +1,31 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentic_sorx_core::{
-    AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface,
-    AuthorizationRequirement, AuthorizationRoles, CallerContext, CapabilityOffer, CommandStep,
-    ControlDecisionAction, EndpointDefinition, EndpointInvocation, EndpointMethod, EndpointRouter,
-    EndpointStatus, EntityRecord, FoundationDbProviderAdapter, FoundationDbProviderConfig,
-    InvocationSource, ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView,
+    AdminActionRequest, AdminActionResponse, AdminObserverEvent, AdminSurface, AppendEventOp,
+    AuthorizationPolicyInput, AuthorizationPolicyResource, AuthorizationRequirement,
+    AuthorizationRoles, BusinessEventSink, CallerContext, CapabilityOffer, CommandStep,
+    ControlDecisionAction, DeploymentRegistryError, EndpointDefinition, EndpointInvocation,
+    EndpointMethod, EndpointRouter, EndpointStatus, EntityRecord, FoundationDbProviderAdapter,
+    FoundationDbProviderConfig, InvocationSource, LocalDeploymentRegistryStore,
+    LocalMigrationLedger, ManagerContextDefaults, ManagerFieldRelationshipView, ManagerFieldView,
     ManagerLocaleBundle, ManagerLocaleCatalog, ManagerLocaleContext, ManagerNavItem,
     ManagerPolicyDecision, ManagerPolicyEffect, ManagerPolicySet, ManagerRecordView,
     ManagerRelationshipView, McpToolDefinition, McpToolList, MemoryStoreProvider, MetricAggregate,
     MetricQuery, MetricQueryFilter, MetricQueryResult, MetricResultRow, MetricRuntime,
     MetricRuntimeProvider, OperationKind, PolicyAction, ProviderBinding, ProviderNamespace,
-    ProviderRegistry, QueryOp, RecordAccessPolicy, RiskLevel, RuntimeCapabilities, RuntimeConfig,
-    RuntimeInfo, RuntimeMetric, RuntimeMetricCache, RuntimeMetricCatalog, RuntimeMetricDimension,
-    RuntimeMetricKind, RuntimeOperationalIndex, RuntimePack, RuntimeSnapshot, SorxDeployment,
-    SorxError, SorxResult, SorxRuntime, SorxRuntimeConfig, StageDeploymentRequest, StdoutAuditSink,
-    StoreProviderKind, TrafficUpdateRequest, apply_value_patch, filter_manager_view,
-    generate_manager_view, humanize_identifier, localize_manager_view, render_dashboard_card,
+    ProviderRegistry, QueryOp, RecordAccessPolicy, RiskLevel, RollbackAliasRequest,
+    RuntimeCapabilities, RuntimeConfig, RuntimeInfo, RuntimeMetric, RuntimeMetricCache,
+    RuntimeMetricCatalog, RuntimeMetricDimension, RuntimeMetricKind, RuntimeOperationalIndex,
+    RuntimePack, RuntimeSnapshot, SorxDeployment, SorxError, SorxResult, SorxRuntime,
+    SorxRuntimeConfig, StageDeploymentRequest, StateMode, StdoutBusinessEventSink,
+    StoreProviderKind, TrafficUpdateRequest, apply_pending_migrations, apply_value_patch,
+    command_event_topic, entity_event_topic, filter_manager_view, generate_manager_view,
+    humanize_identifier, localize_manager_view, parse_pack_migrations, render_dashboard_card,
     render_record_create_card, render_record_detail_card, render_record_picker_card,
     render_relationship_summary_card, resolve_manager_context,
 };
@@ -30,6 +35,8 @@ use greentic_sorx_pack::{
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+
+use crate::admin_roles::AdminRolesOverlay;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RouteList {
@@ -87,6 +94,22 @@ impl RouteVersionMetadata {
     }
 }
 
+/// Holds the resolved OAuth/MCP auth state for the MCP Streamable-HTTP endpoint.
+/// Present only when `SORX_MCP_ENABLED=1` (and issuer + audience are configured).
+#[derive(Clone)]
+struct McpAuthState {
+    config: std::sync::Arc<crate::mcp_auth::McpAuthConfig>,
+    jwks: std::sync::Arc<crate::mcp_auth::UreqJwks>,
+    /// Canonical resource identifier, e.g. `{public_base_url}/v1/sorx/mcp`.
+    resource: String,
+    /// Pre-computed OAuth Protected Resource Metadata URL
+    /// (`{public_base_url}/.well-known/oauth-protected-resource`).
+    /// Stored at construction time so `handle_mcp_post` never has to derive it
+    /// from `resource` via string trimming, which is fragile when `public_base_url`
+    /// is empty or has an unexpected suffix.
+    metadata_url: String,
+}
+
 #[derive(Clone)]
 pub struct HttpRuntime {
     deployment_id: String,
@@ -96,6 +119,12 @@ pub struct HttpRuntime {
     routes: Arc<RouteList>,
     tools: Arc<McpToolList>,
     business_actions: Arc<Option<BusinessActionAssets>>,
+    /// Raw `agent-gateway.json` manifest the pack shipped (the same document
+    /// used to build `runtime.router` via `EndpointRouter::from_agent_gateway`
+    /// at construction). Retained so agent-endpoint capability discovery can
+    /// read fields (title/intent/exports/...) that don't survive parsing into
+    /// [`EndpointDefinition`].
+    agent_gateway_json: Arc<Value>,
     manager_title: Arc<String>,
     manager_description: Arc<String>,
     manager_record_descriptions: Arc<BTreeMap<String, String>>,
@@ -106,11 +135,31 @@ pub struct HttpRuntime {
     metrics: Arc<Option<RuntimeMetricCatalog>>,
     metric_provider: Arc<StoreMetricProvider>,
     runtime_snapshot: Arc<RwLock<RuntimeSnapshot>>,
+    /// Path to the persisted deployment registry JSON file. When set, the
+    /// `/v1/sorx/*` deployment/alias control-plane endpoints are served from
+    /// this store; when `None` they return 501 (back-compat).
+    registry_path: Arc<Option<PathBuf>>,
+    /// When set, the deployment's policy roles are sourced from the admin
+    /// system-of-record instead of the self-asserted `x-greentic-caller-role`
+    /// header. `None` (the default) preserves the legacy header-roles behavior.
+    admin_roles_overlay: Option<Arc<AdminRolesOverlay>>,
+    /// OAuth resource-server state for the MCP endpoint. `None` when MCP is
+    /// disabled (the default; back-compat).
+    mcp_auth: Option<McpAuthState>,
 }
 
 #[derive(Clone)]
 struct HttpAuth {
     shared_secret: Option<String>,
+}
+
+impl crate::mcp_jsonrpc::Invoker for SorxRuntime {
+    fn invoke(
+        &self,
+        inv: greentic_sorx_core::EndpointInvocation,
+    ) -> greentic_sorx_core::SorxResult<greentic_sorx_core::EndpointResult> {
+        SorxRuntime::invoke(self, inv)
+    }
 }
 
 impl HttpRuntime {
@@ -132,6 +181,7 @@ impl HttpRuntime {
         let mut router = EndpointRouter::from_agent_gateway(&pack.sorla_assets.agent_gateway_json)?;
         apply_model_endpoint_authorization(pack, &mut router);
         let providers = provider_registry(&config)?;
+        let audit_sink = audit_sink_from_config(&config);
         let runtime = configure_runtime_audit(
             SorxRuntime::new(
                 RuntimePack {
@@ -145,8 +195,23 @@ impl HttpRuntime {
                 router,
                 providers,
             ),
-            &config,
+            audit_sink.clone(),
         );
+        let wasm_adapter = build_wasm_extension_adapter(&config);
+        let runtime = bind_runtime_extensions(
+            runtime,
+            runtime_config.as_ref().map(|rc| &rc.extensions),
+            audit_sink,
+            &pack.pack_name,
+            &pack.pack_version,
+            wasm_adapter,
+        );
+        let runtime = configure_runtime_events(runtime, &config)?;
+        // Apply any pending pack migrations against the canonical store before
+        // serving. No-op when the pack ships no migrations; fails startup when
+        // an unconfirmed breaking migration is pending. See
+        // `apply_pack_migrations_at_startup` for ledger/namespace resolution.
+        apply_pack_migrations_at_startup(pack, &config, &runtime)?;
         let deployment_id = deployment_id.into();
         let exposure = config.exposure.default_visibility.clone();
         let auth = http_auth_from_config(&config)?;
@@ -189,6 +254,23 @@ impl HttpRuntime {
                 .collect(),
             default_provider_id: runtime.config.bindings.default_provider_id().to_string(),
         };
+        let mcp_auth = crate::mcp_auth::McpAuthConfig::from_env().map(|cfg| {
+            let public_base_url = config
+                .server
+                .public_base_url
+                .as_deref()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let resource = format!("{public_base_url}/v1/sorx/mcp");
+            let metadata_url = format!("{public_base_url}/.well-known/oauth-protected-resource");
+            let jwks = crate::mcp_auth::UreqJwks::new(cfg.jwks_ttl);
+            McpAuthState {
+                config: std::sync::Arc::new(cfg),
+                jwks: std::sync::Arc::new(jwks),
+                resource,
+                metadata_url,
+            }
+        });
         Ok(Self {
             deployment_id,
             admin_api_enabled: false,
@@ -197,6 +279,7 @@ impl HttpRuntime {
             routes: Arc::new(routes),
             tools: Arc::new(tools),
             business_actions: Arc::new(pack.sorla_assets.business_actions.clone()),
+            agent_gateway_json: Arc::new(pack.sorla_assets.agent_gateway_json.clone()),
             manager_title: Arc::new(manager_title),
             manager_description: Arc::new(manager_description),
             manager_record_descriptions: Arc::new(manager_record_descriptions),
@@ -207,12 +290,43 @@ impl HttpRuntime {
             metrics: Arc::new(metrics),
             metric_provider: Arc::new(metric_provider),
             runtime_snapshot: Arc::new(RwLock::new(runtime_snapshot)),
+            registry_path: Arc::new(None),
+            admin_roles_overlay: None,
+            mcp_auth,
         })
+    }
+
+    /// Attach a persisted deployment registry file so the `/v1/sorx/*`
+    /// deployment/alias control-plane and routing-table endpoints are served
+    /// from it. Passing a path enables the admin API surface; passing `None`
+    /// disables it again so those endpoints fall back to 501/disabled.
+    pub fn with_registry_path(mut self, registry_path: Option<PathBuf>) -> Self {
+        self.admin_api_enabled = registry_path.is_some();
+        self.registry_path = Arc::new(registry_path);
+        self
+    }
+
+    /// Attaches an admin-backed roles overlay. When present, the request path
+    /// sources caller roles from the admin system-of-record and ignores the
+    /// self-asserted `x-greentic-caller-role` header (security: callers must not
+    /// be able to grant themselves roles).
+    pub fn with_admin_roles_overlay(mut self, overlay: Arc<AdminRolesOverlay>) -> Self {
+        self.admin_roles_overlay = Some(overlay);
+        self
     }
 
     #[cfg(test)]
     fn route_list(&self) -> &RouteList {
         &self.routes
+    }
+
+    /// Returns a shared handle to the underlying [`SorxRuntime`] so background
+    /// tasks (e.g. the NATS event bridge) can invoke endpoints after the HTTP
+    /// runtime is built. The handle is reference-counted; cloning it does not
+    /// duplicate runtime state.
+    #[cfg(feature = "events-nats")]
+    pub fn runtime_handle(&self) -> Arc<SorxRuntime> {
+        self.runtime.clone()
     }
 
     pub fn serve(&self, listener: TcpListener) -> std::io::Result<()> {
@@ -260,8 +374,29 @@ impl HttpRuntime {
             _ => {}
         }
 
+        // MCP OAuth endpoints — served before the shared-secret `authorize` gate.
+        if let Some(state) = &self.mcp_auth {
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/.well-known/oauth-protected-resource") => {
+                    return json_response(
+                        200,
+                        crate::mcp_auth::protected_resource_metadata(
+                            &state.resource,
+                            &state.config.issuers,
+                        ),
+                    );
+                }
+                ("POST", "/v1/sorx/mcp") => return self.handle_mcp_post(state, &request),
+                _ => {}
+            }
+        }
+
         if let Err(response) = self.authorize(&request) {
             return response;
+        }
+
+        if request.method == "POST" && request.path == "/v1/sorx/events" {
+            return self.append_business_event(&request);
         }
 
         match (request.method.as_str(), request.path.as_str()) {
@@ -345,11 +480,19 @@ impl HttpRuntime {
             if !self.admin_api_enabled {
                 return error_response(404, "SORX_ADMIN_API_DISABLED", "admin API is disabled");
             }
-            return error_response(
-                501,
-                "SORX_ADMIN_API_NOT_IMPLEMENTED",
-                "admin API storage is provided by the CLI registry in this build",
-            );
+            return match self.registry_path.as_ref() {
+                Some(path) => handle_registry_request(
+                    &LocalDeploymentRegistryStore::new(path.clone()),
+                    &request.method,
+                    &request.path,
+                    &request.body,
+                ),
+                None => error_response(
+                    501,
+                    "SORX_ADMIN_API_NOT_IMPLEMENTED",
+                    "admin API storage is provided by the CLI registry in this build",
+                ),
+            };
         }
 
         let Some((endpoint, path_params)) = self.match_endpoint(&request.method, &request.path)
@@ -375,19 +518,20 @@ impl HttpRuntime {
             Ok(value) => value,
             Err(err) => return sorx_error_response(400, err),
         };
-        let roles = request
+        let header_roles = header_caller_roles(&request.headers);
+        // Trusted lookup key for the admin overlay. The router sets this to the
+        // authenticated user's email; it is NOT derived from the free-form
+        // `x-greentic-caller-id` subject.
+        let caller_email = request
             .headers
-            .get("x-greentic-caller-role")
-            .map(|value| {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|role| !role.is_empty())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|roles| !roles.is_empty())
-            .unwrap_or_else(|| vec!["local".to_string()]);
+            .get("x-greentic-caller-email")
+            .map(String::as_str);
+        let roles = compute_effective_roles(
+            self.admin_roles_overlay.as_deref(),
+            &tenant_id,
+            caller_email,
+            header_roles,
+        );
 
         let input = match request_json(&request, &path_params, Some(&endpoint)) {
             Ok(value) => value,
@@ -464,6 +608,166 @@ impl HttpRuntime {
             "SORX_UNAUTHORIZED",
             "valid HTTP ingest shared secret is required",
         ))
+    }
+
+    /// Handles `POST /v1/sorx/events`: an external ingress that appends a
+    /// business event directly onto the tenant's canonical event stream,
+    /// bypassing the generic command/endpoint router. The shared-secret
+    /// bearer check has already run in `handle_request` before this is
+    /// reached; this method additionally routes the append through the
+    /// policy engine so tenant authorization policies still apply.
+    fn append_business_event(&self, request: &HttpRequest) -> HttpResponse {
+        let tenant_id = match header_or_local(
+            &request.headers,
+            "x-greentic-tenant-id",
+            &self.runtime.config.tenant_id,
+            &self.runtime.config.environment,
+        ) {
+            Ok(value) => value,
+            Err(err) => return sorx_error_response(400, err),
+        };
+        let caller_id = match header_or_local(
+            &request.headers,
+            "x-greentic-caller-id",
+            "local",
+            &self.runtime.config.environment,
+        ) {
+            Ok(value) => value,
+            Err(err) => return sorx_error_response(400, err),
+        };
+        let caller_email = request
+            .headers
+            .get("x-greentic-caller-email")
+            .map(String::as_str);
+        let roles = compute_effective_roles(
+            self.admin_roles_overlay.as_deref(),
+            &tenant_id,
+            caller_email,
+            header_caller_roles(&request.headers),
+        );
+
+        let body: Value = match serde_json::from_str(&request.body) {
+            Ok(value) => value,
+            Err(err) => return error_response(400, "SORX_INVALID_JSON", &err.to_string()),
+        };
+        let event_type = body.get("type").and_then(Value::as_str).unwrap_or_default();
+        let Some((domain, _name)) = parse_events_cap(event_type) else {
+            return error_response(
+                400,
+                "SORX_INVALID_EVENT_TYPE",
+                "type must be cap://greentic/events/{domain}/{name}",
+            );
+        };
+        let producer = body.pointer("/metadata/producer").and_then(Value::as_str);
+        let schema_version = body
+            .pointer("/metadata/schema_version")
+            .and_then(Value::as_str);
+        if producer.map(str::is_empty).unwrap_or(true)
+            || schema_version.map(str::is_empty).unwrap_or(true)
+        {
+            return error_response(
+                400,
+                "SORX_INVALID_EVENT",
+                "metadata.producer and metadata.schema_version are required",
+            );
+        }
+
+        let decision = self
+            .runtime
+            .policy
+            .decide_authorization(&AuthorizationPolicyInput {
+                principal_subject: caller_id,
+                principal_roles: roles,
+                resource: AuthorizationPolicyResource::Record {
+                    record: format!("events/{domain}"),
+                },
+                operation: "append_event".to_string(),
+                policies: Vec::new(),
+                conditions: None,
+            });
+        if matches!(decision.action, PolicyAction::Deny) {
+            return error_response(403, "SORX_POLICY_DENIED", &decision.reason);
+        }
+
+        let occurred_at = body
+            .get("time")
+            .and_then(Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+
+        let provider_id = self
+            .runtime
+            .config
+            .bindings
+            .default_provider_id()
+            .to_string();
+        let canonical = match self.runtime.providers.canonical_store(&provider_id) {
+            Ok(store) => store,
+            Err(err) => return sorx_error_response(500, err),
+        };
+
+        let op = AppendEventOp {
+            namespace: ProviderNamespace {
+                tenant_id,
+                sor_name: self.runtime.config.deployment.sor_name.clone(),
+            },
+            stream: format!("events/{domain}"),
+            event_type: event_type.to_string(),
+            capability: Some(event_type.to_string()),
+            producer: producer.map(ToString::to_string),
+            subject_entity: "trigger".to_string(),
+            subject_id: producer.unwrap_or("event").to_string(),
+            data: body.get("payload").cloned().unwrap_or_else(|| json!({})),
+            occurred_at,
+        };
+        match canonical.append_event(op) {
+            Ok(record) => json_response(200, json!({ "ok": true, "event": record })),
+            Err(err) => sorx_error_response(500, err),
+        }
+    }
+
+    /// Parse and dispatch a single JSON-RPC 2.0 body for an already-verified
+    /// MCP caller. Factored out so tests can drive it directly without a token.
+    fn handle_mcp_dispatch(
+        &self,
+        caller: &crate::mcp_jsonrpc::McpCaller,
+        body: &str,
+    ) -> HttpResponse {
+        let req: crate::mcp_jsonrpc::JsonRpcRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => {
+                return json_response(
+                    200,
+                    serde_json::json!({"jsonrpc":"2.0","id":null,
+                        "error":{"code":-32700,"message":format!("parse error: {e}")}}),
+                );
+            }
+        };
+        let out = crate::mcp_jsonrpc::dispatch(&req, &self.tools, caller, &*self.runtime);
+        json_response(200, out)
+    }
+
+    /// Handle `POST /v1/sorx/mcp`: verify bearer token, match tenant, then
+    /// dispatch the JSON-RPC body.
+    fn handle_mcp_post(&self, state: &McpAuthState, request: &HttpRequest) -> HttpResponse {
+        let challenge = crate::mcp_auth::www_authenticate(&state.metadata_url);
+        let Some(token) = crate::mcp_auth::bearer_from_headers(&request.headers) else {
+            return error_response(401, "SORX_MCP_UNAUTHORIZED", "missing bearer token")
+                .with_header("WWW-Authenticate", &challenge);
+        };
+        let claims = match crate::mcp_auth::verify_token(token, &state.config, &*state.jwks) {
+            Ok(c) => c,
+            Err(e) => {
+                return error_response(401, "SORX_MCP_UNAUTHORIZED", &e)
+                    .with_header("WWW-Authenticate", &challenge);
+            }
+        };
+        let caller = match mcp_caller_from_claims(claims, &self.runtime.config.tenant_id) {
+            Ok(c) => c,
+            Err(resp) => return resp,
+        };
+        self.handle_mcp_dispatch(&caller, &request.body)
     }
 
     fn handle_generic_admin_request(&self, request: &HttpRequest) -> HttpResponse {
@@ -807,12 +1111,13 @@ impl HttpRuntime {
         }
     }
 
-    fn runtime_capabilities(&self) -> RuntimeCapabilities {
+    pub(crate) fn runtime_capabilities(&self) -> RuntimeCapabilities {
         let mut capabilities = RuntimeCapabilities::sorx_runtime_host();
         capabilities.offers.extend(self.business_action_offers());
         capabilities
             .offers
             .extend(self.business_event_topic_offers());
+        capabilities.offers.extend(self.agent_endpoint_offers());
         capabilities
     }
 
@@ -860,6 +1165,8 @@ impl HttpRuntime {
 
     fn business_event_topic_offers(&self) -> Vec<CapabilityOffer> {
         let mut event_topics = BTreeMap::<String, Value>::new();
+
+        // --- command-emitted (domain) event topics ---
         for endpoint in self.runtime.router.endpoints.values() {
             let OperationKind::Command(spec) = &endpoint.operation else {
                 continue;
@@ -867,6 +1174,7 @@ impl HttpRuntime {
             let mut events = Vec::new();
             collect_command_event_topics(&spec.steps, &mut events);
             for event in events {
+                let topic = command_event_topic(&self.runtime.pack.name, &event);
                 event_topics.entry(event.clone()).or_insert_with(|| {
                     json!({
                         "kind": "business_event_topic",
@@ -876,6 +1184,7 @@ impl HttpRuntime {
                             "digest": self.runtime.pack.digest
                         },
                         "event_type": event,
+                        "topic": topic,
                         "producer": format!("sorx:{}:{}", self.runtime.pack.name, self.runtime.pack.version),
                         "source_endpoint_id": endpoint.endpoint_id,
                         "source_operation_id": endpoint.operation_id
@@ -883,6 +1192,38 @@ impl HttpRuntime {
                 });
             }
         }
+
+        // --- entity lifecycle topics (create / update / delete) ---
+        for endpoint in self.runtime.router.endpoints.values() {
+            let operation_label = match &endpoint.operation {
+                OperationKind::Create => "created",
+                OperationKind::Update => "updated",
+                OperationKind::Delete => "deleted",
+                _ => continue,
+            };
+            let Ok(binding) = self.runtime.config.bindings.resolve(endpoint) else {
+                continue;
+            };
+            let event_type = format!("{}.{operation_label}", binding.entity);
+            let topic =
+                entity_event_topic(&self.runtime.pack.name, &binding.entity, operation_label);
+            event_topics.entry(event_type.clone()).or_insert_with(|| {
+                json!({
+                    "kind": "business_event_topic",
+                    "pack": {
+                        "name": self.runtime.pack.name,
+                        "version": self.runtime.pack.version,
+                        "digest": self.runtime.pack.digest
+                    },
+                    "event_type": event_type,
+                    "topic": topic,
+                    "producer": format!("sorx:{}:{}", self.runtime.pack.name, self.runtime.pack.version),
+                    "source_endpoint_id": endpoint.endpoint_id,
+                    "source_operation_id": endpoint.operation_id
+                })
+            });
+        }
+
         event_topics
             .into_iter()
             .map(|(event_type, metadata)| CapabilityOffer {
@@ -891,6 +1232,73 @@ impl HttpRuntime {
                 metadata: Some(metadata),
             })
             .collect()
+    }
+
+    /// Agent-endpoint capability offers — one per entry in the pack's
+    /// `agent-gateway.json` manifest (the same document that built
+    /// `runtime.router`). Every agent-endpoint is advertised uniformly, not
+    /// only the subset that happens to back a [`BusinessAction`]: a
+    /// `BusinessAction.execution` reference is pure lineage metadata and is
+    /// never part of the execution path, so agent-endpoints stand on their
+    /// own here (mirrors `business_action_offers`).
+    fn agent_endpoint_offers(&self) -> Vec<CapabilityOffer> {
+        let Some(endpoints) = self
+            .agent_gateway_json
+            .get("endpoints")
+            .and_then(Value::as_array)
+        else {
+            return Vec::new();
+        };
+        endpoints
+            .iter()
+            .filter_map(|entry| {
+                let endpoint_id = json_string_field(entry, "endpoint_id")
+                    .or_else(|| json_string_field(entry, "id"))?;
+                Some(CapabilityOffer {
+                    capability: agent_endpoint_capability(
+                        &self.runtime.pack.name,
+                        endpoint_id,
+                        &self.runtime.pack.version,
+                    ),
+                    contracts: vec!["greentic.sorx.agent-endpoint.invoke.v1".to_string()],
+                    metadata: Some(agent_endpoint_offer_metadata(
+                        &self.runtime.pack.name,
+                        &self.runtime.pack.version,
+                        endpoint_id,
+                        entry,
+                    )),
+                })
+            })
+            .collect()
+    }
+
+    /// Resolve the effective policy roles for an HTTP-sourced invocation.
+    ///
+    /// Security gate: when the admin roles overlay is configured it is the
+    /// authoritative source and the caller's self-asserted roles — whether from
+    /// the `x-greentic-caller-role` header or a request-body `context.roles` —
+    /// are ignored (see [`compute_effective_roles`]). `body_roles` carries any
+    /// caller-supplied roles from the request body so every HTTP entry point
+    /// runs through the same overlay check instead of trusting them directly.
+    fn effective_request_roles(
+        &self,
+        request: &HttpRequest,
+        tenant_id: &str,
+        body_roles: Option<Vec<String>>,
+    ) -> Vec<String> {
+        let header_roles = body_roles
+            .filter(|roles| !roles.is_empty())
+            .unwrap_or_else(|| request_roles(&request.headers));
+        let caller_email = request
+            .headers
+            .get("x-greentic-caller-email")
+            .map(String::as_str);
+        compute_effective_roles(
+            self.admin_roles_overlay.as_deref(),
+            tenant_id,
+            caller_email,
+            header_roles,
+        )
     }
 
     fn invoke_capability(&self, request: &HttpRequest) -> HttpResponse {
@@ -906,11 +1314,7 @@ impl HttpRuntime {
             );
         };
         let Some(action) = self.find_business_action_by_capability(capability) else {
-            return error_response(
-                404,
-                "RUNTIME_CAPABILITY_NOT_FOUND",
-                "capability does not resolve to a business action",
-            );
+            return self.invoke_agent_endpoint_capability(request, capability, &body);
         };
         let Some(endpoint) = self.execution_endpoint(action) else {
             return error_response(
@@ -986,11 +1390,10 @@ impl HttpRuntime {
             })
             .unwrap_or("capability")
             .to_string();
-        let roles = context
+        let body_roles = context
             .and_then(|context| context.get("roles"))
-            .and_then(string_array)
-            .filter(|roles| !roles.is_empty())
-            .unwrap_or_else(|| request_roles(&request.headers));
+            .and_then(string_array);
+        let roles = self.effective_request_roles(request, &tenant_id, body_roles);
         let invocation = EndpointInvocation {
             tenant_id,
             endpoint_id: endpoint.endpoint_id.clone(),
@@ -1032,6 +1435,141 @@ impl HttpRuntime {
                     "schema": "greentic.sorx.capability-invoke-result.v1",
                     "capability": capability,
                     "action_ref": capability_action_ref_json(action, self.locked_contract_hash(action)),
+                    "status": format!("{:?}", result.status).to_ascii_lowercase(),
+                    "result": result.output,
+                    "events": result.events
+                }),
+            ),
+            Err(err) => sorx_error_response(400, err),
+        }
+    }
+
+    /// Invoke an agent-endpoint capability (`cap://greentic/agent-endpoints/...`).
+    /// Reached from `invoke_capability` when the capability does not resolve
+    /// to a [`BusinessAction`]. Mirrors the business-action invoke path's
+    /// request-building (dry-run, tenant/caller/role resolution,
+    /// approval/risk gating, error mapping) but executes the endpoint
+    /// directly — there is no backing action, contract-hash lock, or
+    /// idempotency struct for an agent-endpoint, so the response carries the
+    /// endpoint id/version + invoke result instead of an `action_ref`.
+    fn invoke_agent_endpoint_capability(
+        &self,
+        request: &HttpRequest,
+        capability: &str,
+        body: &Value,
+    ) -> HttpResponse {
+        let Some(endpoint) = self.find_router_endpoint_by_agent_endpoint_capability(capability)
+        else {
+            return error_response(
+                404,
+                "RUNTIME_CAPABILITY_NOT_FOUND",
+                "capability does not resolve to a business action or agent endpoint",
+            );
+        };
+        let values = body.get("input").cloned().unwrap_or_else(|| json!({}));
+        let idempotency_key = body
+            .get("idempotency_key")
+            .or_else(|| {
+                body.get("options")
+                    .and_then(|options| options.get("idempotency_key"))
+            })
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let dry_run = body
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let policy_decision = self.runtime.policy.decide(endpoint);
+        if dry_run {
+            return json_response(
+                200,
+                json!({
+                    "valid": true,
+                    "capability": capability,
+                    "canonical_payload": values,
+                    "policy_decision": policy_decision_label(&policy_decision.action),
+                    "approval_required": matches!(policy_decision.action, PolicyAction::RequireApproval),
+                    "execution_target": {
+                        "endpoint_id": endpoint.endpoint_id,
+                        "operation_id": endpoint.operation_id
+                    }
+                }),
+            );
+        }
+        let context = body.get("context").and_then(Value::as_object);
+        let tenant_id = context
+            .and_then(|context| context.get("tenant_id").and_then(Value::as_str))
+            .or_else(|| body.get("tenant_id").and_then(Value::as_str))
+            .or_else(|| {
+                request
+                    .headers
+                    .get("x-greentic-tenant-id")
+                    .map(String::as_str)
+            })
+            .unwrap_or(&self.runtime.config.tenant_id)
+            .to_string();
+        let caller_id = context
+            .and_then(|context| context.get("caller_id").and_then(Value::as_str))
+            .or_else(|| body.get("caller_id").and_then(Value::as_str))
+            .or_else(|| {
+                request
+                    .headers
+                    .get("x-greentic-caller-id")
+                    .map(String::as_str)
+            })
+            .unwrap_or("capability")
+            .to_string();
+        let body_roles = context
+            .and_then(|context| context.get("roles"))
+            .and_then(string_array);
+        let roles = self.effective_request_roles(request, &tenant_id, body_roles);
+        let invocation = EndpointInvocation {
+            tenant_id,
+            endpoint_id: endpoint.endpoint_id.clone(),
+            operation_id: endpoint.operation_id.clone(),
+            input: values,
+            caller: CallerContext {
+                subject: caller_id,
+                roles,
+            },
+            idempotency_key,
+            source: InvocationSource::Direct,
+        };
+        match self.runtime.invoke(invocation) {
+            Ok(result) if result.status == EndpointStatus::ApprovalRequired => json_response(
+                202,
+                json!({
+                    "ok": false,
+                    "status": "approval_required",
+                    "capability": capability,
+                    "approval": result.output["approval"]
+                }),
+            ),
+            Ok(result) if result.status == EndpointStatus::Denied => json_response(
+                403,
+                json!({
+                    "ok": false,
+                    "error": {
+                        "code": "RUNTIME_CAPABILITY_DENIED",
+                        "message": result.output["reason"].as_str().unwrap_or("capability invocation denied"),
+                        "details": result.output
+                    }
+                }),
+            ),
+            Ok(result) => json_response(
+                200,
+                json!({
+                    "ok": true,
+                    "schema": "greentic.sorx.agent-endpoint-invoke-result.v1",
+                    "capability": capability,
+                    "endpoint": {
+                        "id": endpoint.endpoint_id,
+                        "operation_id": endpoint.operation_id,
+                        "pack": {
+                            "name": self.runtime.pack.name,
+                            "version": self.runtime.pack.version
+                        }
+                    },
                     "status": format!("{:?}", result.status).to_ascii_lowercase(),
                     "result": result.output,
                     "events": result.events
@@ -2575,6 +3113,7 @@ impl HttpRuntime {
             Ok(value) => value,
             Err(err) => return sorx_error_response(400, err),
         };
+        let roles = self.effective_request_roles(request, &tenant_id, None);
         let invocation = EndpointInvocation {
             tenant_id,
             endpoint_id: endpoint.endpoint_id.clone(),
@@ -2582,7 +3121,7 @@ impl HttpRuntime {
             input: values,
             caller: CallerContext {
                 subject: caller_id,
-                roles: request_roles(&request.headers),
+                roles,
             },
             idempotency_key,
             source: InvocationSource::Http,
@@ -2695,6 +3234,24 @@ impl HttpRuntime {
         None
     }
 
+    /// Resolve a `cap://greentic/agent-endpoints/<pack>/<endpoint_id>/v<ver>`
+    /// capability to its router-compiled [`EndpointDefinition`] — the same
+    /// definition `EndpointRouter::from_agent_gateway` produced from the
+    /// pack's `agent-gateway.json` at construction, and the same map
+    /// `execution_endpoint`/`match_endpoint` read. Returns `None` for a
+    /// malformed capability, the wrong namespace, a pack mismatch, or an
+    /// endpoint id the router doesn't know about.
+    fn find_router_endpoint_by_agent_endpoint_capability(
+        &self,
+        capability: &str,
+    ) -> Option<&EndpointDefinition> {
+        let (pack, endpoint_id) = parse_agent_endpoint_capability(capability)?;
+        if pack != clean_capability_segment(&self.runtime.pack.name) {
+            return None;
+        }
+        self.runtime.router.endpoints.get(&endpoint_id)
+    }
+
     fn match_endpoint(
         &self,
         method: &str,
@@ -2767,18 +3324,521 @@ fn request_bearer_token(headers: &BTreeMap<String, String>) -> Option<&str> {
     }
 }
 
-fn configure_runtime_audit(runtime: SorxRuntime, config: &SorxRuntimeConfig) -> SorxRuntime {
+fn audit_sink_from_config(config: &SorxRuntimeConfig) -> Arc<dyn greentic_sorx_core::AuditSink> {
     match config.audit.sink.as_str() {
-        "stdout" => runtime.with_audit_sink(Arc::new(StdoutAuditSink)),
-        _ => runtime,
+        "stdout" => Arc::new(greentic_sorx_core::StdoutAuditSink),
+        _ => Arc::new(greentic_sorx_core::DisabledAuditSink),
     }
 }
 
+fn configure_runtime_audit(
+    runtime: SorxRuntime,
+    audit_sink: Arc<dyn greentic_sorx_core::AuditSink>,
+) -> SorxRuntime {
+    runtime.with_audit_sink(audit_sink)
+}
+
+/// Wires declared runtime-extension bindings into the runtime's control/observer
+/// seams against the built-in native adapter registry, sharing `audit_sink` with
+/// the audit observer. When no bindings are declared, the runtime is returned
+/// unchanged (Noop hooks) so behavior is identical to a deployment without
+/// extensions.
+fn bind_runtime_extensions(
+    runtime: SorxRuntime,
+    extensions: Option<&greentic_sorx_core::RuntimeExtensions>,
+    audit_sink: Arc<dyn greentic_sorx_core::AuditSink>,
+    pack: &str,
+    version: &str,
+    wasm_adapter: Option<Arc<dyn greentic_sorx_core::RuntimeExtensionAdapter>>,
+) -> SorxRuntime {
+    let Some(extensions) = extensions.filter(|ext| !ext.is_empty()) else {
+        return runtime;
+    };
+    let mut registry = greentic_sorx_core::native_extension_registry(audit_sink, pack, version);
+    if let Some(adapter) = wasm_adapter {
+        for pack_ref in wasm_pack_refs(extensions) {
+            registry = registry.with_adapter(pack_ref, adapter.clone());
+        }
+    }
+    let control = Arc::new(greentic_sorx_core::BoundControlHook::new(
+        extensions.clone(),
+        registry.clone(),
+    ));
+    let observer = Arc::new(greentic_sorx_core::BoundObserverHook::new(
+        extensions.clone(),
+        registry,
+    ));
+    runtime
+        .with_control_hook(control)
+        .with_observer_hook(observer, true)
+}
+
+/// Distinct pack_refs declared in control hooks + observer subscriptions,
+/// excluding the built-in native audit observer.
+fn wasm_pack_refs(extensions: &greentic_sorx_core::RuntimeExtensions) -> Vec<String> {
+    let mut refs = std::collections::BTreeSet::new();
+    for bindings in extensions.control.hooks.values() {
+        for b in bindings {
+            if b.pack_ref != greentic_sorx_core::NATIVE_AUDIT_PACK_REF {
+                refs.insert(b.pack_ref.clone());
+            }
+        }
+    }
+    for bindings in extensions.observer.subscriptions.values() {
+        for b in bindings {
+            if b.pack_ref != greentic_sorx_core::NATIVE_AUDIT_PACK_REF {
+                refs.insert(b.pack_ref.clone());
+            }
+        }
+    }
+    refs.into_iter().collect()
+}
+
+/// Builds the WASM extension runtime adapter from `SORX_EXTENSIONS_DIR`, when
+/// the `wasm-extensions` feature is enabled and the env var is set. Never
+/// fails startup: a missing env var or a failure to load the extension
+/// runtime both fall back to native-only (`None`).
+#[cfg(feature = "wasm-extensions")]
+fn build_wasm_extension_adapter(
+    _config: &SorxRuntimeConfig,
+) -> Option<Arc<dyn greentic_sorx_core::RuntimeExtensionAdapter>> {
+    let dir = std::env::var_os("SORX_EXTENSIONS_DIR").map(std::path::PathBuf::from)?;
+    let rt_config = greentic_ext_runtime::RuntimeConfig::from_paths(
+        greentic_ext_runtime::DiscoveryPaths::new(dir),
+    );
+    match greentic_ext_runtime::ExtensionRuntime::new(rt_config) {
+        Ok(runtime) => Some(Arc::new(crate::wasm_extensions::WasmExtensionRuntime::new(
+            Arc::new(runtime),
+        ))),
+        Err(err) => {
+            // Do not fail startup if extensions can't be loaded; log and run native-only.
+            eprintln!("wasm extension runtime disabled: {err}");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "wasm-extensions"))]
+fn build_wasm_extension_adapter(
+    _config: &SorxRuntimeConfig,
+) -> Option<Arc<dyn greentic_sorx_core::RuntimeExtensionAdapter>> {
+    None
+}
+
+fn configure_runtime_events(
+    runtime: SorxRuntime,
+    config: &SorxRuntimeConfig,
+) -> SorxResult<SorxRuntime> {
+    match config.events.sink.as_str() {
+        "stdout" => Ok(runtime.with_event_sink(Arc::new(StdoutBusinessEventSink))),
+        "nats" => {
+            let url = config.events.nats_url.clone().ok_or_else(|| {
+                SorxError::new(
+                    "events_nats_url_missing",
+                    "events.sink = \"nats\" requires events.nats_url",
+                )
+            })?;
+            nats_event_sink(&url, &config.events.subject_prefix)
+                .map(|sink| runtime.with_event_sink(sink))
+        }
+        // "disabled" and "" are the explicit no-op values; anything else is
+        // treated the same way (schema already constrains the allowed values).
+        "disabled" | "" => Ok(runtime),
+        _ => Ok(runtime),
+    }
+}
+
+#[cfg(feature = "events-nats")]
+fn nats_event_sink(url: &str, subject_prefix: &str) -> SorxResult<Arc<dyn BusinessEventSink>> {
+    crate::nats_events::NatsEventSink::connect(url, subject_prefix)
+        .map(|sink| Arc::new(sink) as Arc<dyn BusinessEventSink>)
+}
+
+#[cfg(not(feature = "events-nats"))]
+fn nats_event_sink(_url: &str, _subject_prefix: &str) -> SorxResult<Arc<dyn BusinessEventSink>> {
+    Err(SorxError::new(
+        "events_nats_unavailable",
+        "this build does not include the events-nats feature",
+    ))
+}
+
 fn is_admin_api_path(path: &str) -> bool {
+    let path = request_path_without_query(path);
     path == "/v1/sorx/deployments"
         || path == "/v1/sorx/aliases"
+        || path == "/v1/sorx/routing-table"
         || path.starts_with("/v1/sorx/deployments/")
         || path.starts_with("/v1/sorx/aliases/")
+}
+
+/// Serve the registry-backed `/v1/sorx/*` deployment/alias control plane and
+/// the resolved routing-table from a persisted [`LocalDeploymentRegistryStore`].
+///
+/// Every write loads the store, mutates it through the existing
+/// [`greentic_sorx_core::DeploymentRegistry`] methods (no alias logic is
+/// duplicated here), then persists it again. Lifecycle-creation endpoints
+/// (`create`/`validate`/`retire`) are intentionally not served here because
+/// they need the pack file; they return 501 and stay CLI-only.
+fn handle_registry_request(
+    store: &LocalDeploymentRegistryStore,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> HttpResponse {
+    let route = request_path_without_query(path);
+    let tenant = request_query_param(path, "tenant");
+    let sor = request_query_param(path, "sor");
+
+    match (method, route) {
+        ("GET", "/v1/sorx/deployments") => registry_list_deployments(store, tenant, sor),
+        ("GET", "/v1/sorx/aliases") => registry_list_aliases(store, tenant, sor),
+        ("GET", "/v1/sorx/routing-table") => registry_routing_table(store, tenant, sor),
+        ("PUT", route) if route.starts_with("/v1/sorx/aliases/") => {
+            registry_set_alias(store, route, body)
+        }
+        ("GET", route) if route.starts_with("/v1/sorx/deployments/") => {
+            registry_get_deployment(store, route)
+        }
+        ("POST", route)
+            if route.starts_with("/v1/sorx/deployments/") && route.ends_with("/promote") =>
+        {
+            registry_promote(store, route, body)
+        }
+        ("POST", route)
+            if route.starts_with("/v1/sorx/deployments/") && route.ends_with("/rollback") =>
+        {
+            registry_rollback(store, route, body)
+        }
+        ("POST", "/v1/sorx/deployments") | ("POST", "/v1/sorx/validations") => error_response(
+            501,
+            "SORX_ADMIN_API_NOT_IMPLEMENTED",
+            "deployment create/validate/retire are served by the CLI registry, not the HTTP API",
+        ),
+        _ => error_response(404, "SORX_ROUTE_NOT_FOUND", "route not found"),
+    }
+}
+
+fn registry_error_response(err: DeploymentRegistryError) -> HttpResponse {
+    let status = match err.code.as_str() {
+        "deployment_missing" => 404,
+        "alias_target_not_routable" | "alias_scope_mismatch" => 409,
+        "promotion_blocked" => 409,
+        _ => 400,
+    };
+    error_response(status, &registry_error_code(&err.code), &err.message)
+}
+
+fn registry_error_code(code: &str) -> String {
+    format!("SORX_{}", code.to_ascii_uppercase())
+}
+
+fn registry_load(
+    store: &LocalDeploymentRegistryStore,
+) -> Result<greentic_sorx_core::DeploymentRegistry, HttpResponse> {
+    store.load().map_err(registry_error_response)
+}
+
+fn registry_save(
+    store: &LocalDeploymentRegistryStore,
+    registry: &greentic_sorx_core::DeploymentRegistry,
+) -> Result<(), HttpResponse> {
+    store.save(registry).map_err(registry_error_response)
+}
+
+fn registry_list_deployments(
+    store: &LocalDeploymentRegistryStore,
+    tenant: Option<String>,
+    sor: Option<String>,
+) -> HttpResponse {
+    let registry = match registry_load(store) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+    let deployments = registry
+        .deployments
+        .iter()
+        .filter(|deployment| tenant.as_deref().is_none_or(|t| deployment.tenant_id == t))
+        .filter(|deployment| sor.as_deref().is_none_or(|s| deployment.sor_name == s))
+        .cloned()
+        .collect::<Vec<_>>();
+    json_response(200, json!({ "deployments": deployments }))
+}
+
+fn registry_get_deployment(store: &LocalDeploymentRegistryStore, route: &str) -> HttpResponse {
+    let Some(deployment_id) = route.strip_prefix("/v1/sorx/deployments/") else {
+        return error_response(404, "SORX_ROUTE_NOT_FOUND", "route not found");
+    };
+    // Only a bare deployment id is a "get deployment"; sub-resources are routed
+    // elsewhere (the local-runtime branch handles `/routes` and
+    // `/promotion-status`, promote/rollback are matched as POST above).
+    if deployment_id.is_empty() || deployment_id.contains('/') {
+        return error_response(404, "SORX_ROUTE_NOT_FOUND", "route not found");
+    }
+    let registry = match registry_load(store) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+    match registry.deployment(deployment_id) {
+        Some(deployment) => json_response(200, serde_json::to_value(deployment).unwrap()),
+        None => error_response(
+            404,
+            "SORX_DEPLOYMENT_MISSING",
+            &format!("deployment `{deployment_id}` does not exist"),
+        ),
+    }
+}
+
+fn registry_list_aliases(
+    store: &LocalDeploymentRegistryStore,
+    tenant: Option<String>,
+    sor: Option<String>,
+) -> HttpResponse {
+    let registry = match registry_load(store) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+    let aliases = registry.aliases_for(tenant.as_deref(), sor.as_deref());
+    json_response(200, json!({ "aliases": aliases }))
+}
+
+fn registry_set_alias(
+    store: &LocalDeploymentRegistryStore,
+    route: &str,
+    body: &str,
+) -> HttpResponse {
+    let segments = route
+        .strip_prefix("/v1/sorx/aliases/")
+        .unwrap_or_default()
+        .split('/')
+        .collect::<Vec<_>>();
+    let [tenant, sor, alias] = segments.as_slice() else {
+        return error_response(
+            404,
+            "SORX_ROUTE_NOT_FOUND",
+            "alias path must be /v1/sorx/aliases/{tenant}/{sor}/{alias}",
+        );
+    };
+    let payload = match parse_json_object(body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let Some(target) = payload
+        .get("target_deployment_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            400,
+            "SORX_INVALID_BODY",
+            "body must include a non-empty target_deployment_id",
+        );
+    };
+
+    let mut registry = match registry_load(store) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+    let alias = match registry.set_alias(*tenant, *sor, *alias, target) {
+        Ok(alias) => alias,
+        Err(err) => return registry_error_response(err),
+    };
+    if let Err(response) = registry_save(store, &registry) {
+        return response;
+    }
+    json_response(200, serde_json::to_value(alias).unwrap())
+}
+
+fn registry_promote(store: &LocalDeploymentRegistryStore, route: &str, body: &str) -> HttpResponse {
+    let Some(deployment_id) = route
+        .strip_prefix("/v1/sorx/deployments/")
+        .and_then(|rest| rest.strip_suffix("/promote"))
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+    else {
+        return error_response(404, "SORX_ROUTE_NOT_FOUND", "route not found");
+    };
+    let payload = match parse_json_object(body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let Some(alias) = payload
+        .get("alias")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            400,
+            "SORX_INVALID_BODY",
+            "body must include a non-empty alias",
+        );
+    };
+    let public = match payload.get("visibility").and_then(Value::as_str) {
+        Some("public") => true,
+        Some("private") | None => false,
+        Some(other) => {
+            return error_response(
+                400,
+                "SORX_INVALID_BODY",
+                &format!("visibility must be `private` or `public`, got `{other}`"),
+            );
+        }
+    };
+
+    let mut registry = match registry_load(store) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+    let new_alias = match registry.promote_alias(deployment_id, alias, public, "http-api", None) {
+        Ok(alias) => alias,
+        Err(err) => return registry_error_response(err),
+    };
+    let deployment = registry
+        .deployment(deployment_id)
+        .cloned()
+        .map(|deployment| serde_json::to_value(deployment).unwrap())
+        .unwrap_or(Value::Null);
+    if let Err(response) = registry_save(store, &registry) {
+        return response;
+    }
+    json_response(
+        200,
+        json!({
+            "deployment": deployment,
+            "alias": new_alias,
+        }),
+    )
+}
+
+fn registry_rollback(
+    store: &LocalDeploymentRegistryStore,
+    route: &str,
+    body: &str,
+) -> HttpResponse {
+    let Some(deployment_id) = route
+        .strip_prefix("/v1/sorx/deployments/")
+        .and_then(|rest| rest.strip_suffix("/rollback"))
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+    else {
+        return error_response(404, "SORX_ROUTE_NOT_FOUND", "route not found");
+    };
+    let payload = match parse_json_object(body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let Some(alias) = payload
+        .get("alias")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            400,
+            "SORX_INVALID_BODY",
+            "body must include a non-empty alias",
+        );
+    };
+    let Some(to_deployment_id) = payload
+        .get("to_deployment_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            400,
+            "SORX_INVALID_BODY",
+            "body must include a non-empty to_deployment_id",
+        );
+    };
+    let reason = payload
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("rollback requested via HTTP API")
+        .to_string();
+
+    let mut registry = match registry_load(store) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+    // The rollback target carries tenant/sor scope; the {deployment_id} in the
+    // path identifies the deployment whose alias is being rolled back.
+    let Some(scope) = registry.deployment(deployment_id).cloned() else {
+        return error_response(
+            404,
+            "SORX_DEPLOYMENT_MISSING",
+            &format!("deployment `{deployment_id}` does not exist"),
+        );
+    };
+    let new_alias = match registry.rollback_alias(RollbackAliasRequest {
+        tenant_id: scope.tenant_id.clone(),
+        sor_name: scope.sor_name.clone(),
+        alias: alias.to_string(),
+        to_deployment_id: to_deployment_id.to_string(),
+        reason,
+        actor: "http-api".to_string(),
+        automation_source: None,
+    }) {
+        Ok(alias) => alias,
+        Err(err) => return registry_error_response(err),
+    };
+    if let Err(response) = registry_save(store, &registry) {
+        return response;
+    }
+    json_response(200, json!({ "alias": new_alias }))
+}
+
+fn registry_routing_table(
+    store: &LocalDeploymentRegistryStore,
+    tenant: Option<String>,
+    sor: Option<String>,
+) -> HttpResponse {
+    let registry = match registry_load(store) {
+        Ok(registry) => registry,
+        Err(response) => return response,
+    };
+    let mut routes = Vec::new();
+    for alias in registry.aliases_for(tenant.as_deref(), sor.as_deref()) {
+        let Some(deployment) =
+            registry.resolve_alias(&alias.tenant_id, &alias.sor_name, &alias.alias)
+        else {
+            continue;
+        };
+        routes.push(json!({
+            "tenant_id": alias.tenant_id,
+            "sor_name": alias.sor_name,
+            "alias": alias.alias,
+            "deployment_id": deployment.deployment_id,
+            "pack_name": deployment.pack_name,
+            "pack_version": deployment.pack_version,
+            "base_path": deployment.base_path,
+            "state_namespace": deployment.state_namespace,
+            "visibility": deployment.visibility,
+            "routable": deployment.status.is_routable(),
+            "traffic": deployment.traffic,
+        }));
+    }
+    json_response(
+        200,
+        json!({
+            "schema": greentic_sorx_core::DEPLOYMENT_PUBLIC_ROUTE_TABLE_SCHEMA,
+            "routes": routes,
+        }),
+    )
+}
+
+fn parse_json_object(body: &str) -> Result<Map<String, Value>, HttpResponse> {
+    if body.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    match serde_json::from_str::<Value>(body) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Err(error_response(
+            400,
+            "SORX_INVALID_BODY",
+            "request body must be a JSON object",
+        )),
+        Err(err) => Err(error_response(
+            400,
+            "SORX_INVALID_BODY",
+            &format!("request body is not valid JSON: {err}"),
+        )),
+    }
 }
 
 fn generic_admin_action_id(request: &HttpRequest) -> String {
@@ -3019,7 +4079,8 @@ fn manager_model_field(record_name: &str, field: &Value) -> Option<ManagerFieldV
             manager_key_like(name)
         ),
         label: field
-            .get("label")
+            .get("display_label")
+            .or_else(|| field.get("label"))
             .or_else(|| field.get("title"))
             .and_then(Value::as_str)
             .map(ToString::to_string)
@@ -3039,6 +4100,18 @@ fn manager_model_field(record_name: &str, field: &Value) -> Option<ManagerFieldV
             .unwrap_or(false),
         redacted: sensitive,
         value: None,
+        hidden: field
+            .get("hidden")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        display_order: field
+            .get("display_order")
+            .and_then(Value::as_u64)
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        display_group: field
+            .get("display_group")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         policy: ManagerPolicyDecision::allow(),
     })
 }
@@ -5177,22 +6250,38 @@ fn manager_record_table_row(
 }
 
 fn manager_table_fields(record: &ManagerRecordView) -> Vec<ManagerFieldView> {
-    let mut fields = manager_prioritized_table_fields(
-        record
-            .fields
-            .iter()
-            .filter(|field| {
-                !field.redacted && !field.generated && !manager_is_identifier_field(field)
-            })
-            .cloned()
-            .collect(),
-    );
+    let mut candidate_fields: Vec<ManagerFieldView> = record
+        .fields
+        .iter()
+        .filter(|field| {
+            !field.redacted
+                && !field.generated
+                && !manager_is_identifier_field(field)
+                && !field.hidden
+        })
+        .cloned()
+        .collect();
+
+    // Apply display_order sort when at least one field carries it
+    if candidate_fields.iter().any(|f| f.display_order.is_some()) {
+        candidate_fields.sort_by(|a, b| {
+            a.display_order
+                .unwrap_or(u32::MAX)
+                .cmp(&b.display_order.unwrap_or(u32::MAX))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+
+    // Note: manager_prioritized_table_fields re-sorts by domain priority (e.g.
+    // invitation_code / waitlist), which can override the display_order sort above.
+    // Hint order is therefore not guaranteed on those tables.
+    let mut fields = manager_prioritized_table_fields(candidate_fields);
     fields.truncate(4);
     if fields.is_empty() {
         fields = record
             .fields
             .iter()
-            .filter(|field| !field.redacted)
+            .filter(|field| !field.redacted && !field.hidden)
             .take(4)
             .cloned()
             .collect();
@@ -6248,6 +7337,7 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
                     ))?;
                 registry.register_canonical_store(binding, Arc::new(adapter));
             }
+            StoreProviderKind::Postgres => register_postgres(&mut registry, binding, provider)?,
             StoreProviderKind::External(other) => {
                 return Err(SorxError::new(
                     "provider_unsupported",
@@ -6257,6 +7347,150 @@ fn provider_registry(config: &SorxRuntimeConfig) -> SorxResult<ProviderRegistry>
         }
     }
     Ok(registry)
+}
+
+#[cfg(feature = "postgres")]
+fn register_postgres(
+    registry: &mut ProviderRegistry,
+    binding: &str,
+    provider: &greentic_sorx_core::ProviderBindingConfig,
+) -> SorxResult<()> {
+    let config = greentic_sorx_core::PostgresProviderConfig::from_parts(
+        provider.config_ref.clone(),
+        provider.config.clone(),
+    )?;
+    let store = greentic_sorx_core::PostgresStore::connect(&config)?;
+    registry.register_canonical_store(binding, Arc::new(store));
+    Ok(())
+}
+
+/// Refuses a `postgres` store in a build without the feature, rather than
+/// silently serving from memory: a system of record that forgets its records
+/// on restart is the failure this store kind exists to remove.
+#[cfg(not(feature = "postgres"))]
+fn register_postgres(
+    _registry: &mut ProviderRegistry,
+    binding: &str,
+    _provider: &greentic_sorx_core::ProviderBindingConfig,
+) -> SorxResult<()> {
+    Err(SorxError::new(
+        "provider_unsupported",
+        format!(
+            "provider `{binding}` asks for the postgres store, which this greentic-sorx build \
+             was compiled without (feature `postgres`)"
+        ),
+    ))
+}
+
+/// Apply any migrations declared in the pack's executable-contract against the
+/// runtime's canonical store, recording each in a durable ledger.
+///
+/// Resolution at this (local-start) pack-load point:
+///
+/// * **Migrations** — parsed from `pack.sorla_assets.executable_contract_json`
+///   via [`parse_pack_migrations`]. Absent/`null` contract or empty list →
+///   no-op (returns `Ok(())` immediately).
+/// * **Namespace** — `ProviderNamespace { tenant_id, sor_name }` from
+///   `config.deployment`.
+/// * **Store** — the canonical store registered for the default provider
+///   binding in the runtime's [`ProviderRegistry`].
+/// * **State mode** — the local-start config carries `deployment_mode`
+///   (`local_single` / `versioned_registry`), not a registry `StateMode`. We
+///   conservatively use [`StateMode::SharedRequiresMigration`] so the
+///   activation gate is *active*: an unconfirmed breaking migration fails
+///   startup rather than silently mutating the SoR.
+/// * **`confirm_breaking`** — from the `SORX_CONFIRM_BREAKING_MIGRATIONS` env
+///   var (`1`/`true`); default `false`.
+/// * **Ledger** — prefers the store's built-in durable ledger when the store
+///   exposes one via [`SorxCanonicalStore::as_migration_ledger`] (i.e. when
+///   the runtime is FoundationDB-backed). Falls back to a
+///   [`LocalMigrationLedger`] at the path from `SORX_MIGRATION_LEDGER_PATH`.
+///   When the pack ships migrations but neither a built-in nor a file-based
+///   ledger is available, we SKIP with a logged note rather than failing —
+///   idempotence cannot be guaranteed without a durable ledger, so applying
+///   would risk re-running backfills on restart.
+fn apply_pack_migrations_at_startup(
+    pack: &LoadedSorlaPack,
+    config: &SorxRuntimeConfig,
+    runtime: &SorxRuntime,
+) -> SorxResult<()> {
+    let Some(contract) = pack.sorla_assets.executable_contract_json.as_ref() else {
+        return Ok(());
+    };
+    let migrations = parse_pack_migrations(contract)?;
+    if migrations.is_empty() {
+        return Ok(());
+    }
+
+    let namespace = ProviderNamespace {
+        tenant_id: config.deployment.tenant_id.clone(),
+        sor_name: config.deployment.sor_name.clone(),
+    };
+    let binding = runtime.config.bindings.default_provider_id();
+    let store = runtime.providers.canonical_store(binding)?;
+    let confirm_breaking = env_flag("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+    // Prefer the store's own durable ledger (e.g. FoundationDB subspace) when
+    // available; no env-path configuration needed in that case.
+    let outcomes = if let Some(fdb_ledger) = store.as_migration_ledger() {
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            fdb_ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    } else {
+        // Fall back to the local-file ledger. Skip with a log when no path is
+        // configured — applying without a durable ledger risks duplicate
+        // backfills across restarts.
+        let ledger_path = std::env::var_os("SORX_MIGRATION_LEDGER_PATH").map(PathBuf::from);
+        let Some(ledger_path) = ledger_path else {
+            eprintln!(
+                "greentic-sorx: pack declares {} migration(s) but SORX_MIGRATION_LEDGER_PATH is \
+                 not set and no FoundationDB ledger is available; skipping migration application \
+                 (set SORX_MIGRATION_LEDGER_PATH or use a FoundationDB-backed store)",
+                migrations.len()
+            );
+            return Ok(());
+        };
+        let ledger = LocalMigrationLedger::new(ledger_path);
+        apply_pending_migrations(
+            StateMode::SharedRequiresMigration,
+            &migrations,
+            store.as_ref(),
+            &ledger,
+            &namespace,
+            confirm_breaking,
+        )?
+    };
+
+    let applied = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                greentic_sorx_core::MigrationOutcome::Applied { .. }
+            )
+        })
+        .count();
+    eprintln!(
+        "greentic-sorx: pack migrations processed ({} declared, {} applied this run)",
+        migrations.len(),
+        applied
+    );
+    Ok(())
+}
+
+/// Read a boolean-ish env flag: `1`/`true`/`yes` (case-insensitive) => `true`.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false)
 }
 
 pub fn route_list(
@@ -6406,6 +7640,89 @@ fn business_event_capability(pack_name: &str, event_type: &str) -> String {
         clean_capability_segment(pack_name),
         clean_capability_segment(event_type)
     )
+}
+
+/// Namespace prefix for agent-endpoint capabilities, parallel to
+/// `business_action_capability`'s `cap://greentic/business-functions/...`.
+const AGENT_ENDPOINT_CAPABILITY_PREFIX: &str = "cap://greentic/agent-endpoints/";
+
+fn agent_endpoint_capability(pack_name: &str, endpoint_id: &str, pack_version: &str) -> String {
+    format!(
+        "{AGENT_ENDPOINT_CAPABILITY_PREFIX}{}/{}/v{}",
+        clean_capability_segment(pack_name),
+        clean_capability_segment(endpoint_id),
+        clean_capability_segment(pack_version)
+    )
+}
+
+/// Parse a `cap://greentic/agent-endpoints/<pack>/<endpoint_id>/v<version>`
+/// capability into its `(pack, endpoint_id)` segments. Returns `None` for the
+/// wrong namespace, a wrong segment count, or any empty segment — never
+/// panics on malformed input.
+fn parse_agent_endpoint_capability(capability: &str) -> Option<(String, String)> {
+    let rest = capability.strip_prefix(AGENT_ENDPOINT_CAPABILITY_PREFIX)?;
+    let mut segments = rest.split('/');
+    let pack = segments.next()?;
+    let endpoint_id = segments.next()?;
+    let version = segments.next()?;
+    if pack.is_empty() || endpoint_id.is_empty() || !version.starts_with('v') {
+        return None;
+    }
+    // Guard segment count: exactly `<pack>/<endpoint_id>/v<version>`, nothing more.
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((pack.to_string(), endpoint_id.to_string()))
+}
+
+/// Reads a string field from a raw agent-gateway endpoint JSON entry, the
+/// same shape `EndpointRouter::from_agent_gateway` parses (`endpoint_id`/`id`
+/// fallback, etc.), without failing the whole offer when a field is absent.
+fn json_string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+/// Builds the `metadata` payload for one agent-endpoint capability offer.
+/// Only fields actually present on the raw `agent-gateway.json` entry are
+/// included — this manifest shape is looser than [`EndpointDefinition`]
+/// (e.g. `title`/`intent`/`exports` never survive router parsing), so we
+/// read directly off the raw JSON entry rather than the parsed endpoint.
+fn agent_endpoint_offer_metadata(
+    pack_name: &str,
+    pack_version: &str,
+    endpoint_id: &str,
+    entry: &Value,
+) -> Value {
+    let mut endpoint_meta = Map::new();
+    endpoint_meta.insert("id".to_string(), json!(endpoint_id));
+    for field in ["title", "intent", "risk", "method", "path", "approval"] {
+        if let Some(value) = entry.get(field) {
+            endpoint_meta.insert(field.to_string(), value.clone());
+        }
+    }
+    if let Some(operation_id) =
+        json_string_field(entry, "operation_id").or_else(|| json_string_field(entry, "operationId"))
+    {
+        endpoint_meta.insert("operation_id".to_string(), json!(operation_id));
+    }
+
+    let mut metadata = Map::new();
+    metadata.insert("kind".to_string(), json!("agent_endpoint"));
+    metadata.insert(
+        "pack".to_string(),
+        json!({ "name": pack_name, "version": pack_version }),
+    );
+    metadata.insert("endpoint".to_string(), Value::Object(endpoint_meta));
+    if let Some(input_schema) = entry.get("input_schema") {
+        metadata.insert("input_schema".to_string(), input_schema.clone());
+    }
+    if let Some(output_schema) = entry.get("output_schema") {
+        metadata.insert("output_schema".to_string(), output_schema.clone());
+    }
+    if let Some(exports) = entry.get("exports") {
+        metadata.insert("exports".to_string(), exports.clone());
+    }
+    Value::Object(metadata)
 }
 
 fn clean_capability_segment(value: &str) -> String {
@@ -6616,6 +7933,18 @@ fn match_path(pattern: &str, path: &str) -> Option<BTreeMap<String, String>> {
     Some(params)
 }
 
+/// Extracts `(domain, name)` from an events capability URI of the form
+/// `cap://greentic/events/{domain}/{name}`. Returns `None` for anything that
+/// does not match, including a missing/empty domain or name segment.
+fn parse_events_cap(cap: &str) -> Option<(String, String)> {
+    let rest = cap.strip_prefix("cap://greentic/events/")?;
+    let (domain, name) = rest.split_once('/')?;
+    if domain.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((domain.to_string(), name.to_string()))
+}
+
 fn header_or_local(
     headers: &BTreeMap<String, String>,
     name: &str,
@@ -6634,6 +7963,55 @@ fn header_or_local(
             "context_missing",
             format!("missing required header `{name}`"),
         ))
+    }
+}
+
+/// Parses the self-asserted `x-greentic-caller-role` header into a role list,
+/// falling back to `["local"]` when the header is absent or empty.
+///
+/// This is the legacy, caller-asserted role source. When the admin roles
+/// overlay is configured these roles are deliberately ignored (see
+/// [`compute_effective_roles`]).
+fn header_caller_roles(headers: &BTreeMap<String, String>) -> Vec<String> {
+    headers
+        .get("x-greentic-caller-role")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|roles| !roles.is_empty())
+        .unwrap_or_else(|| vec!["local".to_string()])
+}
+
+/// Decides the effective policy roles for a request.
+///
+/// - No overlay configured (the default): returns `header_roles` verbatim, so
+///   behavior is byte-identical to the pre-overlay request path.
+/// - Overlay configured: the admin system-of-record is authoritative and the
+///   self-asserted `x-greentic-caller-role` header is IGNORED (this is the
+///   whole point of the security gate — a caller must not be able to grant
+///   itself roles). The overlay result maps to:
+///   - `Some(non-empty)` => those admin-granted roles,
+///   - `Some(empty)`     => the user is known but holds no roles => `["local"]`,
+///   - `None`            => unresolved (no caller email, or admin unreachable
+///     with no cached map) => `["local"]` (no asserted roles).
+fn compute_effective_roles(
+    overlay: Option<&AdminRolesOverlay>,
+    tenant_slug: &str,
+    caller_email: Option<&str>,
+    header_roles: Vec<String>,
+) -> Vec<String> {
+    match overlay {
+        None => header_roles,
+        Some(overlay) => match overlay.roles_for(tenant_slug, caller_email) {
+            Some(roles) if !roles.is_empty() => roles,
+            Some(_) => vec!["local".to_string()],
+            None => vec!["local".to_string()],
+        },
     }
 }
 
@@ -6755,10 +8133,15 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 struct HttpResponse {
     status: u16,
     body: Value,
+    headers: Vec<(String, String)>,
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {
-    HttpResponse { status, body }
+    HttpResponse {
+        status,
+        body,
+        headers: Vec::new(),
+    }
 }
 
 fn error_response(status: u16, code: &str, message: &str) -> HttpResponse {
@@ -6791,23 +8174,57 @@ fn sorx_error_response(status: u16, err: SorxError) -> HttpResponse {
     )
 }
 
+/// Pure post-verification helper: maps [`crate::mcp_auth::VerifiedClaims`] onto
+/// an [`crate::mcp_jsonrpc::McpCaller`], rejecting claims whose `tenant_id`
+/// does not match the `instance_tenant` of this SoR deployment.
+///
+/// Extracted so tenant-mismatch logic can be unit-tested without a real JWT or
+/// JWKS endpoint.
+fn mcp_caller_from_claims(
+    claims: crate::mcp_auth::VerifiedClaims,
+    instance_tenant: &str,
+) -> Result<crate::mcp_jsonrpc::McpCaller, HttpResponse> {
+    if claims.tenant_id != instance_tenant {
+        return Err(error_response(
+            403,
+            "SORX_MCP_TENANT_MISMATCH",
+            "token tenant does not match this SoR instance",
+        ));
+    }
+    Ok(crate::mcp_jsonrpc::McpCaller {
+        tenant_id: claims.tenant_id,
+        subject: claims.sub,
+        roles: claims.roles,
+    })
+}
+
 impl HttpResponse {
+    fn with_header(mut self, name: &str, value: &str) -> HttpResponse {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
     fn as_bytes(&self) -> Vec<u8> {
         let body = serde_json::to_vec(&self.body).unwrap_or_else(|_| b"{}".to_vec());
         let reason = match self.status {
             200 => "OK",
             400 => "Bad Request",
+            401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
             _ => "Internal Server Error",
         };
-        let mut response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Accept-Language, X-Greentic-Tenant-Id, X-Greentic-Caller-Id, X-Greentic-Caller-Role, X-Greentic-Channel, X-Greentic-Locale, X-Greentic-Idempotency-Key\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
             reason,
             body.len()
-        )
-        .into_bytes();
+        );
+        for (name, value) in &self.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        let mut response = head.into_bytes();
         response.extend(body);
         response
     }
@@ -6834,9 +8251,231 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::admin_roles::{AdminRolesOverlay, RolesResolver};
+    use std::collections::HashMap as StdHashMap;
+    use std::time::Duration;
 
     const GENERIC_RUNTIME_CONFIG: &str =
         include_str!("../tests/e2e/fixtures/generic_runtime_host/runtime-config.json");
+
+    /// Minimal resolver returning a fixed map; used to exercise the seam.
+    struct SeamResolver {
+        map: StdHashMap<String, Vec<String>>,
+    }
+
+    impl RolesResolver for SeamResolver {
+        fn tenant_user_roles(
+            &self,
+            _tenant_slug: &str,
+        ) -> Result<StdHashMap<String, Vec<String>>, String> {
+            Ok(self.map.clone())
+        }
+    }
+
+    fn seam_overlay(pairs: &[(&str, &[&str])]) -> AdminRolesOverlay {
+        let map = pairs
+            .iter()
+            .map(|(email, roles)| {
+                (
+                    email.to_ascii_lowercase(),
+                    roles.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        AdminRolesOverlay::new(Box::new(SeamResolver { map }), Duration::from_secs(300))
+    }
+
+    #[test]
+    fn manager_model_field_reads_presentation_hints() {
+        use serde_json::json;
+        let field = json!({
+            "name": "email",
+            "type": "string",
+            "display_label": "Your Email",
+            "hidden": true,
+            "display_order": 3,
+            "display_group": "Contact"
+        });
+        let result = manager_model_field("User", &field).unwrap();
+        assert_eq!(result.label, "Your Email");
+        assert!(result.hidden);
+        assert_eq!(result.display_order, Some(3));
+        assert_eq!(result.display_group.as_deref(), Some("Contact"));
+    }
+
+    #[test]
+    fn manager_table_fields_excludes_hidden_field() {
+        // Build a record with one hidden field and one visible field.  The table
+        // path (manager_table_fields) must surface the visible field and silently
+        // drop the hidden one.
+        fn make_field(field_name: &str, is_hidden: bool) -> ManagerFieldView {
+            ManagerFieldView {
+                name: field_name.to_string(),
+                label_key: format!("field.record.{field_name}.label"),
+                label: field_name.to_string(),
+                json_type: Some("string".to_string()),
+                rules: None,
+                generated: false,
+                relationship: None,
+                required: false,
+                read_only: false,
+                redacted: false,
+                value: None,
+                hidden: is_hidden,
+                display_order: None,
+                display_group: None,
+                policy: ManagerPolicyDecision::allow(),
+            }
+        }
+
+        let record = ManagerRecordView {
+            record: "Item".to_string(),
+            collection: "items".to_string(),
+            label_key: "record.item.label".to_string(),
+            label: "Item".to_string(),
+            plural_label_key: "record.item.plural".to_string(),
+            plural_label: "Items".to_string(),
+            create_field_names: Vec::new(),
+            fields: vec![make_field("secret_token", true), make_field("title", false)],
+            endpoint_ids: Vec::new(),
+            policy: ManagerPolicyDecision::allow(),
+        };
+
+        let table_fields = manager_table_fields(&record);
+        let field_names: Vec<&str> = table_fields.iter().map(|f| f.name.as_str()).collect();
+
+        assert!(
+            !field_names.contains(&"secret_token"),
+            "hidden field 'secret_token' must not appear in table fields; got: {field_names:?}"
+        );
+        assert!(
+            field_names.contains(&"title"),
+            "visible field 'title' must appear in table fields; got: {field_names:?}"
+        );
+    }
+
+    #[test]
+    fn header_caller_roles_parses_and_falls_back() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "x-greentic-caller-role".to_string(),
+            "admin, reviewer ,,".to_string(),
+        );
+        assert_eq!(
+            header_caller_roles(&headers),
+            vec!["admin".to_string(), "reviewer".to_string()]
+        );
+        // Absent header => ["local"].
+        assert_eq!(
+            header_caller_roles(&BTreeMap::new()),
+            vec!["local".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_effective_roles_no_overlay_passthrough() {
+        // No overlay => header roles are used verbatim (today's behavior).
+        let header = vec!["admin".to_string()];
+        assert_eq!(
+            compute_effective_roles(None, "t", Some("alice@x"), header.clone()),
+            header
+        );
+        // Including the ["local"] fallback when the header was absent.
+        assert_eq!(
+            compute_effective_roles(None, "t", None, vec!["local".to_string()]),
+            vec!["local".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_effective_roles_overlay_ignores_header() {
+        let overlay = seam_overlay(&[("alice@x", &["sorla_composer"])]);
+        // Caller asserts "admin" via header, but the overlay is authoritative:
+        // the header is ignored and the admin role is used.
+        let roles = compute_effective_roles(
+            Some(&overlay),
+            "t",
+            Some("alice@x"),
+            vec!["admin".to_string()],
+        );
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn compute_effective_roles_overlay_unknown_user_local() {
+        let overlay = seam_overlay(&[("alice@x", &["sorla_composer"])]);
+        // Known tenant, unknown user (Some(empty)) => ["local"], header ignored.
+        let roles = compute_effective_roles(
+            Some(&overlay),
+            "t",
+            Some("nobody@x"),
+            vec!["admin".to_string()],
+        );
+        assert_eq!(roles, vec!["local".to_string()]);
+    }
+
+    #[test]
+    fn compute_effective_roles_overlay_no_email_local() {
+        let overlay = seam_overlay(&[("alice@x", &["sorla_composer"])]);
+        // No caller email (None) => ["local"], header still ignored.
+        let roles = compute_effective_roles(Some(&overlay), "t", None, vec!["admin".to_string()]);
+        assert_eq!(roles, vec!["local".to_string()]);
+    }
+
+    fn request_with(headers: &[(&str, &str)]) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            path: "/x".to_string(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), (*v).to_string()))
+                .collect(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn effective_request_roles_overlay_beats_self_asserted_header() {
+        let runtime = runtime("test").with_admin_roles_overlay(std::sync::Arc::new(seam_overlay(
+            &[("alice@x", &["sorla_composer"])],
+        )));
+        // Caller self-asserts "admin" via header; overlay is authoritative.
+        let request = request_with(&[
+            ("x-greentic-caller-role", "admin"),
+            ("x-greentic-caller-email", "alice@x"),
+        ]);
+        let roles = runtime.effective_request_roles(&request, "local", None);
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn effective_request_roles_overlay_beats_body_supplied_roles() {
+        let runtime = runtime("test").with_admin_roles_overlay(std::sync::Arc::new(seam_overlay(
+            &[("alice@x", &["sorla_composer"])],
+        )));
+        // The capability path lets a caller pass roles in the request body's
+        // `context.roles`; that self-grant must NOT bypass the overlay.
+        let request = request_with(&[("x-greentic-caller-email", "alice@x")]);
+        let roles =
+            runtime.effective_request_roles(&request, "local", Some(vec!["superuser".to_string()]));
+        assert_eq!(roles, vec!["sorla_composer".to_string()]);
+    }
+
+    #[test]
+    fn effective_request_roles_passthrough_without_overlay() {
+        // No overlay configured: header roles are honored verbatim (back-compat).
+        let runtime = runtime("test");
+        let request = request_with(&[("x-greentic-caller-role", "leasing-agent")]);
+        assert_eq!(
+            runtime.effective_request_roles(&request, "local", None),
+            vec!["leasing-agent".to_string()]
+        );
+        // Body-supplied roles are honored when no overlay gates them.
+        assert_eq!(
+            runtime.effective_request_roles(&request, "local", Some(vec!["ops".to_string()])),
+            vec!["ops".to_string()]
+        );
+    }
 
     #[derive(Debug)]
     struct AdminDenyControl;
@@ -7072,6 +8711,7 @@ mod tests {
                 business_actions: Some(business_action_assets()),
                 metrics: Some(metric_assets()),
                 operational_indexes: None,
+                executable_contract_json: None,
             },
             sorx_assets: SorxAssets {
                 start_schema_json: default_start_schema(),
@@ -7252,6 +8892,158 @@ mod tests {
             normalize_start_answers(&default_start_schema(), &answers("local"), true).unwrap();
         let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
         HttpRuntime::from_pack("local", &pack, config).unwrap()
+    }
+
+    /// Build the runtime config used by the migration-wiring tests.
+    fn migration_config() -> SorxRuntimeConfig {
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &answers("local"), true).unwrap();
+        runtime_config_from_answers("landlord-tenant-sor", &normalized.answers).unwrap()
+    }
+
+    /// Build a `SorxRuntime` (with a memory canonical store) for the wiring tests.
+    fn migration_runtime(config: &SorxRuntimeConfig) -> SorxRuntime {
+        let providers = provider_registry(config).unwrap();
+        let router =
+            EndpointRouter::from_agent_gateway(&pack().sorla_assets.agent_gateway_json).unwrap();
+        SorxRuntime::new(
+            RuntimePack {
+                name: "landlord-tenant-sor".to_string(),
+                version: "0.1.0".to_string(),
+                digest: None,
+                operational_indexes: Vec::new(),
+                record_access: Default::default(),
+            },
+            config.clone(),
+            router,
+            providers,
+        )
+    }
+
+    /// Pack whose executable-contract declares one additive migration.
+    fn pack_with_additive_migration() -> LoadedSorlaPack {
+        let mut pack = pack();
+        pack.sorla_assets.executable_contract_json = Some(json!({
+            "schema": "greentic.sorla.executable-contract.v1",
+            "migrations": [{
+                "name": "tenant-v2",
+                "compatibility": "additive",
+                "idempotence_key": "tenant-v2",
+                "backfills": [
+                    { "record": "Tenant", "field": "date_of_birth", "default": null }
+                ]
+            }]
+        }));
+        pack
+    }
+
+    /// Pack whose executable-contract declares one breaking migration.
+    fn pack_with_breaking_migration() -> LoadedSorlaPack {
+        let mut pack = pack();
+        pack.sorla_assets.executable_contract_json = Some(json!({
+            "schema": "greentic.sorla.executable-contract.v1",
+            "migrations": [{
+                "name": "tenant-split",
+                "compatibility": "breaking",
+                "idempotence_key": "tenant-split",
+                "backfills": []
+            }]
+        }));
+        pack
+    }
+
+    // The migration-ledger path is read from a process-global env var, so the
+    // env-touching tests serialize against one mutex and restore prior state.
+    static MIGRATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: all migration env tests hold MIGRATION_ENV_LOCK, so no
+            // other thread mutates or reads these vars concurrently.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn migration_wiring_noop_without_contract() {
+        // The default `pack()` has no executable_contract_json: the helper must
+        // be a clean no-op even when no ledger path is configured.
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::unset("SORX_MIGRATION_LEDGER_PATH");
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack(), &config, &runtime)
+            .expect("no-op without contract");
+    }
+
+    #[test]
+    fn migration_wiring_skips_when_no_ledger_path() {
+        // Migrations present but no ledger path configured => skip (Ok), no panic.
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::unset("SORX_MIGRATION_LEDGER_PATH");
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack_with_additive_migration(), &config, &runtime)
+            .expect("skip without ledger path");
+    }
+
+    #[test]
+    fn migration_wiring_applies_additive_and_is_idempotent() {
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("migrations.json");
+        let _guard = EnvGuard::set("SORX_MIGRATION_LEDGER_PATH", ledger_path.to_str().unwrap());
+        let _confirm = EnvGuard::unset("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+        let config = migration_config();
+        let pack = pack_with_additive_migration();
+
+        // First call applies and records.
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack, &config, &runtime).expect("first apply");
+        assert!(ledger_path.exists(), "ledger file should be written");
+
+        // Second call (fresh store + same ledger) must skip — the ledger is durable.
+        let runtime = migration_runtime(&config);
+        apply_pack_migrations_at_startup(&pack, &config, &runtime).expect("idempotent re-run");
+    }
+
+    #[test]
+    fn migration_wiring_unconfirmed_breaking_fails_startup() {
+        let _lock = MIGRATION_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("migrations.json");
+        let _guard = EnvGuard::set("SORX_MIGRATION_LEDGER_PATH", ledger_path.to_str().unwrap());
+        let _confirm = EnvGuard::unset("SORX_CONFIRM_BREAKING_MIGRATIONS");
+
+        let config = migration_config();
+        let runtime = migration_runtime(&config);
+        let err =
+            apply_pack_migrations_at_startup(&pack_with_breaking_migration(), &config, &runtime)
+                .expect_err("unconfirmed breaking must fail startup");
+        assert_eq!(err.code, "migration_breaking_unconfirmed");
     }
 
     fn runtime_with_model(model: Value) -> HttpRuntime {
@@ -8768,6 +10560,9 @@ mod tests {
                     read_only: false,
                     redacted: false,
                     value: None,
+                    hidden: false,
+                    display_order: None,
+                    display_group: None,
                     policy: ManagerPolicyDecision::allow(),
                 }],
                 endpoint_ids: Vec::new(),
@@ -9436,6 +11231,51 @@ mod tests {
     }
 
     #[test]
+    fn append_business_event_appends_and_returns_record() {
+        let runtime = runtime("local");
+        let body = json!({
+            "id": "evt-1", "topic": "tenancy",
+            "type": "cap://greentic/events/tenancy/rent",
+            "source": "greentic",
+            "time": "2026-07-24T06:00:00Z",
+            "payload": { "msg": "due" },
+            "metadata": { "producer": "trigger:t1", "schema_version": "1" }
+        });
+        let resp = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/events",
+            &tenant_headers(),
+            &body.to_string(),
+        );
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body["ok"], true);
+        assert_eq!(
+            resp.body["event"]["event_type"],
+            "cap://greentic/events/tenancy/rent"
+        );
+    }
+
+    #[test]
+    fn append_business_event_rejects_bad_type() {
+        let runtime = runtime("local");
+        let body = json!({
+            "type": "not-a-cap",
+            "topic": "x",
+            "payload": {},
+            "metadata": { "producer": "p", "schema_version": "1" }
+        });
+        let resp = response(
+            &runtime,
+            "POST",
+            "/v1/sorx/events",
+            &tenant_headers(),
+            &body.to_string(),
+        );
+        assert_eq!(resp.status, 400);
+    }
+
+    #[test]
     fn invalid_json_and_schema_errors_are_structured() {
         let runtime = runtime("local");
         let bad_json = request(
@@ -9882,5 +11722,977 @@ mod tests {
         assert_eq!(first["result"]["id"], "tenant-1");
         assert_eq!(second["result"]["id"], "tenant-1");
         assert_eq!(second["result"]["data"]["name"], "Acme");
+    }
+
+    mod registry_http {
+        use greentic_sorx_core::{
+            CreateDeploymentRequest, DeploymentRegistry, DeploymentStatus, DeploymentVisibility,
+            LocalDeploymentRegistryStore, PackArtifact, StateMode,
+        };
+
+        use super::super::{HttpResponse, handle_registry_request};
+
+        pub(super) fn create_request(
+            version: &str,
+            digest: &str,
+            api_version_label: &str,
+        ) -> CreateDeploymentRequest {
+            CreateDeploymentRequest {
+                artifact: PackArtifact {
+                    source: format!("fixtures/landlord-{version}.gtpack"),
+                    name: "landlord-tenant-sor".to_string(),
+                    version: version.to_string(),
+                    digest: digest.to_string(),
+                    signature: None,
+                    signature_ref: None,
+                },
+                tenant_id: "acme".to_string(),
+                sor_name: "landlord".to_string(),
+                environment: "production".to_string(),
+                api_version_label: api_version_label.to_string(),
+                base_path: format!("/sorx/acme/landlord/{api_version_label}"),
+                visibility: DeploymentVisibility::Private,
+                state_mode: StateMode::SharedCompatible,
+                state_namespace: None,
+                deployment_id: None,
+                allow_api_version_conflict: false,
+                allow_shared_state_conflict: false,
+            }
+        }
+
+        fn passing_report(deployment_id: &str, pack_digest: &str) -> serde_json::Value {
+            serde_json::json!({
+                "schema": "greentic.sorx.validation-report.v1",
+                "deployment_id": deployment_id,
+                "pack_digest": pack_digest,
+                "result": "pass",
+                "public_exposure_allowed": true,
+                "tests": []
+            })
+        }
+
+        struct Seed {
+            store: LocalDeploymentRegistryStore,
+            v1: String,
+            v2: String,
+            _temp: tempfile::TempDir,
+        }
+
+        /// Seed a registry file with two deployments (v1 + v2, both validated
+        /// hence routable) and a `stable` alias pointing at v1.
+        fn seeded_store() -> Seed {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("registry.json");
+            let store = LocalDeploymentRegistryStore::new(&path);
+            let mut registry = DeploymentRegistry::default();
+            let v1 = registry
+                .create_deployment(create_request("1.0.0", "sha256:111", "v1"))
+                .unwrap();
+            let v2 = registry
+                .create_deployment(create_request("2.0.0", "sha256:222", "v2"))
+                .unwrap();
+            registry.validate_deployment(&v1.deployment_id).unwrap();
+            registry.validate_deployment(&v2.deployment_id).unwrap();
+            // Validation reports so promote_alias can run in the rollback test.
+            registry
+                .record_validation_report(passing_report(&v1.deployment_id, "sha256:111"))
+                .unwrap();
+            registry
+                .record_validation_report(passing_report(&v2.deployment_id, "sha256:222"))
+                .unwrap();
+            registry
+                .set_alias("acme", "landlord", "stable", &v1.deployment_id)
+                .unwrap();
+            store.save(&registry).unwrap();
+            Seed {
+                store,
+                v1: v1.deployment_id,
+                v2: v2.deployment_id,
+                _temp: temp,
+            }
+        }
+
+        fn call(seed: &Seed, method: &str, path: &str, body: &str) -> HttpResponse {
+            handle_registry_request(&seed.store, method, path, body)
+        }
+
+        #[test]
+        fn registry_routing_table_resolves_alias() {
+            let seed = seeded_store();
+            let response = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            assert_eq!(response.status, 200);
+            let routes = response.body["routes"].as_array().unwrap();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0]["alias"], "stable");
+            assert_eq!(routes[0]["deployment_id"], seed.v1);
+            assert_eq!(routes[0]["routable"], true);
+            assert_eq!(routes[0]["pack_version"], "1.0.0");
+        }
+
+        #[test]
+        fn registry_set_alias_then_resolve() {
+            let seed = seeded_store();
+            let put = call(
+                &seed,
+                "PUT",
+                "/v1/sorx/aliases/acme/landlord/stable",
+                &format!(r#"{{"target_deployment_id":"{}"}}"#, seed.v2),
+            );
+            assert_eq!(put.status, 200);
+            assert_eq!(put.body["target_deployment_id"], seed.v2);
+
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            let routes = table.body["routes"].as_array().unwrap();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0]["deployment_id"], seed.v2);
+            assert_eq!(routes[0]["pack_version"], "2.0.0");
+        }
+
+        #[test]
+        fn registry_set_alias_rejects_non_routable() {
+            // Seed a pending (non-routable) deployment alongside the routable ones.
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("registry.json");
+            let store = LocalDeploymentRegistryStore::new(&path);
+            let mut registry = DeploymentRegistry::default();
+            let routable = registry
+                .create_deployment(create_request("1.0.0", "sha256:111", "v1"))
+                .unwrap();
+            registry
+                .validate_deployment(&routable.deployment_id)
+                .unwrap();
+            let pending = registry
+                .create_deployment(create_request("2.0.0", "sha256:222", "v2"))
+                .unwrap();
+            assert_eq!(
+                registry.deployment(&pending.deployment_id).unwrap().status,
+                DeploymentStatus::Pending
+            );
+            registry
+                .set_alias("acme", "landlord", "stable", &routable.deployment_id)
+                .unwrap();
+            store.save(&registry).unwrap();
+            let seed = Seed {
+                store,
+                v1: routable.deployment_id.clone(),
+                v2: pending.deployment_id.clone(),
+                _temp: temp,
+            };
+
+            let response = call(
+                &seed,
+                "PUT",
+                "/v1/sorx/aliases/acme/landlord/stable",
+                &format!(r#"{{"target_deployment_id":"{}"}}"#, pending.deployment_id),
+            );
+            assert!(
+                (400..500).contains(&response.status),
+                "expected 4xx, got {}",
+                response.status
+            );
+
+            // Alias still points at the routable deployment.
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            let routes = table.body["routes"].as_array().unwrap();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0]["deployment_id"], routable.deployment_id);
+        }
+
+        #[test]
+        fn registry_rollback_alias() {
+            let seed = seeded_store();
+            // Promote v2 to public on the `stable` alias.
+            let promote = call(
+                &seed,
+                "POST",
+                &format!("/v1/sorx/deployments/{}/promote", seed.v2),
+                r#"{"alias":"stable","visibility":"public"}"#,
+            );
+            assert_eq!(promote.status, 200, "promote body: {:?}", promote.body);
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            assert_eq!(table.body["routes"][0]["deployment_id"], seed.v2);
+
+            // Roll the `stable` alias back to v1.
+            let rollback = call(
+                &seed,
+                "POST",
+                &format!("/v1/sorx/deployments/{}/rollback", seed.v2),
+                &format!(r#"{{"alias":"stable","to_deployment_id":"{}"}}"#, seed.v1),
+            );
+            assert_eq!(rollback.status, 200, "rollback body: {:?}", rollback.body);
+
+            let table = call(&seed, "GET", "/v1/sorx/routing-table", "");
+            assert_eq!(table.body["routes"][0]["deployment_id"], seed.v1);
+
+            // v2 is now marked RolledBack.
+            let deployment = call(
+                &seed,
+                "GET",
+                &format!("/v1/sorx/deployments/{}", seed.v2),
+                "",
+            );
+            assert_eq!(deployment.status, 200);
+            assert_eq!(deployment.body["status"], "rolled_back");
+        }
+
+        #[test]
+        fn registry_list_deployments_and_aliases() {
+            let seed = seeded_store();
+            let deployments = call(
+                &seed,
+                "GET",
+                "/v1/sorx/deployments?tenant=acme&sor=landlord",
+                "",
+            );
+            assert_eq!(deployments.status, 200);
+            assert_eq!(deployments.body["deployments"].as_array().unwrap().len(), 2);
+
+            let none = call(&seed, "GET", "/v1/sorx/deployments?tenant=other", "");
+            assert_eq!(none.body["deployments"].as_array().unwrap().len(), 0);
+
+            let aliases = call(
+                &seed,
+                "GET",
+                "/v1/sorx/aliases?tenant=acme&sor=landlord",
+                "",
+            );
+            assert_eq!(aliases.status, 200);
+            let aliases = aliases.body["aliases"].as_array().unwrap();
+            assert_eq!(aliases.len(), 1);
+            assert_eq!(aliases[0]["alias"], "stable");
+            assert_eq!(aliases[0]["target_deployment_id"], seed.v1);
+        }
+    }
+
+    #[test]
+    fn registry_501_without_registry_path() {
+        // Admin API surface enabled but no registry path attached -> 501.
+        let mut runtime = runtime("local");
+        runtime.admin_api_enabled = true;
+        let response = response(&runtime, "GET", "/v1/sorx/deployments", &[], "");
+        assert_eq!(response.status, 501);
+        assert_eq!(
+            response.body["error"]["code"],
+            "SORX_ADMIN_API_NOT_IMPLEMENTED"
+        );
+    }
+
+    #[test]
+    fn registry_routing_table_served_when_registry_path_attached() {
+        // Thin wiring test: a registry path makes handle_request serve the
+        // routing-table from the persisted store instead of 501.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("registry.json");
+        let store = greentic_sorx_core::LocalDeploymentRegistryStore::new(&path);
+        let mut registry = greentic_sorx_core::DeploymentRegistry::default();
+        let created = registry
+            .create_deployment(registry_http::create_request("1.0.0", "sha256:111", "v1"))
+            .unwrap();
+        registry
+            .validate_deployment(&created.deployment_id)
+            .unwrap();
+        registry
+            .set_alias("acme", "landlord", "stable", &created.deployment_id)
+            .unwrap();
+        store.save(&registry).unwrap();
+
+        let runtime = runtime("local").with_registry_path(Some(path));
+        let response = response(&runtime, "GET", "/v1/sorx/routing-table", &[], "");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body["routes"][0]["deployment_id"],
+            created.deployment_id
+        );
+    }
+
+    // ── business event sink wiring ────────────────────────────────────────────
+
+    /// Build an `HttpRuntime` from the standard fixture answers plus the given
+    /// `events` object merged into the answers JSON.
+    fn runtime_with_events_answers(events_obj: Value) -> SorxResult<HttpRuntime> {
+        let mut answers_json = answers("local");
+        answers_json
+            .as_object_mut()
+            .expect("answers must be an object")
+            .insert("events".to_string(), events_obj);
+        let pack = pack();
+        let normalized =
+            normalize_start_answers(&default_start_schema(), &answers_json, true).unwrap();
+        let config = runtime_config_from_answers(&pack.pack_name, &normalized.answers).unwrap();
+        HttpRuntime::from_pack("local", &pack, config)
+    }
+
+    #[test]
+    fn events_stdout_sink_is_wired_from_config() {
+        let runtime = runtime_with_events_answers(json!({ "sink": "stdout" }));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn events_disabled_sink_is_default_passthrough() {
+        let runtime = runtime_with_events_answers(json!({}));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn events_nats_sink_without_url_is_an_error() {
+        let result = runtime_with_events_answers(json!({ "sink": "nats" }));
+        match result {
+            Err(err) => assert_eq!(err.code, "events_nats_url_missing"),
+            Ok(_) => panic!("nats sink without nats_url must be an error"),
+        }
+    }
+
+    #[test]
+    fn events_disabled_explicit_sink_is_ok() {
+        let runtime = runtime_with_events_answers(json!({ "sink": "disabled" }));
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn capability_offers_include_entity_lifecycle_topics() {
+        let runtime = runtime("local");
+        let pack_name = &runtime.runtime.pack.name;
+
+        let offers = runtime.business_event_topic_offers();
+
+        // Fixture has create/update/delete for entity "Tenant".
+        // Each must be offered as a dedicated capability.
+        for (operation_label, event_suffix) in [
+            ("created", "Tenant.created"),
+            ("updated", "Tenant.updated"),
+            ("deleted", "Tenant.deleted"),
+        ] {
+            let expected_topic =
+                greentic_sorx_core::entity_event_topic(pack_name, "Tenant", operation_label);
+            let matching_offer = offers.iter().find(|offer| {
+                offer.metadata.as_ref().is_some_and(|meta| {
+                    meta["event_type"] == event_suffix
+                        && meta["kind"] == "business_event_topic"
+                        && meta["topic"] == expected_topic
+                })
+            });
+            assert!(
+                matching_offer.is_some(),
+                "expected a lifecycle offer for event_type={event_suffix} topic={expected_topic}"
+            );
+            let offer = matching_offer.unwrap();
+            assert_eq!(
+                offer.capability,
+                format!(
+                    "cap://greentic/events/{}/{}",
+                    clean_capability_segment(pack_name),
+                    clean_capability_segment(event_suffix)
+                ),
+                "capability URI mismatch for {event_suffix}"
+            );
+            assert!(
+                offer
+                    .contracts
+                    .contains(&"greentic.sorx.business-event-topic.v1".to_string()),
+                "lifecycle offer for {event_suffix} must declare the business-event-topic contract"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_offers_command_topics_include_topic_field() {
+        let runtime = runtime("local");
+        let pack_name = &runtime.runtime.pack.name;
+
+        let offers = runtime.business_event_topic_offers();
+
+        // The fixture command emits "tenant.code_generated" — verify the offer
+        // now carries a "topic" field equal to command_event_topic().
+        let expected_topic =
+            greentic_sorx_core::command_event_topic(pack_name, "tenant.code_generated");
+        let command_offer = offers.iter().find(|offer| {
+            offer
+                .metadata
+                .as_ref()
+                .is_some_and(|meta| meta["event_type"] == "tenant.code_generated")
+        });
+        assert!(
+            command_offer.is_some(),
+            "expected a command-event offer for tenant.code_generated"
+        );
+        assert_eq!(
+            command_offer.unwrap().metadata.as_ref().unwrap()["topic"],
+            expected_topic,
+            "command-event offer must carry the canonical topic string"
+        );
+    }
+
+    #[test]
+    fn agent_endpoint_capability_round_trips_through_parser() {
+        let capability = agent_endpoint_capability("landlord-tenant-sor", "tenant.get", "0.1.0");
+        assert_eq!(
+            capability,
+            "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0"
+        );
+        assert_eq!(
+            parse_agent_endpoint_capability(&capability),
+            Some(("landlord-tenant-sor".to_string(), "tenant.get".to_string()))
+        );
+    }
+
+    #[test]
+    fn agent_endpoint_capability_builder_sanitizes_segments() {
+        // Mirrors `clean_capability_segment`'s behavior via `business_action_capability`:
+        // disallowed characters become `-`, and the sanitized segment still parses back.
+        let capability = agent_endpoint_capability("pack name!", "endpoint/id", "1.0.0-rc 1");
+        assert_eq!(
+            capability,
+            "cap://greentic/agent-endpoints/pack-name/endpoint-id/v1.0.0-rc-1"
+        );
+        assert_eq!(
+            parse_agent_endpoint_capability(&capability),
+            Some(("pack-name".to_string(), "endpoint-id".to_string()))
+        );
+    }
+
+    #[test]
+    fn agent_endpoint_capability_parser_rejects_malformed_or_wrong_namespace() {
+        // Wrong namespace (business-functions, not agent-endpoints).
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/business-functions/pack/action/v1.0.0"),
+            None
+        );
+        // Missing segments.
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/agent-endpoints/pack/endpoint"),
+            None
+        );
+        // Too many segments.
+        assert_eq!(
+            parse_agent_endpoint_capability(
+                "cap://greentic/agent-endpoints/pack/endpoint/v1.0.0/extra"
+            ),
+            None
+        );
+        // Version segment missing the `v` prefix.
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/agent-endpoints/pack/endpoint/1.0.0"),
+            None
+        );
+        // Empty pack segment.
+        assert_eq!(
+            parse_agent_endpoint_capability("cap://greentic/agent-endpoints//endpoint/v1.0.0"),
+            None
+        );
+        // Not a capability URI at all.
+        assert_eq!(parse_agent_endpoint_capability("not-a-capability"), None);
+    }
+
+    #[test]
+    fn capability_discovery_includes_agent_endpoint_offer() {
+        let runtime = runtime("local");
+        let capabilities = request(&runtime, "GET", "/admin/v1/capabilities", &[], "");
+        let offers = capabilities["offers"].as_array().unwrap();
+
+        // `tenant.get` ships no risk/approval/input_schema/output_schema in the
+        // fixture — those keys must be omitted from the offer, not emitted as null.
+        let get_offer = offers
+            .iter()
+            .find(|offer| {
+                offer["capability"]
+                    == "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0"
+            })
+            .expect("expected an agent_endpoint offer for tenant.get");
+        assert_eq!(get_offer["metadata"]["kind"], "agent_endpoint");
+        assert_eq!(get_offer["metadata"]["pack"]["name"], "landlord-tenant-sor");
+        assert_eq!(get_offer["metadata"]["pack"]["version"], "0.1.0");
+        assert_eq!(get_offer["metadata"]["endpoint"]["id"], "tenant.get");
+        assert_eq!(
+            get_offer["metadata"]["endpoint"]["operation_id"],
+            "tenant.get"
+        );
+        assert_eq!(get_offer["metadata"]["endpoint"]["method"], "GET");
+        assert_eq!(
+            get_offer["metadata"]["endpoint"]["path"],
+            "/v1/agent/tenants/{tenant_id}"
+        );
+        assert!(get_offer["metadata"]["endpoint"].get("risk").is_none());
+        assert!(get_offer["metadata"]["endpoint"].get("approval").is_none());
+        assert!(get_offer["metadata"].get("input_schema").is_none());
+        assert!(get_offer["metadata"].get("output_schema").is_none());
+        assert_eq!(
+            get_offer["contracts"][0],
+            "greentic.sorx.agent-endpoint.invoke.v1"
+        );
+
+        // `tenant.create` carries risk + input_schema in the fixture — confirm
+        // those surface when present.
+        let create_offer = offers
+            .iter()
+            .find(|offer| {
+                offer["capability"]
+                    == "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.create/v0.1.0"
+            })
+            .expect("expected an agent_endpoint offer for tenant.create");
+        assert_eq!(create_offer["metadata"]["endpoint"]["risk"], "medium");
+        assert!(create_offer["metadata"]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn capability_invoke_executes_agent_endpoint_and_matches_direct_route() {
+        let runtime = runtime("local");
+        let capability = "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0";
+
+        let created = request(
+            &runtime,
+            "POST",
+            "/v1/agent/tenants/create",
+            &tenant_headers(),
+            &json!({ "id": "tenant-agent-cap-1", "name": "Agent Cap", "active": true }).to_string(),
+        );
+        assert_eq!(created["ok"], true);
+
+        let via_capability = request(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": capability,
+                "input": { "id": "tenant-agent-cap-1" },
+                "context": {
+                    "tenant_id": "tenant-a",
+                    "caller_id": "capability-client",
+                    "roles": ["local"]
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(via_capability["ok"], true);
+        assert_eq!(
+            via_capability["schema"],
+            "greentic.sorx.agent-endpoint-invoke-result.v1"
+        );
+        assert_eq!(via_capability["capability"], capability);
+        assert_eq!(via_capability["endpoint"]["id"], "tenant.get");
+        assert_eq!(via_capability["endpoint"]["operation_id"], "tenant.get");
+        assert_eq!(
+            via_capability["endpoint"]["pack"]["name"],
+            "landlord-tenant-sor"
+        );
+        assert_eq!(via_capability["endpoint"]["pack"]["version"], "0.1.0");
+
+        let via_direct_route = request(
+            &runtime,
+            "GET",
+            "/v1/agent/tenants/tenant-agent-cap-1",
+            &tenant_headers(),
+            "",
+        );
+        assert_eq!(via_direct_route["ok"], true);
+        assert_eq!(via_capability["result"], via_direct_route["result"]);
+    }
+
+    #[test]
+    fn capability_invoke_agent_endpoint_dry_run_reports_execution_target() {
+        let runtime = runtime("local");
+        let capability = "cap://greentic/agent-endpoints/landlord-tenant-sor/tenant.get/v0.1.0";
+        let dry_run = request(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": capability,
+                "dry_run": true,
+                "input": { "id": "tenant-agent-cap-2" }
+            })
+            .to_string(),
+        );
+        assert_eq!(dry_run["valid"], true);
+        assert_eq!(dry_run["execution_target"]["endpoint_id"], "tenant.get");
+        assert_eq!(dry_run["execution_target"]["operation_id"], "tenant.get");
+    }
+
+    #[test]
+    fn capability_invoke_unknown_agent_endpoint_capability_is_404() {
+        let runtime = runtime("local");
+        let response = response(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability":
+                    "cap://greentic/agent-endpoints/landlord-tenant-sor/does-not-exist/v0.1.0",
+                "input": {}
+            })
+            .to_string(),
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response.body["error"]["code"],
+            "RUNTIME_CAPABILITY_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn capability_invoke_capability_from_other_pack_namespace_is_404() {
+        let runtime = runtime("local");
+        // Well-formed agent-endpoint capability, but for a different pack —
+        // must not resolve against this runtime's router.
+        let response = response(
+            &runtime,
+            "POST",
+            "/admin/v1/capabilities/invoke",
+            &tenant_headers(),
+            &json!({
+                "capability": "cap://greentic/agent-endpoints/some-other-pack/tenant.get/v0.1.0",
+                "input": {}
+            })
+            .to_string(),
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response.body["error"]["code"],
+            "RUNTIME_CAPABILITY_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn response_carries_custom_headers() {
+        let resp = json_response(401, serde_json::json!({"ok": false}))
+            .with_header("WWW-Authenticate", "Bearer x");
+        assert_eq!(resp.status, 401);
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(k, v)| k == "WWW-Authenticate" && v == "Bearer x")
+        );
+    }
+
+    #[test]
+    fn status_401_reason_phrase_is_unauthorized() {
+        let resp = error_response(401, "SORX_UNAUTHORIZED", "no token");
+        let bytes = resp.as_bytes();
+        let header = String::from_utf8_lossy(&bytes);
+        assert!(
+            header.contains("401 Unauthorized"),
+            "status line must read '401 Unauthorized', got: {}",
+            header.lines().next().unwrap_or("")
+        );
+    }
+
+    #[test]
+    fn handle_mcp_tools_list_returns_tools_for_verified_caller() {
+        let rt = runtime("local");
+        let caller = crate::mcp_jsonrpc::McpCaller {
+            tenant_id: rt.runtime.config.tenant_id.clone(),
+            subject: "u1".into(),
+            roles: vec![],
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+        })
+        .to_string();
+        let resp = rt.handle_mcp_dispatch(&caller, &body);
+        assert_eq!(resp.status, 200, "dispatch must return HTTP 200");
+        assert!(
+            resp.body["result"]["tools"].is_array(),
+            "result.tools must be an array; got: {}",
+            resp.body
+        );
+    }
+
+    // ---- Fix 1a: unauthenticated POST → 401 + WWW-Authenticate ----------------
+
+    /// Build a minimal `McpAuthState` suitable for auth-boundary tests.
+    /// The `jwks` field uses `UreqJwks` which is never called for the 401 path
+    /// (bearer extraction fails before any token verification).
+    fn test_mcp_auth_state() -> McpAuthState {
+        let config = crate::mcp_auth::McpAuthConfig {
+            issuers: vec!["https://tm.example".into()],
+            audience: "sorx-acme-landlord".into(),
+            jwks_ttl: std::time::Duration::from_secs(600),
+            leeway_secs: 60,
+        };
+        McpAuthState {
+            config: std::sync::Arc::new(config),
+            jwks: std::sync::Arc::new(crate::mcp_auth::UreqJwks::new(
+                std::time::Duration::from_secs(600),
+            )),
+            resource: "https://sor.example/v1/sorx/mcp".into(),
+            metadata_url: "https://sor.example/.well-known/oauth-protected-resource".into(),
+        }
+    }
+
+    #[test]
+    fn handle_mcp_post_without_auth_header_returns_401_with_www_authenticate() {
+        let rt = runtime("local");
+        let state = test_mcp_auth_state();
+        // No `authorization` header — must hit the bearer_from_headers None arm.
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/sorx/mcp".into(),
+            headers: BTreeMap::new(),
+            body: r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#.into(),
+        };
+        let resp = rt.handle_mcp_post(&state, &request);
+        assert_eq!(resp.status, 401, "missing bearer must yield 401");
+        let www_auth = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k == "WWW-Authenticate")
+            .map(|(_, v)| v.as_str());
+        assert!(
+            www_auth.is_some(),
+            "401 response must include a WWW-Authenticate header"
+        );
+        assert!(
+            www_auth.unwrap().starts_with("Bearer resource_metadata="),
+            "WWW-Authenticate must start with 'Bearer resource_metadata='; got: {:?}",
+            www_auth
+        );
+    }
+
+    // ---- Fix 1b: tenant-mismatch helper unit tests -----------------------------
+
+    #[test]
+    fn mcp_caller_from_claims_rejects_mismatched_tenant_with_403() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "other".into(),
+            sub: "u1".into(),
+            email: None,
+            roles: vec![],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Ok(_) => panic!("mismatched tenant must return Err, got Ok"),
+            Err(resp) => {
+                assert_eq!(resp.status, 403, "tenant mismatch must yield HTTP 403");
+                assert_eq!(
+                    resp.body["error"]["code"], "SORX_MCP_TENANT_MISMATCH",
+                    "error code must be SORX_MCP_TENANT_MISMATCH"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_caller_from_claims_accepts_matching_tenant_and_projects_fields() {
+        let claims = crate::mcp_auth::VerifiedClaims {
+            tenant_id: "acme".into(),
+            sub: "u42".into(),
+            email: Some("u42@acme.io".into()),
+            roles: vec!["sorla_composer".into()],
+        };
+        match mcp_caller_from_claims(claims, "acme") {
+            Err(_) => panic!("matching tenant must return Ok(McpCaller)"),
+            Ok(caller) => {
+                assert_eq!(caller.tenant_id, "acme");
+                assert_eq!(caller.subject, "u42");
+                assert_eq!(caller.roles, vec!["sorla_composer".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn bind_runtime_extensions_dispatches_audit_when_subscribed() {
+        use greentic_sorx_core::{
+            BoundObserverHook, ExtensionFailMode, NATIVE_AUDIT_PACK_REF, ObserverEvent,
+            ObserverHook, RuntimeExtensionBinding, RuntimeExtensions, native_extension_registry,
+        };
+        use std::sync::Arc;
+
+        let sink = MemoryAuditSink::new();
+        let mut extensions = RuntimeExtensions::default();
+        extensions.observer.subscriptions.insert(
+            "post_call".to_string(),
+            vec![RuntimeExtensionBinding {
+                id: "audit".into(),
+                contract: "greentic.cap.extension.observer.v1".into(),
+                pack_ref: NATIVE_AUDIT_PACK_REF.into(),
+                fail_mode: ExtensionFailMode::Open,
+            }],
+        );
+
+        // Build the bound observer the same way bind_runtime_extensions does and
+        // fire a completed event; the audit sink must capture it.
+        let registry = native_extension_registry(Arc::new(sink.clone()), "landlord", "1.0.0");
+        let hook = BoundObserverHook::new(extensions, registry);
+        let event: ObserverEvent = serde_json::from_value(serde_json::json!({
+            "event_type": "stack.call.completed",
+            "context": {
+                "environment_id": "env", "runtime_id": "rt", "tenant_id": "acme",
+                "deployment_id": "dep", "stack_id": "landlord", "route_id": "record_rent_payment",
+                "call_id": "c1", "trace_id": "t1", "actor": "alice"
+            },
+            "status": "ok"
+        }))
+        .unwrap();
+        hook.observe(&event).unwrap();
+        assert_eq!(sink.events().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bind_runtime_extensions_is_noop_without_bindings() {
+        // Spec parity requirement: with no declared bindings, bind_runtime_extensions
+        // must return the runtime unchanged (Noop hooks) — no dispatch, no audit
+        // records. Prove it by driving a real business-action invocation through the
+        // bound runtime and asserting the shared audit sink captured nothing; if the
+        // None/empty-extensions gate were removed, the native audit adapter would
+        // pick up the `stack.call.completed` event and this would fail.
+        let mut runtime = runtime("local");
+        let sink = Arc::new(MemoryAuditSink::new());
+        let inner = (*runtime.runtime).clone();
+        let bound = bind_runtime_extensions(inner, None, sink.clone(), "landlord", "1.0.0", None);
+        runtime.runtime = Arc::new(bound);
+
+        let body = json!({
+            "action_ref": { "contract_hash": business_action_hash() },
+            "values": { "id": "tenant-noop-1", "name": "Acme", "active": true },
+            "options": { "idempotency_key": "business-action-noop" }
+        })
+        .to_string();
+        let invoked = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+            &tenant_headers(),
+            &body,
+        );
+        assert_eq!(invoked["ok"], true);
+        assert_eq!(sink.events().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn bind_runtime_extensions_wires_bound_observer_end_to_end() {
+        // Spec parity requirement, the inverse of the noop test above: with a
+        // declared `post_call` binding to the native audit adapter,
+        // bind_runtime_extensions must build and wire the real
+        // BoundObserverHook/BoundControlHook registry itself (not a
+        // hand-reconstructed one) so that driving a real business-action
+        // invocation through the bound runtime produces an audit event on the
+        // shared sink. If bind_runtime_extensions dropped the observer wiring
+        // or wired the wrong sink, this would fail.
+        use greentic_sorx_core::{
+            ExtensionFailMode, NATIVE_AUDIT_PACK_REF, RuntimeExtensionBinding, RuntimeExtensions,
+        };
+
+        let mut runtime = runtime("local");
+        let sink = Arc::new(MemoryAuditSink::new());
+        let mut extensions = RuntimeExtensions::default();
+        extensions.observer.subscriptions.insert(
+            "post_call".to_string(),
+            vec![RuntimeExtensionBinding {
+                id: "audit".into(),
+                contract: "greentic.cap.extension.observer.v1".into(),
+                pack_ref: NATIVE_AUDIT_PACK_REF.into(),
+                fail_mode: ExtensionFailMode::Open,
+            }],
+        );
+
+        let inner = (*runtime.runtime).clone();
+        let bound = bind_runtime_extensions(
+            inner,
+            Some(&extensions),
+            sink.clone(),
+            "landlord",
+            "1.0.0",
+            None,
+        );
+        runtime.runtime = Arc::new(bound);
+
+        let body = json!({
+            "action_ref": { "contract_hash": business_action_hash() },
+            "values": { "id": "tenant-bound-1", "name": "Acme", "active": true },
+            "options": { "idempotency_key": "business-action-bound" }
+        })
+        .to_string();
+        let invoked = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+            &tenant_headers(),
+            &body,
+        );
+        assert_eq!(invoked["ok"], true);
+
+        let events = sink.events().unwrap();
+        assert!(
+            !events.is_empty(),
+            "bound observer must record at least one audit event"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "observer.post_call"),
+            "expected an observer.post_call event, got: {events:?}"
+        );
+    }
+
+    #[test]
+    fn bind_runtime_extensions_registers_wasm_adapter_for_nonaudit_packref() {
+        use greentic_sorx_core::{
+            ControlDecision, ExtensionFailMode, RuntimeExtensionAdapter, RuntimeExtensionBinding,
+            RuntimeExtensions,
+        };
+        use std::sync::Arc;
+
+        // A stand-in adapter that records it was consulted, registered under a
+        // non-audit pack_ref, proving bind_runtime_extensions routes wasm packrefs to it.
+        #[derive(Debug)]
+        struct Spy(std::sync::atomic::AtomicBool);
+        impl RuntimeExtensionAdapter for Spy {
+            fn control(
+                &self,
+                _h: &str,
+                _b: &RuntimeExtensionBinding,
+                _r: &serde_json::Value,
+                _resp: Option<&serde_json::Value>,
+            ) -> greentic_sorx_core::SorxResult<ControlDecision> {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(ControlDecision::allow())
+            }
+        }
+        let spy = Arc::new(Spy(std::sync::atomic::AtomicBool::new(false)));
+
+        let mut extensions = RuntimeExtensions::default();
+        extensions.control.hooks.insert(
+            "pre_call".to_string(),
+            vec![RuntimeExtensionBinding {
+                id: "w".into(),
+                contract: "greentic.cap.extension.control.v1".into(),
+                pack_ref: "acme.guard.v1".into(),
+                fail_mode: ExtensionFailMode::Closed,
+            }],
+        );
+
+        let mut runtime = runtime("local");
+        let sink = Arc::new(MemoryAuditSink::new());
+        let inner = (*runtime.runtime).clone();
+        let bound = bind_runtime_extensions(
+            inner,
+            Some(&extensions),
+            sink.clone(),
+            "landlord",
+            "1.0.0",
+            Some(spy.clone() as Arc<dyn RuntimeExtensionAdapter>),
+        );
+        runtime.runtime = Arc::new(bound);
+
+        let body = json!({
+            "action_ref": { "contract_hash": business_action_hash() },
+            "values": { "id": "tenant-wasm-1", "name": "Acme", "active": true },
+            "options": { "idempotency_key": "business-action-wasm" }
+        })
+        .to_string();
+        let invoked = request(
+            &runtime,
+            "POST",
+            "/v1/sorx/business-actions/record_rent_payment/versions/0.1.0/invoke",
+            &tenant_headers(),
+            &body,
+        );
+        assert_eq!(invoked["ok"], true);
+        assert!(
+            spy.0.load(std::sync::atomic::Ordering::SeqCst),
+            "wasm-registered adapter's control() must have fired for the non-audit pack_ref"
+        );
     }
 }

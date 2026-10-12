@@ -11,6 +11,7 @@ use crate::{EndpointDefinition, SorxError, SorxResult};
 pub enum StoreProviderKind {
     Memory,
     FoundationDb,
+    Postgres,
     External(String),
 }
 
@@ -19,6 +20,7 @@ impl StoreProviderKind {
         match value.to_ascii_lowercase().as_str() {
             "memory" => Self::Memory,
             "foundationdb" | "foundation_db" | "foundation-db" => Self::FoundationDb,
+            "postgres" | "postgresql" => Self::Postgres,
             other => Self::External(other.to_string()),
         }
     }
@@ -27,6 +29,7 @@ impl StoreProviderKind {
         match self {
             Self::Memory => "memory",
             Self::FoundationDb => "foundationdb",
+            Self::Postgres => "postgres",
             Self::External(value) => value.as_str(),
         }
     }
@@ -241,6 +244,13 @@ pub struct DeleteResult {
     pub deleted: bool,
 }
 
+/// Serde default for `occurred_at` on events serialized before the field
+/// existed. `chrono::DateTime<Utc>` has no `Default`, so `#[serde(default)]`
+/// alone would not compile — a named default fn is required.
+fn epoch() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppendEventOp {
     pub namespace: ProviderNamespace,
@@ -253,6 +263,8 @@ pub struct AppendEventOp {
     pub subject_entity: String,
     pub subject_id: String,
     pub data: Value,
+    #[serde(default = "epoch")]
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -266,6 +278,8 @@ pub struct EventRecord {
     #[serde(default)]
     pub envelope: Value,
     pub sequence: u64,
+    #[serde(default = "epoch")]
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,6 +361,16 @@ pub trait SorxCanonicalStore: SorStoreProvider {
     fn get_external_refs(&self, op: ExternalRefsOp) -> SorxResult<ExternalRefsResult>;
     fn store_evidence(&self, op: StoreEvidenceOp) -> SorxResult<()>;
     fn get_evidence(&self, op: ExternalRefsOp) -> SorxResult<EvidenceResult>;
+
+    /// Returns this store's durable migration ledger when it has one.
+    ///
+    /// FoundationDB-backed stores return `Some` so the runtime can use the
+    /// cluster itself as the durable ledger without requiring a local file path.
+    /// All other backends return `None`; callers then fall back to a
+    /// file-based [`crate::migration::LocalMigrationLedger`].
+    fn as_migration_ledger(&self) -> Option<&dyn crate::migration::MigrationLedger> {
+        None
+    }
 }
 
 #[derive(Clone, Default)]
@@ -429,4 +453,19 @@ fn clean_segment(value: &str) -> String {
         .chars()
         .filter(|ch| !ch.is_control())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::MemoryStoreProvider;
+
+    #[test]
+    fn memory_store_provider_returns_none_from_as_migration_ledger() {
+        let store = MemoryStoreProvider::new();
+        assert!(
+            store.as_migration_ledger().is_none(),
+            "MemoryStoreProvider must return None from as_migration_ledger (default impl)"
+        );
+    }
 }

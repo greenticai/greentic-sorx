@@ -1,0 +1,20 @@
+{
+  "name": "landlord-tenant-v2-fields",
+  "compatibility": "additive",
+  "idempotence_key": "landlord-tenant-v2-fields",
+  "projection_updates": ["LandlordPortfolio", "ActiveTenants", "MaintenanceBoard"],
+  "backfills": [
+    {"record":"Tenant","field":"date_of_birth","default":null},
+    {"record":"Tenant","field":"emergency_contact_name","default":null},
+    {"record":"Tenant","field":"emergency_contact_phone","default":null},
+    {"record":"Tenant","field":"preferred_contact_method","default":null},
+    {"record":"Unit","field":"bedrooms","default":null},
+    {"record":"Unit","field":"bathrooms","default":null},
+    {"record":"Unit","field":"furnished","default":null},
+    {"record":"Unit","field":"energy_rating","default":null},
+    {"record":"Tenancy","field":"building_id","default":null},
+    {"record":"Tenancy","field":"deposit_amount","default":null},
+    {"record":"Tenancy","field":"deposit_scheme_reference","default":null},
+    {"record":"Tenancy","field":"renewal_notice_date","default":null}
+  ]
+}

@@ -71,6 +71,12 @@ pub struct ManagerFieldView {
     pub redacted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_order: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_group: Option<String>,
     pub policy: ManagerPolicyDecision,
 }
 
@@ -291,6 +297,9 @@ impl RecordBuilder {
                     read_only: false,
                     redacted: false,
                     value: None,
+                    hidden: false,
+                    display_order: None,
+                    display_group: None,
                     policy: ManagerPolicyDecision::allow(),
                 });
         }

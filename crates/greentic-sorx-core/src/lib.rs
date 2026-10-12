@@ -1,7 +1,13 @@
 use std::path::PathBuf;
 
+pub mod migration;
+pub use migration::{
+    CompatibilityMigration, CompatibilityMode, LocalMigrationLedger, MigrationBackfill,
+    MigrationLedger, MigrationOutcome, apply_pending_migrations, parse_pack_migrations,
+};
 mod approval;
 mod audit;
+mod business_events;
 mod deployment;
 mod error;
 mod evidence;
@@ -11,8 +17,10 @@ mod manager;
 mod mcp;
 mod metrics_runtime;
 mod model;
+mod native_extensions;
 mod ontology_graph;
 mod policy;
+pub mod presence;
 mod provider;
 mod provider_compatibility;
 pub mod providers;
@@ -25,6 +33,11 @@ pub use approval::{
     LocalDenyBroker, LocalPendingBroker,
 };
 pub use audit::{AuditSink, DisabledAuditSink, MemoryAuditSink, SorxAuditEvent, StdoutAuditSink};
+pub use business_events::{
+    BusinessEventSink, CommandEventInput, DisabledBusinessEventSink, EntityEventInput,
+    MemoryBusinessEventSink, StdoutBusinessEventSink, command_event_envelope, command_event_topic,
+    entity_event_envelope, entity_event_topic,
+};
 pub use deployment::{
     CreateDeploymentRequest, DEPLOYMENT_PROMOTION_STATUS_SCHEMA,
     DEPLOYMENT_PUBLIC_ROUTE_TABLE_SCHEMA, DEPLOYMENT_REGISTRY_SCHEMA,
@@ -32,6 +45,7 @@ pub use deployment::{
     DeploymentRoute, DeploymentRouteTable, DeploymentStatus, DeploymentVisibility,
     LocalDeploymentRegistryStore, PackArtifact, PromotionAuditEvent, PromotionStatus,
     RollbackAliasRequest, SorxDeployment, StateMode, TrafficHeaderMatch, TrafficMode, TrafficSplit,
+    evaluate_pending_migrations,
 };
 pub use error::{SorxError, SorxResult};
 pub use evidence::{
@@ -90,6 +104,9 @@ pub use model::{
     InvocationSource, OperationKind, QueryPlan, RecordAccessPolicy, RiskLevel,
     RuntimeOperationalIndex, RuntimePack, SorxEvent, TraversalRequirement, ViewTransform,
 };
+pub use native_extensions::{
+    NATIVE_AUDIT_PACK_REF, NativeAuditObserver, native_extension_registry,
+};
 pub use ontology_graph::{
     OntologyConceptNode, OntologyGraphService, OntologyRelationshipEdge, TypePath,
 };
@@ -114,13 +131,17 @@ pub use provider_compatibility::{
     ProviderResolutionMode, ResolvedProviderBinding, resolve_provider_compatibility,
 };
 pub use providers::{FoundationDbProviderAdapter, FoundationDbProviderConfig, MemoryStoreProvider};
+#[cfg(feature = "postgres")]
+pub use providers::{
+    POSTGRES_CA_FILE_ENV, POSTGRES_DEFAULT_URL_ENV, PostgresProviderConfig, PostgresStore,
+};
 pub use router::EndpointRouter;
 pub use runtime::{SorxRuntime, empty_object, invocation, runtime_pack};
 pub use startup::{
-    AuditConfig, DeploymentConfig, ExposureConfig, GhcrConfig, GhcrWebhookAnswerConfig, McpConfig,
-    ProviderBindingConfig, ServerConfig, SorxNormalizedAnswers, SorxRuntimeConfig,
-    SorxStartAnswers, SorxStartupError, SorxStartupIssue, build_startup_plan, default_start_schema,
-    normalize_start_answers, runtime_config_from_answers,
+    AuditConfig, DeploymentConfig, EventsConfig, ExposureConfig, GhcrConfig,
+    GhcrWebhookAnswerConfig, McpConfig, ProviderBindingConfig, ServerConfig, SorxNormalizedAnswers,
+    SorxRuntimeConfig, SorxStartAnswers, SorxStartupError, SorxStartupIssue, build_startup_plan,
+    default_start_schema, normalize_start_answers, runtime_config_from_answers,
 };
 
 pub const SORX_VERSION_SCHEMA: &str = "greentic.sorx.version.v1";

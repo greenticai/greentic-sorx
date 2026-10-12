@@ -22,8 +22,15 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      # Deliberately not --all-features, matching ci.yml. Two optional
+      # features are not buildable on a stock runner: `foundationdb` needs
+      # the native FDB client lib + headers at link time, and
+      # `wasm-extensions` pulls the git-pinned private greentic-ext-runtime.
+      # Both are default-off. This step only exists for the perf guards in
+      # crates/greentic-sorx-cli/tests/perf_{scaling,timeout}.rs, neither of
+      # which is feature-gated.
       - name: Run tests including perf guards
-        run: cargo test --all-features
+        run: cargo test --workspace
 
       - name: Run benchmarks smoke
         run: cargo bench -p greentic-sorx --bench perf -- --sample-size 10

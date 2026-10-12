@@ -28,9 +28,22 @@ use greentic_sorx_pack::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod admin_roles;
+mod answers_source;
+mod ar_token;
+#[cfg(feature = "events-nats")]
+mod event_bridge_invoker;
 mod http_runtime;
+mod mcp_auth;
+mod mcp_jsonrpc;
+#[cfg(feature = "events-nats")]
+pub mod nats_events;
+mod pack_ref;
+mod presence_publish;
 mod test_runtime;
 mod validation;
+#[cfg(feature = "wasm-extensions")]
+pub mod wasm_extensions;
 
 const TRANSIENT_HTTP_INGEST_SECRET_ENV: &str = "GREENTIC_SORX_TRANSIENT_HTTP_INGEST_SECRET";
 const RUNTIME_CONFIG_ENV: &str = "GREENTIC_SORX_RUNTIME_CONFIG";
@@ -285,7 +298,9 @@ pub enum Commands {
     },
     /// Start a SORX runtime from a SoRLa .gtpack and startup answers.
     Start {
-        /// Path to a SoRLa .gtpack archive.
+        /// Path to a SoRLa .gtpack archive, or an `oci://` reference
+        /// (e.g. `oci://registry.example/greentic/sor-landlord:t1@sha256:<hex>`)
+        /// pulled to a local cache before starting.
         pack: PathBuf,
 
         /// Emit the startup answer schema and exit.
@@ -310,7 +325,9 @@ pub enum Commands {
     },
     /// Alias for start.
     Run {
-        /// Path to a SoRLa .gtpack archive.
+        /// Path to a SoRLa .gtpack archive, or an `oci://` reference
+        /// (e.g. `oci://registry.example/greentic/sor-landlord:t1@sha256:<hex>`)
+        /// pulled to a local cache before starting.
         pack: PathBuf,
 
         /// Path to startup answers JSON.
@@ -1053,7 +1070,18 @@ fn dispatch(
                     "start requires --schema or --answers <FILE> in non-interactive mode",
                 ));
             }
-            run_start(pack, schema, answers, dry_run, emit_answers, json, _context)
+            let answers = answers.map(answers_source::resolve).transpose()?;
+            let pack = pack_ref::materialize(&pack)?;
+            run_start(
+                pack,
+                schema,
+                answers,
+                dry_run,
+                emit_answers,
+                json,
+                registry_path,
+                _context,
+            )
         }
         Commands::Run { pack, answers } => {
             if answers.is_none() && _context.non_interactive {
@@ -1061,7 +1089,18 @@ fn dispatch(
                     "run requires --answers <FILE> in non-interactive mode",
                 ));
             }
-            run_start(pack, false, answers, false, false, false, _context)
+            let answers = answers.map(answers_source::resolve).transpose()?;
+            let pack = pack_ref::materialize(&pack)?;
+            run_start(
+                pack,
+                false,
+                answers,
+                false,
+                false,
+                false,
+                registry_path,
+                _context,
+            )
         }
     }
 }
@@ -2573,6 +2612,65 @@ fn scoped_concepts(root: &str, relationships: &[OntologyRelationshipEdge]) -> Ve
     concepts.into_iter().collect()
 }
 
+/// Environment variable that, when set, enables the NATS event bridge.
+#[cfg(feature = "events-nats")]
+const EVENTS_NATS_URL_ENV: &str = "GREENTIC_EVENTS_NATS_URL";
+
+/// Starts the NATS event bridge in the background when `GREENTIC_EVENTS_NATS_URL`
+/// is set. No-op (unchanged behavior) when the variable is absent.
+///
+/// The bridge runs on its own multi-threaded tokio runtime inside a dedicated
+/// OS thread so that the synchronous HTTP serve loop on the calling thread is
+/// never blocked. A failure to connect to NATS is logged and swallowed: HTTP
+/// serving must continue regardless of the events fabric's availability.
+#[cfg(feature = "events-nats")]
+fn spawn_event_bridge_if_enabled(runtime: std::sync::Arc<greentic_sorx_core::SorxRuntime>) {
+    let nats_url = match std::env::var(EVENTS_NATS_URL_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => return,
+    };
+
+    std::thread::Builder::new()
+        .name("sorx-event-bridge".to_string())
+        .spawn(move || {
+            let tokio_runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    eprintln!("greentic-sorx: failed to build event-bridge runtime: {err}");
+                    return;
+                }
+            };
+
+            tokio_runtime.block_on(async move {
+                match async_nats::connect(&nats_url).await {
+                    Ok(client) => {
+                        eprintln!(
+                            "greentic-sorx: event bridge connected to NATS at {nats_url} (greentic.sorla.request.v1)"
+                        );
+                        let invoker = std::sync::Arc::new(
+                            event_bridge_invoker::CoreSorxInvoker::new(runtime),
+                        );
+                        if let Err(err) = sorx_event_bridge::run_bridge(client, invoker).await {
+                            eprintln!("greentic-sorx: event bridge stopped: {err}");
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "greentic-sorx: event bridge disabled, failed to connect to NATS at {nats_url}: {err}"
+                        );
+                    }
+                }
+            });
+        })
+        .map(|_| ())
+        .unwrap_or_else(|err| {
+            eprintln!("greentic-sorx: failed to spawn event-bridge thread: {err}");
+        });
+}
+
 fn ontology_hash_from_pack(pack: &Path) -> CliResult<String> {
     let pack = load_sorla_pack(pack).map_err(|err| CliError::pack(err.to_string()))?;
     let ontology =
@@ -2590,21 +2688,29 @@ fn ontology_graph_hash(ontology: &greentic_sorx_pack::OntologyAssets) -> String 
 fn normalize_or_prompt_start_answers(
     pack_name: &str,
     start_schema: &serde_json::Value,
-    answers: Option<PathBuf>,
+    answers: Option<answers_source::AnswersSource>,
     context: &SorxCommandContext,
 ) -> CliResult<greentic_sorx_core::SorxNormalizedAnswers> {
     let effective_schema = effective_start_schema(start_schema);
     let mut raw_answers = match answers {
-        Some(path) => {
+        Some(source) => {
+            let path = source.path().to_path_buf();
             let raw = fs::read_to_string(&path).map_err(|err| {
                 CliError::answers(format!("failed to read answers {}: {err}", path.display()))
             })?;
-            serde_json::from_str(&raw).map_err(|err| {
+            let parsed = serde_json::from_str(&raw).map_err(|err| {
                 CliError::answers(format!(
                     "answers {} are invalid JSON: {err}",
                     path.display()
                 ))
-            })?
+            })?;
+            // The answers have now been read into `parsed`; drop the source
+            // here (rather than at the end of `run_start`, or process exit)
+            // so a staged `env:NAME` file and its directory are removed as
+            // soon as they are no longer needed, not for the life of the
+            // running server.
+            drop(source);
+            parsed
         }
         None => serde_json::json!({}),
     };
@@ -3552,9 +3658,17 @@ fn run_mcp_start(pack: PathBuf, answers: PathBuf, context: &SorxCommandContext) 
         .map_err(|err| CliError::pack(err.to_string()))?;
     let tools = mcp_tools_from_metadata(pack.sorla_assets.mcp_tools_json.as_ref(), &router)
         .map_err(|err| CliError::pack(err.to_string()))?;
+    // `mcp start` stays an offline plan emitter (no server of its own). The
+    // live transport is served by `start` when MCP is enabled: a
+    // Streamable-HTTP JSON-RPC endpoint at `POST /v1/sorx/mcp`, gated by an
+    // OAuth bearer (Tenant-Manager JWT), advertised via
+    // `/.well-known/oauth-protected-resource`. See `mcp_jsonrpc` + `mcp_auth`.
     let encoded = serde_json::to_string_pretty(&serde_json::json!({
         "schema": "greentic.sorx.mcp.runtime.v1",
         "transport": "adapter_only",
+        "live_transport": "streamable-http",
+        "live_endpoint": "/v1/sorx/mcp",
+        "live_auth": "oauth-bearer",
         "bind": config.mcp.bind,
         "enabled": config.mcp.enabled,
         "tools": tools.tools
@@ -3564,13 +3678,15 @@ fn run_mcp_start(pack: PathBuf, answers: PathBuf, context: &SorxCommandContext) 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_start(
     pack: PathBuf,
     schema: bool,
-    answers: Option<PathBuf>,
+    answers: Option<answers_source::AnswersSource>,
     dry_run: bool,
     emit_answers: bool,
     _json: bool,
+    registry_path: Option<PathBuf>,
     context: &SorxCommandContext,
 ) -> CliResult<()> {
     if schema && (answers.is_some() || emit_answers) {
@@ -3599,9 +3715,17 @@ fn run_start(
             .map_err(|err| CliError::answers(err.to_string()))?;
         let bind = config.server.bind.clone();
         let public_base_url = config.server.public_base_url.clone();
+        let presence_tenant_id = config.tenant_id.clone();
+        let presence_environment = config.environment.clone();
         let initial_runtime_config =
             load_initial_runtime_config(&config.environment, context)?.map(|(_, config)| config);
-        let server = http_runtime::HttpRuntime::from_pack_with_runtime_config(
+        // Only enable the HTTP registry API when the operator explicitly opts
+        // in via `--registry` or `SORX_REGISTRY_PATH`; otherwise the
+        // `/v1/sorx/*` deployment/alias endpoints stay 501 (back-compat).
+        let server_registry_path = registry_path
+            .clone()
+            .or_else(|| std::env::var_os("SORX_REGISTRY_PATH").map(PathBuf::from));
+        let mut server = http_runtime::HttpRuntime::from_pack_with_runtime_config(
             "local",
             &pack,
             config,
@@ -3614,7 +3738,18 @@ fn run_start(
             } else {
                 CliError::runtime(message)
             }
-        })?;
+        })?
+        .with_registry_path(server_registry_path.clone());
+        // Opt-in, default-OFF: when SORX_ADMIN_ROLES_ENDPOINT and
+        // SORX_ADMIN_ROLES_SERVICE_KEY are set, the admin system-of-record
+        // becomes authoritative for caller roles and the self-asserted
+        // `x-greentic-caller-role` header is ignored. Absent => unchanged.
+        if let Some(overlay) = admin_roles::AdminRolesOverlay::from_env() {
+            eprintln!(
+                "greentic-sorx: admin-backed roles overlay enabled (self-asserted caller-role header ignored)"
+            );
+            server = server.with_admin_roles_overlay(std::sync::Arc::new(overlay));
+        }
         let listener = std::net::TcpListener::bind(&bind).map_err(|err| {
             CliError::runtime(format!("failed to bind HTTP server on {bind}: {err}"))
         })?;
@@ -3625,6 +3760,64 @@ fn run_start(
         eprintln!("greentic-sorx HTTP runtime listening on {base_url}");
         eprintln!("Sorx Business Manager: {base_url}/v1/sorx/manager");
         eprintln!("Sorx Business Manager alias: {base_url}/manager");
+        if server_registry_path.is_some() {
+            eprintln!("Sorx deployment registry API: {base_url}/v1/sorx/routing-table");
+        }
+        // Opt-in, default-OFF: when SORX_PRESENCE_NATS_URL is set (and this
+        // binary was built with the `presence-nats` feature), publish a
+        // best-effort SorxPresence boot announcement on
+        // `greentic.presence.<tenant>.sorx.<sor>` so NATS-based consumers can
+        // discover this instance without a directory lookup (push-discovery,
+        // epic #3 producer half). Building the presence payload itself is
+        // cheap and unconditional; publishing is a no-op when the feature is
+        // off or the env var is unset, and any connect/publish failure only
+        // logs a warning — HTTP serving is never affected.
+        let presence_subject =
+            presence_publish::presence_subject(&presence_tenant_id, &pack.pack_name);
+        let presence = presence_publish::build_presence(
+            &presence_tenant_id,
+            &presence_environment,
+            &pack.pack_name,
+            &pack.pack_version,
+            &base_url,
+            public_base_url.is_some(),
+            server.runtime_capabilities(),
+            chrono::Utc::now().to_rfc3339(),
+        );
+        presence_publish::publish_presence_on_boot(presence, presence_subject);
+        // Opt-in, default-OFF: when SORX_PRESENCE_NATS_URL is set (same gate
+        // as the boot announcement above) and the heartbeat is not disabled
+        // via SORX_PRESENCE_HEARTBEAT_SECS=0, periodically re-publish a
+        // presence (with a fresh ts on every tick) so consumers' soft-state
+        // directories don't evict this still-live instance. Best-effort,
+        // like the boot publish: `spawn_presence_heartbeat_if_enabled` is
+        // always compiled (its "enabled" check and the actual NATS/tokio
+        // work behind it are `presence-nats`-gated internally with a no-op
+        // stub), so this call site stays feature-agnostic. Rebuilding the
+        // presence template here (rather than cloning the one just consumed
+        // above) keeps that boot-publish path byte-for-byte unchanged when
+        // the feature is off or the env var is unset.
+        presence_publish::spawn_presence_heartbeat_if_enabled(
+            presence_publish::build_presence(
+                &presence_tenant_id,
+                &presence_environment,
+                &pack.pack_name,
+                &pack.pack_version,
+                &base_url,
+                public_base_url.is_some(),
+                server.runtime_capabilities(),
+                chrono::Utc::now().to_rfc3339(),
+            ),
+            presence_publish::presence_subject(&presence_tenant_id, &pack.pack_name),
+        );
+        // Opt-in, default-OFF: when GREENTIC_EVENTS_NATS_URL is set, start the
+        // NATS event bridge so the runtime can be driven over the events fabric
+        // (greentic.sorla.request.v1 -> response.v1) alongside HTTP. The bridge
+        // runs on a dedicated tokio runtime in a background thread so the
+        // synchronous HTTP serve loop below is unaffected; a NATS connect
+        // failure logs a warning and leaves HTTP serving fully intact.
+        #[cfg(feature = "events-nats")]
+        spawn_event_bridge_if_enabled(server.runtime_handle());
         return server
             .serve(listener)
             .map_err(|err| CliError::runtime(format!("HTTP server failed: {err}")));

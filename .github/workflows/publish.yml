@@ -145,12 +145,19 @@ jobs:
 
           metadata = json.load(sys.stdin)
           members = set(metadata.get("workspace_members", []))
+          # Same exclusions as the dev lane (REPO_MANIFEST dev-exclude-publishes):
+          # the CLI carries a git-only optional dep and a path dep without a
+          # version, so cargo publish rejects it; its binary ships through
+          # release-binaries. sorx-event-bridge is only consumed by the CLI and
+          # is not in the manifest `publishes` list.
+          excluded = {"greentic-sorx", "sorx-event-bridge"}
           publishable = {
               package["name"]: package
               for package in metadata["packages"]
               if (not members or package["id"] in members)
               and package.get("publish") is not False
               and package.get("publish") != []
+              and package["name"] not in excluded
           }
           visited = set()
           order = []

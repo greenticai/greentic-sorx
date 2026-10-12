@@ -28,6 +28,7 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
     - Applies tenant/pack/version namespaces to provider operations so local providers can isolate records per tenant and pack version.
     - Provides a `FoundationDbProviderAdapter` boundary that accepts `config_ref` or local/test direct config and returns `provider_unavailable` until a SORX-compatible FoundationDB store provider is wired.
     - Defines risk policy types, `PolicyEngine`, policy decisions, approval broker trait, local auto-approve/deny/pending brokers, structured `SorxAuditEvent`, and stdout/memory/disabled audit sinks.
+    - Dispatches declared RuntimeConfig.extensions bindings via BoundControl/ObserverHook; ships the native greentic.sorx.audit.v1 observer.
     - Defines Sorx Business Manager context/channel/capability types, manager view models, render-time policy decisions/filtering, locale catalog/fallback helpers, and provider-neutral Adaptive Card JSON renderers.
     - Loads and validates MCP tool definitions from SoRLa `mcp-tools.json` metadata.
     - Provides an `McpRuntime` adapter that invokes MCP tools through the same `SorxRuntime` router, policy, provider, approval, idempotency, and audit path as direct and HTTP calls.
@@ -317,6 +318,10 @@ The current repository has completed the PR 01 scaffold, PR 02 pack loader/docto
 - **Path:** `docs/deployments.md`
   - **Role:** Deployment registry guide.
   - **Key functionality:** Documents the PR 12/15 local JSON registry, deployment and alias commands, deployment-scoped route listing, validation-gated public promotion, rollback, old-deployment retirement, states, and HTTP diagnostics.
+
+- **Path:** `docs/migrations.md`
+  - **Role:** Migration runner guide.
+  - **Key functionality:** Documents the PR 0.3 migration runner — additive/backward/breaking classification, idempotence via the namespace-scoped ledger (local JSON file + FoundationDB subspace), the `apply_pending_migrations` orchestration core, the `MigrationLedger` trait, the activation gate, where migrations come from in the pack `executable-contract.json`, and the `gtc start` wiring (LocalMigrationLedger via `SORX_MIGRATION_LEDGER_PATH`; FoundationDB-backed ledger deferred).
 
 - **Path:** `docs/ghcr-webhooks.md`
   - **Role:** GHCR publish webhook guide.

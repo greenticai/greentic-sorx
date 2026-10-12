@@ -1,0 +1,7 @@
+package greentic:extension-host@0.1.0;
+
+interface logging {
+  enum level { trace, debug, info, warn, error }
+  log: func(level: level, target: string, message: string);
+  log-kv: func(level: level, target: string, message: string, fields: list<tuple<string, string>>);
+}

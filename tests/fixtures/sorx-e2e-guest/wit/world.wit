@@ -1,0 +1,7 @@
+package greentic:sorx-e2e-guest@0.1.0;
+
+world guest {
+  import greentic:extension-host/logging@0.1.0;
+  export greentic:extension-sorx/control@0.1.0;
+  export greentic:extension-sorx/observe@0.1.0;
+}

@@ -172,6 +172,77 @@ When `start --answers` runs, the local HTTP runtime serves:
 Mutating routes go through the same runtime path as MCP adapter calls: provider
 resolution, policy checks, idempotency handling, and audit events.
 
+## Business Events
+
+SORX publishes business events as canonical Greentic `EventEnvelope`s
+(from `greentic-types`) on every record create, update, and delete, and
+whenever a command step runs `emit_event`.  Publication is best-effort and
+never fails the originating business operation.
+
+### Configuration
+
+Add an `events` section to your startup answers file:
+
+```yaml
+events:
+  sink: nats            # disabled (default) | stdout | nats
+  nats_url: "nats://localhost:4222"
+  subject_prefix: "greentic.events"
+```
+
+The `sink` field selects the delivery backend.  `disabled` (the default)
+discards all events silently.  `stdout` prints JSON envelopes to standard
+output and is useful for local development.  `nats` requires the
+`events-nats` cargo feature (not included in the default build) and a valid
+`nats_url`.
+
+### Topics and NATS subjects
+
+Each event carries a **topic** that follows one of two patterns:
+
+- Entity lifecycle events: `sorla.<pack>.<Entity>.<operation>` — for example
+  `sorla.landlord.Tenant.created`.  The operation is one of `created`,
+  `updated`, or `deleted`.
+- Command-emitted (domain) events: `sorla.<pack>.<event_name>` — for example
+  `sorla.landlord.RecordRemoved`.
+
+Topic segments are sanitized: any character that is not ASCII alphanumeric,
+a hyphen, or an underscore is replaced with a hyphen.
+
+When the NATS sink is active, each topic is published to a NATS subject of
+the form `<subject_prefix>.<tenant>.<topic>` — for example
+`greentic.events.acme.sorla.landlord.Tenant.created`.
+
+### Delivery contract
+
+Delivery is at-most-once.  A full queue or NATS outage causes events to be
+dropped with a log line; the business operation is never rolled back or
+retried.  Command events remain persisted in the canonical store regardless
+of sink availability.
+
+One important nuance for the NATS sink: if the initial NATS connection at
+startup fails, the background publisher exits and events are dropped with log
+lines until the process is restarted.  After a successful initial connection,
+`async-nats` handles transient outages and reconnects automatically.
+
+### Discovery
+
+Topics are advertised as capability offers in the `/v1/sorx/routes` response
+under the contract `greentic.sorx.business-event-topic.v1`.  Each offer
+includes a `topic` metadata field containing the exact topic string so
+consumers can subscribe without guessing the sanitized form.
+
+### Feature flag
+
+The NATS sink is compiled in only when the `events-nats` cargo feature is
+enabled:
+
+```bash
+cargo build --features events-nats
+```
+
+The `disabled` and `stdout` sinks are always available regardless of features.
+
 ## Startup Answers
 
 SORX starts from an answer file. The file can be either the raw SORX answer
