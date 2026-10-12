@@ -122,15 +122,9 @@ pub fn verify_token(
     let kid = header.kid.ok_or_else(|| "token missing kid".to_string())?;
 
     // Peek the (unverified) issuer to pick the JWKS + enforce the allow-list.
-    let unverified: RawClaims = {
-        let mut v = Validation::new(Algorithm::RS256);
-        v.insecure_disable_signature_validation();
-        v.validate_aud = false;
-        v.validate_exp = false;
-        decode::<RawClaims>(token, &DecodingKey::from_secret(b"x"), &v)
-            .map_err(|e| format!("undecodable claims: {e}"))?
-            .claims
-    };
+    let unverified: RawClaims = jsonwebtoken::dangerous::insecure_decode::<RawClaims>(token)
+        .map_err(|e| format!("undecodable claims: {e}"))?
+        .claims;
     if !cfg.issuers.iter().any(|i| i == &unverified.iss) {
         return Err(format!("untrusted issuer {}", unverified.iss));
     }
