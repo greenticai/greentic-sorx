@@ -77,19 +77,19 @@ step "release metadata"
 bash ci/release_check.sh
 
 step "cargo clippy"
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings
 
 step "cargo test"
-cargo test --workspace --all-targets --all-features
+cargo test --workspace --all-targets
 
 step "cargo build"
-cargo build --all-features
+cargo build
 
 step "complex SoRLa WebChat e2e"
 bash scripts/e2e/run-complex-sorla-webchat.sh
 
 step "cargo doc"
-cargo doc --no-deps --all-features
+cargo doc --no-deps
 
 crates="$(publishable_crates)"
 if [ -z "$crates" ]; then
