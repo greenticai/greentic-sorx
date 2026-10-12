@@ -124,12 +124,16 @@ if "if: github.ref_type == 'tag'" not in binaries_text:
     fail("release-binaries workflow must run the shared binary release workflow on tag refs")
 
 members = set(metadata.get("workspace_members", []))
+# Mirror publish.yml: the CLI (git-only optional dep) and sorx-event-bridge are
+# not published to crates.io; the CLI binary ships via release-binaries.
+excluded = {"greentic-sorx", "sorx-event-bridge"}
 publishable = {
     package["name"]: package
     for package in metadata["packages"]
     if (not members or package["id"] in members)
     and package.get("publish") is not False
     and package.get("publish") != []
+    and package["name"] not in excluded
 }
 visited = set()
 order = []
@@ -152,7 +156,7 @@ def visit(name: str) -> None:
 for name in publishable:
     visit(name)
 
-if order != ["greentic-sorx-core", "greentic-sorx-pack", "greentic-sorx"]:
+if order != ["greentic-sorx-core", "greentic-sorx-pack"]:
     fail(f"unexpected crates.io publish order: {order!r}")
 
 root_json = sorted(path.name for path in ROOT_I18N.glob("*.json"))
