@@ -98,7 +98,7 @@ tempfile.workspace = true
 # enabled. `time` stays here for the events-nats/presence-nats code paths
 # that used to pull it in through this same (previously optional) dependency.
 tokio = { workspace = true, features = ["rt", "time"] }
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 zip.workspace = true
 
