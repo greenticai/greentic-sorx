@@ -24,7 +24,7 @@ greentic-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-foundationdb = { version = "0.9", features = ["fdb-7_3"], optional = true }
+foundationdb = { version = "0.11", features = ["fdb-7_3"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 postgres = { version = "0.19", optional = true }
 r2d2 = { version = "0.8", optional = true }
