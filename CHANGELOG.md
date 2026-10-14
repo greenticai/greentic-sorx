@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The manager no longer asks a person to type audit timestamps. A field named
+  `created_at` / `updated_at` (also `createdAt`, `updatedAt`, `modified_at`) that
+  is a string or a date/time is system-managed: the create form hides it, the
+  edit form shows it read-only, and a create or update submit stamps it (a
+  created-at only on create and only when the caller sent none; an updated-at on
+  every create and update). Numbers and unrelated date fields keep their input.
 - `start`/`run` pull an `oci://<region>-docker.pkg.dev/...` pack with the
   attached service account's GCP metadata-server token (`oauth2accesstoken`)
   when `OCI_USERNAME`/`OCI_PASSWORD` are not set, so a Cloud Run sorx service

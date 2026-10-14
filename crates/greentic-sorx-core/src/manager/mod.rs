@@ -21,5 +21,5 @@ pub use policy::{ManagerPolicyDecision, ManagerPolicyEffect};
 pub use view_model::{
     ManagerActionView, ManagerFieldRelationshipView, ManagerFieldView, ManagerNavItem,
     ManagerPolicyHint, ManagerRecordView, ManagerRelationshipView, ManagerViewModel,
-    generate_manager_view,
+    SystemTimestamp, generate_manager_view, system_timestamp_kind,
 };

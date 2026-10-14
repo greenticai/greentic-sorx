@@ -2408,6 +2408,7 @@ impl HttpRuntime {
             merge_manager_submit_fields(&mut input, &body, &view, record);
             fill_generated_manager_fields(&mut input, &view, record, &endpoint_id);
             combine_manager_datetime_inputs(&mut input, &view, record);
+            stamp_system_timestamps(&mut input, &view, record, endpoint);
             stamp_manager_created_at(&mut input, endpoint);
         }
         trim_manager_submit_string_values(&mut input);
@@ -5330,6 +5331,66 @@ fn generated_manager_uuid(endpoint_id: &str, record_name: &str, field_name: &str
         &hex[17..20],
         &hex[20..32]
     )
+}
+
+/// Fill the audit timestamps a person should never type (`created_at`,
+/// `updated_at` and their camelCase / `modified_at` spellings).
+///
+/// The create form hides these fields, so the submit has to supply them: a
+/// created-at is stamped on a create when the caller sent none, and an
+/// updated-at is stamped on every create and update. Anything else this handler
+/// serves (a custom command, a delete) is left untouched, since stamping a field
+/// its input schema does not declare could be refused.
+fn stamp_system_timestamps(
+    input: &mut Value,
+    view: &greentic_sorx_core::ManagerViewModel,
+    record_name: &str,
+    endpoint: &EndpointDefinition,
+) {
+    use greentic_sorx_core::{SystemTimestamp, system_timestamp_kind};
+
+    let is_create = matches!(endpoint.operation, OperationKind::Create);
+    let is_update = matches!(endpoint.operation, OperationKind::Update);
+    if !is_create && !is_update {
+        return;
+    }
+    let Some(object) = input.as_object_mut() else {
+        return;
+    };
+    let Some(record) = view
+        .records
+        .iter()
+        .find(|candidate| candidate.record == record_name)
+    else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    for field in &record.fields {
+        let Some(kind) = system_timestamp_kind(&field.name, field.json_type.as_deref()) else {
+            continue;
+        };
+        let already_set = object
+            .get(&field.name)
+            .is_some_and(manager_scalar_has_sort_value);
+        let stamp = match kind {
+            SystemTimestamp::Created => is_create && !already_set,
+            SystemTimestamp::Updated => true,
+        };
+        if !stamp {
+            continue;
+        }
+        let value = match field
+            .json_type
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("date") => now.format("%Y-%m-%d").to_string(),
+            Some("time") => now.format("%H:%M:%SZ").to_string(),
+            _ => now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        };
+        object.insert(field.name.clone(), Value::String(value));
+    }
 }
 
 fn stamp_manager_created_at(input: &mut Value, endpoint: &EndpointDefinition) {
@@ -10524,6 +10585,81 @@ mod tests {
             tenant["columns"][1]["items"][0]["actions"][0]["data"]["routeToCardId"],
             "pickers_Tenant"
         );
+    }
+
+    fn audit_stamp_view() -> ManagerViewModel {
+        let mut view = datetime_manager_view();
+        let template = view.records[0].fields[0].clone();
+        view.records[0].fields = ["created_at", "updated_at", "scheduled_at"]
+            .iter()
+            .map(|name| ManagerFieldView {
+                name: (*name).to_string(),
+                json_type: Some("string".to_string()),
+                required: true,
+                ..template.clone()
+            })
+            .collect();
+        view
+    }
+
+    fn endpoint_for(operation: &str) -> EndpointDefinition {
+        serde_json::from_value(json!({
+            "endpoint_id": "record_alpha.write",
+            "operation_id": "record_alpha.write",
+            "operation": operation,
+            "method": "post",
+            "path": "/v1/agent/record-alpha/write",
+            "entity": "RecordAlpha",
+            "collection": "record_alpha",
+            "provider_binding": "store",
+            "risk": "low",
+            "approval": null,
+            "input_schema": null,
+            "output_schema": null,
+            "view": {"read_only": false, "input_field_map": {}, "output_field_map": {}},
+            "query_plan": {"index": null, "traversal": null}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn create_stamps_both_audit_timestamps_and_leaves_other_fields_alone() {
+        let view = audit_stamp_view();
+        let mut input = json!({"scheduled_at": "2026-11-01T09:00:00Z"});
+        stamp_system_timestamps(&mut input, &view, "RecordAlpha", &endpoint_for("create"));
+        assert!(
+            input["created_at"]
+                .as_str()
+                .is_some_and(|v| v.ends_with('Z') && v.contains('T'))
+        );
+        assert!(input["updated_at"].as_str().is_some());
+        assert_eq!(input["scheduled_at"], "2026-11-01T09:00:00Z");
+    }
+
+    #[test]
+    fn update_refreshes_updated_at_but_never_rewrites_created_at() {
+        let view = audit_stamp_view();
+        let mut input =
+            json!({"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"});
+        stamp_system_timestamps(&mut input, &view, "RecordAlpha", &endpoint_for("update"));
+        assert_eq!(input["created_at"], "2026-01-01T00:00:00Z");
+        assert_ne!(input["updated_at"], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn a_create_keeps_a_created_at_the_caller_supplied() {
+        let view = audit_stamp_view();
+        let mut input = json!({"created_at": "2025-05-05T05:05:05Z"});
+        stamp_system_timestamps(&mut input, &view, "RecordAlpha", &endpoint_for("create"));
+        assert_eq!(input["created_at"], "2025-05-05T05:05:05Z");
+    }
+
+    #[test]
+    fn other_operations_are_not_stamped() {
+        let view = audit_stamp_view();
+        let mut input = json!({});
+        stamp_system_timestamps(&mut input, &view, "RecordAlpha", &endpoint_for("delete"));
+        assert_eq!(input, json!({}));
     }
 
     fn datetime_manager_view() -> ManagerViewModel {

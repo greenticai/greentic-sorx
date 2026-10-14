@@ -86,10 +86,11 @@ pub use manager::{
     ManagerFieldRelationshipView, ManagerFieldView, ManagerLocaleBundle, ManagerLocaleCatalog,
     ManagerLocaleContext, ManagerNavItem, ManagerPolicyDecision, ManagerPolicyEffect,
     ManagerPolicyHint, ManagerPolicySet, ManagerRecordView, ManagerRelationshipView,
-    ManagerViewModel, SorxManagerContext, TextDirection, filter_manager_view, format_manager_value,
-    generate_manager_view, humanize_identifier, localize_manager_view, render_dashboard_card,
-    render_record_create_card, render_record_detail_card, render_record_list_card,
-    render_record_picker_card, render_relationship_summary_card, resolve_manager_context,
+    ManagerViewModel, SorxManagerContext, SystemTimestamp, TextDirection, filter_manager_view,
+    format_manager_value, generate_manager_view, humanize_identifier, localize_manager_view,
+    render_dashboard_card, render_record_create_card, render_record_detail_card,
+    render_record_list_card, render_record_picker_card, render_relationship_summary_card,
+    resolve_manager_context, system_timestamp_kind,
 };
 pub use mcp::{McpRuntime, McpToolDefinition, McpToolList, mcp_tools_from_metadata};
 pub use metrics_runtime::{
