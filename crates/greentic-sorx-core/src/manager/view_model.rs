@@ -294,7 +294,8 @@ impl RecordBuilder {
                     generated: generated_field(&self.record, name, property),
                     relationship: None,
                     required: required.contains(name.as_str()),
-                    read_only: false,
+                    read_only: system_timestamp_kind(name, field_type(property).as_deref())
+                        .is_some(),
                     redacted: false,
                     value: None,
                     hidden: false,
@@ -467,7 +468,44 @@ fn generated_field(record: &str, name: &str, property: &Value) -> bool {
     {
         return true;
     }
+    if system_timestamp_kind(name, field_type(property).as_deref()).is_some() {
+        return true;
+    }
     field_type(property).as_deref() == Some("uuid") && generated_uuid_field_name(record, name)
+}
+
+/// Which audit timestamp a field is, when it is one the system should manage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemTimestamp {
+    /// Set once, when the record is created.
+    Created,
+    /// Set on every create and update.
+    Updated,
+}
+
+/// A field named like an audit timestamp (`created_at`, `updatedAt`, ...) whose
+/// type is a string or a date/time is managed by the system, never typed by a
+/// person: the create form hides it, the edit form shows it read-only and the
+/// submit handler stamps it. A typed number or an id that merely shares the name
+/// is left alone.
+pub fn system_timestamp_kind(name: &str, json_type: Option<&str>) -> Option<SystemTimestamp> {
+    let typed_like_a_timestamp = matches!(
+        json_type.map(str::to_ascii_lowercase).as_deref(),
+        None | Some("string" | "date" | "time" | "datetime" | "timestamp")
+    );
+    if !typed_like_a_timestamp {
+        return None;
+    }
+    let normalized: String = name
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    match normalized.as_str() {
+        "createdat" => Some(SystemTimestamp::Created),
+        "updatedat" | "modifiedat" => Some(SystemTimestamp::Updated),
+        _ => None,
+    }
 }
 
 fn generated_uuid_field_name(record: &str, name: &str) -> bool {
@@ -590,6 +628,37 @@ mod tests {
         assert_eq!(view.navigation[0].record, "RecordAlpha");
         assert_eq!(view.records[0].fields[0].name, "id");
         assert_eq!(view.actions[0].endpoint_id, "record_alpha.create");
+    }
+
+    #[test]
+    fn audit_timestamps_are_system_managed_but_other_fields_are_not() {
+        use super::{SystemTimestamp, system_timestamp_kind};
+        for name in ["created_at", "createdAt", "Created-At"] {
+            assert_eq!(
+                system_timestamp_kind(name, Some("string")),
+                Some(SystemTimestamp::Created)
+            );
+        }
+        for name in ["updated_at", "updatedAt", "modified_at"] {
+            assert_eq!(
+                system_timestamp_kind(name, Some("datetime")),
+                Some(SystemTimestamp::Updated)
+            );
+        }
+        assert_eq!(
+            system_timestamp_kind("created_at", None),
+            Some(SystemTimestamp::Created)
+        );
+        // A number or id that merely shares the name, and unrelated dates, are left to the person.
+        assert_eq!(system_timestamp_kind("created_at", Some("integer")), None);
+        assert_eq!(
+            system_timestamp_kind("scheduled_at", Some("datetime")),
+            None
+        );
+        assert_eq!(
+            system_timestamp_kind("lease_start_date", Some("date")),
+            None
+        );
     }
 
     #[test]
