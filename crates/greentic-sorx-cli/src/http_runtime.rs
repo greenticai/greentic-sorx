@@ -2519,6 +2519,11 @@ impl HttpRuntime {
                 );
             }
         }
+        if matches!(operation, "create" | "update")
+            && let Some(object) = input.as_object_mut()
+        {
+            apply_system_timestamps(object, &model_record.fields, operation == "create");
+        }
         trim_manager_submit_string_values(&mut input);
         let Some(binding) = self.manager_record_binding(record_name) else {
             return error_response(
@@ -4067,10 +4072,13 @@ fn manager_model_field(record_name: &str, field: &Value) -> Option<ManagerFieldV
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let json_type = manager_model_field_type(name, field);
+    let system_timestamp =
+        greentic_sorx_core::system_timestamp_kind(name, json_type.as_deref()).is_some();
     let generated = field
         .get("generated")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+        || system_timestamp
         || manager_model_generated_identifier_field(record_name, name, json_type.as_deref());
     Some(ManagerFieldView {
         name: name.to_string(),
@@ -4098,7 +4106,8 @@ fn manager_model_field(record_name: &str, field: &Value) -> Option<ManagerFieldV
             .get("read_only")
             .or_else(|| field.get("readOnly"))
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(false)
+            || system_timestamp,
         redacted: sensitive,
         value: None,
         hidden: field
@@ -5347,8 +5356,6 @@ fn stamp_system_timestamps(
     record_name: &str,
     endpoint: &EndpointDefinition,
 ) {
-    use greentic_sorx_core::{SystemTimestamp, system_timestamp_kind};
-
     let is_create = matches!(endpoint.operation, OperationKind::Create);
     let is_update = matches!(endpoint.operation, OperationKind::Update);
     if !is_create && !is_update {
@@ -5364,8 +5371,21 @@ fn stamp_system_timestamps(
     else {
         return;
     };
+    apply_system_timestamps(object, &record.fields, is_create);
+}
+
+/// The stamping rule itself, shared by the endpoint path above and the
+/// model-record path (`*.model_create` / `*.model_update`), which does not go
+/// through an endpoint definition at all.
+fn apply_system_timestamps(
+    object: &mut Map<String, Value>,
+    fields: &[greentic_sorx_core::ManagerFieldView],
+    is_create: bool,
+) {
+    use greentic_sorx_core::{SystemTimestamp, system_timestamp_kind};
+
     let now = chrono::Utc::now();
-    for field in &record.fields {
+    for field in fields {
         let Some(kind) = system_timestamp_kind(&field.name, field.json_type.as_deref()) else {
             continue;
         };
@@ -10652,6 +10672,45 @@ mod tests {
         let mut input = json!({"created_at": "2025-05-05T05:05:05Z"});
         stamp_system_timestamps(&mut input, &view, "RecordAlpha", &endpoint_for("create"));
         assert_eq!(input["created_at"], "2025-05-05T05:05:05Z");
+    }
+
+    #[test]
+    fn model_record_audit_timestamps_without_a_type_are_system_managed() {
+        for name in ["created_at", "updated_at"] {
+            let field =
+                manager_model_field("Landlord", &json!({"name": name, "required": true})).unwrap();
+            assert!(field.generated, "{name} should be generated");
+            assert!(field.read_only, "{name} should be read-only");
+        }
+        let email =
+            manager_model_field("Landlord", &json!({"name": "email", "required": true})).unwrap();
+        assert!(!email.generated && !email.read_only);
+    }
+
+    #[test]
+    fn model_record_create_and_update_stamp_the_audit_fields() {
+        let fields: Vec<_> = ["created_at", "updated_at", "email"]
+            .iter()
+            .map(|name| manager_model_field("Landlord", &json!({"name": name})).unwrap())
+            .collect();
+        let mut created = serde_json::Map::new();
+        created.insert("email".to_string(), json!("a@b.c"));
+        apply_system_timestamps(&mut created, &fields, true);
+        assert!(
+            created["created_at"]
+                .as_str()
+                .is_some_and(|v| v.contains('T'))
+        );
+        assert!(created["updated_at"].as_str().is_some());
+        assert_eq!(created["email"], "a@b.c");
+
+        let mut patch = serde_json::Map::new();
+        apply_system_timestamps(&mut patch, &fields, false);
+        assert!(
+            patch.get("created_at").is_none(),
+            "an update never sets created_at"
+        );
+        assert!(patch["updated_at"].as_str().is_some());
     }
 
     #[test]
