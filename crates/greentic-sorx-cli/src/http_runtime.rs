@@ -1,3 +1,6 @@
+#[path = "model_create_validation.rs"]
+mod model_create_validation;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -1899,7 +1902,15 @@ impl HttpRuntime {
                     &self.manager_hierarchy,
                     &context.roles,
                 );
-                apply_manager_record_fields(&mut scoped, &self.manager_record_fields);
+                // This is an explicit business-action form. Keep its scoped
+                // input schema; model CRUD/bulk validation uses manager_view.
+                let other_record_fields = self
+                    .manager_record_fields
+                    .iter()
+                    .filter(|(name, _)| name.as_str() != record_name)
+                    .map(|(name, fields)| (name.clone(), fields.clone()))
+                    .collect();
+                apply_manager_record_fields(&mut scoped, &other_record_fields);
                 apply_manager_ontology_metadata(&mut scoped, &self.manager_ontology);
                 carry_manager_field_relationships(&mut scoped, &view);
                 self.populate_manager_relationship_choices(&mut scoped, &context.tenant_id);
@@ -2184,6 +2195,23 @@ impl HttpRuntime {
     }
 
     fn manager_record_binding(&self, record: &str) -> Option<ProviderBinding> {
+        // Canonical record storage comes from its explicit binding/model,
+        // never from the first business action associated with that entity.
+        if let Some(binding) = self.runtime.config.bindings.entity_bindings.get(record) {
+            return Some(binding.clone());
+        }
+        if let Some(model) = self.manager_model_records.get(record) {
+            return Some(ProviderBinding {
+                entity: model.record.clone(),
+                provider_id: self
+                    .runtime
+                    .config
+                    .bindings
+                    .default_provider_id()
+                    .to_string(),
+                collection: model.collection.clone(),
+            });
+        }
         if let Some(endpoint) = self
             .runtime
             .router
@@ -2194,18 +2222,7 @@ impl HttpRuntime {
         {
             return Some(binding);
         }
-        self.manager_model_records
-            .get(record)
-            .map(|model_record| ProviderBinding {
-                entity: model_record.record.clone(),
-                provider_id: self
-                    .runtime
-                    .config
-                    .bindings
-                    .default_provider_id()
-                    .to_string(),
-                collection: model_record.collection.clone(),
-            })
+        None
     }
 
     fn filter_manager_rows_by_parent_context(
@@ -2488,10 +2505,31 @@ impl HttpRuntime {
                 &format!("{operation} action is not available for this record"),
             );
         }
+        if body
+            .get("record")
+            .and_then(Value::as_str)
+            .is_some_and(|record| record != record_name)
+            || body
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != endpoint_id)
+        {
+            return error_response(
+                400,
+                "SORX_MANAGER_SUBMIT_INVALID",
+                "record and operation must match the exact model action",
+            );
+        }
         let mut input = body
             .get("input")
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
+        if operation == "create"
+            && let Err(error) =
+                model_create_validation::validate_supplied(model_record, &input, body)
+        {
+            return sorx_error_response(400, error);
+        }
         let Some(object) = input.as_object_mut() else {
             return error_response(
                 400,
@@ -2525,6 +2563,46 @@ impl HttpRuntime {
             apply_system_timestamps(object, &model_record.fields, operation == "create");
         }
         trim_manager_submit_string_values(&mut input);
+        if operation == "create"
+            && let Err(error) = model_create_validation::validate(model_record, &input)
+        {
+            return sorx_error_response(400, error);
+        }
+        let kind = match operation {
+            "create" => OperationKind::Create,
+            "update" => OperationKind::Update,
+            "delete" => OperationKind::Delete,
+            _ => {
+                return error_response(
+                    400,
+                    "SORX_MANAGER_SUBMIT_INVALID",
+                    "unsupported model action",
+                );
+            }
+        };
+        let invocation = EndpointInvocation {
+            tenant_id: context.tenant_id.clone(),
+            endpoint_id: endpoint_id.to_string(),
+            operation_id: endpoint_id.to_string(),
+            input: input.clone(),
+            caller: context.caller(),
+            idempotency_key: body
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            source: InvocationSource::Http,
+        };
+        if self
+            .runtime
+            .record_authorization_denial(record_name, &kind, &invocation)
+            .is_some()
+        {
+            return error_response(
+                403,
+                "SORX_MANAGER_ACTION_FORBIDDEN",
+                "record permission denied",
+            );
+        }
         let Some(binding) = self.manager_record_binding(record_name) else {
             return error_response(
                 404,
@@ -4034,20 +4112,13 @@ fn manager_model_records(pack: &LoadedSorlaPack) -> BTreeMap<String, ManagerMode
         .unwrap_or_default()
 }
 
-fn manager_model_access_roles(record: &Value, operation: &str) -> Vec<String> {
-    record
-        .get("access")
-        .and_then(|access| access.get(operation))
-        .and_then(|create| create.get("roles"))
-        .and_then(Value::as_array)
-        .map(|roles| {
-            roles
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+fn manager_model_access_roles(record: &Value, operation: &str) -> AuthorizationRoles {
+    parse_auth_roles(
+        record
+            .get("access")
+            .and_then(|access| access.get(operation))
+            .and_then(|access| access.get("roles")),
+    )
 }
 
 fn manager_default_collection(record_name: &str) -> String {
@@ -4581,9 +4652,9 @@ struct ManagerModelRecord {
     label: String,
     plural_label: String,
     fields: Vec<ManagerFieldView>,
-    create_roles: Vec<String>,
-    update_roles: Vec<String>,
-    delete_roles: Vec<String>,
+    create_roles: AuthorizationRoles,
+    update_roles: AuthorizationRoles,
+    delete_roles: AuthorizationRoles,
 }
 
 fn manager_record_hierarchy(gateway: &Value) -> ManagerRecordHierarchy {
@@ -4960,6 +5031,13 @@ fn apply_manager_model_records(
         });
     }
     for model_record in records_by_name.values() {
+        if let Some(record) = view
+            .records
+            .iter_mut()
+            .find(|record| record.record == model_record.record)
+        {
+            record.collection = model_record.collection.clone();
+        }
         apply_manager_model_record_action(view, model_record, roles, "create");
         apply_manager_model_record_action(view, model_record, roles, "update");
         apply_manager_model_record_action(view, model_record, roles, "delete");
@@ -4972,7 +5050,16 @@ fn apply_manager_model_record_action(
     roles: &[String],
     operation: &str,
 ) {
-    if manager_record_action(view, &model_record.record, operation).is_some()
+    if (operation != "create"
+        && manager_record_action(view, &model_record.record, operation).is_some())
+        || view.actions.iter().any(|action| {
+            action.endpoint_id
+                == format!(
+                    "{}.model_{}",
+                    manager_key_like(&model_record.record),
+                    operation
+                )
+        })
         || !manager_model_record_can_perform(model_record, roles, operation)
     {
         return;
@@ -5010,10 +5097,14 @@ fn manager_model_record_can_perform(
         "delete" => &model_record.delete_roles,
         _ => return false,
     };
-    allowed_roles.is_empty()
-        || allowed_roles
-            .iter()
-            .any(|role| roles.iter().any(|candidate| candidate == role))
+    authorization_roles_match(
+        &AuthorizationRequirement {
+            roles: allowed_roles.clone(),
+            policies: Vec::new(),
+            conditions: None,
+        },
+        roles,
+    )
 }
 
 fn apply_manager_record_fields(
@@ -5024,16 +5115,14 @@ fn apply_manager_record_fields(
         let Some(model_fields) = fields_by_record.get(&record.record) else {
             continue;
         };
-        let mut existing = record
-            .fields
+        // The compiled record model is authoritative. Endpoint inputs include
+        // business-action arguments and child foreign keys, not record fields.
+        record.fields = model_fields.clone();
+        record.create_field_names = model_fields
             .iter()
+            .filter(|field| !field.read_only)
             .map(|field| field.name.clone())
-            .collect::<BTreeSet<_>>();
-        for field in model_fields {
-            if existing.insert(field.name.clone()) {
-                record.fields.push(field.clone());
-            }
-        }
+            .collect();
     }
 }
 
@@ -8313,6 +8402,7 @@ impl HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    include!("model_create_regression_tests.rs");
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
