@@ -635,8 +635,19 @@ impl SorxRuntime {
             return Some(reason);
         }
         let record = endpoint.entity.as_deref()?;
+        self.record_authorization_denial(record, &endpoint.operation, invocation)
+    }
+
+    /// The same record authorization gate for endpoint and native model CRUD.
+    /// Native manager operations must not bypass record policies/conditions.
+    pub fn record_authorization_denial(
+        &self,
+        record: &str,
+        operation: &OperationKind,
+        invocation: &EndpointInvocation,
+    ) -> Option<String> {
         let access = self.pack.record_access.get(record)?;
-        let auth = match endpoint.operation {
+        let auth = match operation {
             OperationKind::Get | OperationKind::Query => access.read.as_ref(),
             OperationKind::Create => access.create.as_ref(),
             OperationKind::Update => access.update.as_ref(),
@@ -648,7 +659,7 @@ impl SorxRuntime {
         {
             return Some(format!(
                 "record `{record}` {} access roles did not match principal",
-                operation_access_name(&endpoint.operation)
+                operation_access_name(operation)
             ));
         }
         if let Some(auth) = auth
@@ -657,7 +668,7 @@ impl SorxRuntime {
                 AuthorizationPolicyResource::Record {
                     record: record.to_string(),
                 },
-                operation_access_name(&endpoint.operation),
+                operation_access_name(operation),
                 invocation,
             )
         {

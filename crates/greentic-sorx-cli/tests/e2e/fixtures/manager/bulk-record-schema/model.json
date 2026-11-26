@@ -1,0 +1,214 @@
+{
+  "records": [
+    {
+      "name": "network_element",
+      "fields": [
+        {
+          "name": "element_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "hostname",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "vendor",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "equipment_type",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "network_domain",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "site_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "operational_status",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "administrative_status",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "criticality",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "installation_date",
+          "type": "date",
+          "required": false
+        },
+        {
+          "name": "source_references",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "observed_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "network_interface",
+      "fields": [
+        {
+          "name": "interface_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "network_element_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "interface_name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "interface_type",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "capacity_mbps",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "administrative_status",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "operational_status",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "source_references",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "observed_at",
+          "type": "datetime",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "source_system",
+      "fields": [
+        {
+          "name": "source_system_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "source_name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "managed_domains",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "expected_refresh_interval_minutes",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "last_successful_sync_at",
+          "type": "datetime",
+          "required": false
+        },
+        {
+          "name": "data_freshness_status",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "source_observation",
+      "fields": [
+        {
+          "name": "observation_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "source_system_id",
+          "type": "uuid",
+          "required": true
+        },
+        {
+          "name": "external_record_id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "canonical_record_id",
+          "type": "uuid",
+          "required": false
+        },
+        {
+          "name": "observed_attributes",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "observed_relationships",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "source_observed_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "ingested_at",
+          "type": "datetime",
+          "required": true
+        },
+        {
+          "name": "import_batch_id",
+          "type": "string",
+          "required": false
+        }
+      ]
+    }
+  ]
+}
